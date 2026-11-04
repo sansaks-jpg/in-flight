@@ -8,6 +8,12 @@ export interface PanelData {
   dest: { id: string; name: string; brg: number; distNm: number; eteMin: number } | null;
   ils: { valid: boolean; loc: number; gs: number; ident: string; distNm: number } | null;
   warn: string[]; aglFt: number; alphaFrac: number; time: number; thrustPct: number; fuelFlowKgH: number;
+  wind?: { dir: number; kt: number; cross: number };
+  activeWp?: { name: string; distNm: number; etaMin: number } | null;
+  flightPhase?: string;
+  vSpeeds?: { v1: number; vr: number; v2: number; vapp: number };
+  qnhInHg?: number;
+  oatC?: number;
 }
 const D = Math.PI / 180;
 type C = CanvasRenderingContext2D;
@@ -132,40 +138,98 @@ export function drawPFD(g: C, W: number, H: number, d: PanelData, s: AircraftSpe
   const cx = W / 2, cy = H * 0.5;
   g.save(); g.beginPath(); g.rect(60, 50, W - 120, H - 110); g.clip(); g.translate(cx, cy); g.rotate(-d.bank);
   const ppd = 7.2, py = d.pitch * ppd;
-  const sky = g.createLinearGradient(0, -400 + py, 0, py); sky.addColorStop(0, '#1d57b8'); sky.addColorStop(1, '#58a4ee'); g.fillStyle = sky; g.fillRect(-600, -600 + py, 1200, 600);
-  const gr = g.createLinearGradient(0, py, 0, py + 400); gr.addColorStop(0, '#8a5a30'); gr.addColorStop(1, '#4a2f18'); g.fillStyle = gr; g.fillRect(-600, py, 1200, 600);
+  const sky = g.createLinearGradient(0, -400 + py, 0, py); sky.addColorStop(0, '#104ea6'); sky.addColorStop(1, '#458ee2'); g.fillStyle = sky; g.fillRect(-600, -600 + py, 1200, 600);
+  const gr = g.createLinearGradient(0, py, 0, py + 400); gr.addColorStop(0, '#754b23'); gr.addColorStop(1, '#3b220e'); g.fillStyle = gr; g.fillRect(-600, py, 1200, 600);
   g.strokeStyle = '#fff'; g.lineWidth = 2.5; g.beginPath(); g.moveTo(-600, py); g.lineTo(600, py); g.stroke();
-  for (let p = -30; p <= 30; p += 2.5) { if (p === 0) continue; const y = py - p * ppd, w = p % 10 === 0 ? 60 : p % 5 === 0 ? 34 : 16; g.beginPath(); g.moveTo(-w, y); g.lineTo(w, y); g.stroke(); if (p % 10 === 0) { text(g, String(Math.abs(p)), -w - 18, y, 15); text(g, String(Math.abs(p)), w + 18, y, 15); } }
+  for (let p = -30; p <= 30; p += 2.5) {
+    if (p === 0) continue;
+    const y = py - p * ppd, w = p % 10 === 0 ? 60 : p % 5 === 0 ? 34 : 16;
+    g.beginPath(); g.moveTo(-w, y); g.lineTo(w, y); g.stroke();
+    if (p % 10 === 0) { text(g, String(Math.abs(p)), -w - 18, y, 15); text(g, String(Math.abs(p)), w + 18, y, 15); }
+  }
   g.restore();
+
+  // Flight Path Vector (FPV bird) on PFD
+  const fpaDeg = Math.atan2(d.vsFpm * 0.00508, Math.max(1, d.gsKt * 0.514444)) * (180 / Math.PI);
+  const fpvY = cy - fpaDeg * 7.2;
+  const fpvX = cx + ((d.trk - d.hdg + 540) % 360 - 180) * 4.4;
+  g.save();
+  g.beginPath(); g.rect(60, 50, W - 120, H - 110); g.clip();
+  g.strokeStyle = '#22d3ee'; g.lineWidth = 2;
+  g.beginPath(); g.arc(fpvX, fpvY, 7, 0, Math.PI * 2); g.stroke();
+  g.beginPath(); g.moveTo(fpvX - 14, fpvY); g.lineTo(fpvX - 7, fpvY); g.moveTo(fpvX + 7, fpvY); g.lineTo(fpvX + 14, fpvY); g.moveTo(fpvX, fpvY - 7); g.lineTo(fpvX, fpvY - 14); g.stroke();
+  g.restore();
+
   // roll scale
   g.save(); g.translate(cx, cy); g.strokeStyle = '#fff'; g.lineWidth = 2;
   for (const a of [-60, -45, -30, -20, -10, 10, 20, 30, 45, 60]) { g.save(); g.rotate(a * D); g.beginPath(); g.moveTo(0, -150); g.lineTo(0, -(a % 30 === 0 ? 132 : 140)); g.stroke(); g.restore(); }
   g.rotate(-d.bank); g.fillStyle = '#ffd23a'; g.beginPath(); g.moveTo(0, -148); g.lineTo(-9, -132); g.lineTo(9, -132); g.fill(); g.restore();
   g.strokeStyle = '#ffd23a'; g.lineWidth = 5; g.beginPath(); g.moveTo(cx - 90, cy); g.lineTo(cx - 35, cy); g.lineTo(cx - 35, cy + 12); g.moveTo(cx + 90, cy); g.lineTo(cx + 35, cy); g.lineTo(cx + 35, cy + 12); g.stroke(); g.fillStyle = '#ffd23a'; g.fillRect(cx - 4, cy - 4, 8, 8);
+
   // speed tape
-  g.fillStyle = 'rgba(20,22,26,0.88)'; g.fillRect(0, 50, 60, H - 110);
+  g.fillStyle = 'rgba(15,18,22,0.92)'; g.fillRect(0, 50, 60, H - 110);
   g.save(); g.beginPath(); g.rect(0, 50, 60, H - 110); g.clip();
   const spdPx = 2.6; for (let v = Math.max(0, Math.floor(d.kias / 10) * 10 - 60); v <= d.kias + 70; v += 10) { const y = cy - (v - d.kias) * spdPx; g.strokeStyle = '#fff'; g.lineWidth = 2; g.beginPath(); g.moveTo(48, y); g.lineTo(60, y); g.stroke(); if (v % 20 === 0) text(g, String(v), 24, y, 16); }
   const y1 = cy - (s.vs1 * 1.13 - d.kias) * spdPx; g.fillStyle = '#ffb000'; g.fillRect(56, Math.max(50, y1), 4, 600); // low-speed amber
   g.fillStyle = '#ff2020'; const yv = cy - (s.vne - d.kias) * spdPx; g.fillRect(56, -100, 4, yv + 100);
+
+  // V-speeds on tape
+  if (d.vSpeeds) {
+    const vrY = cy - (d.vSpeeds.vr - d.kias) * spdPx;
+    if (vrY >= 50 && vrY <= H - 60) {
+      g.fillStyle = '#f59e0b'; g.font = 'bold 11px Arial'; text(g, 'R', 50, vrY, 11, '#f59e0b');
+    }
+  }
+
+  // AP target speed bug
+  if (d.apOn) {
+    const bugY = cy - (d.apSpd - d.kias) * spdPx;
+    if (bugY >= 50 && bugY <= H - 60) {
+      g.fillStyle = '#06b6d4'; g.beginPath(); g.moveTo(60, bugY); g.lineTo(52, bugY - 5); g.lineTo(52, bugY + 5); g.fill();
+    }
+  }
   g.restore();
+
   g.fillStyle = '#000'; g.fillRect(0, cy - 16, 62, 32); g.strokeStyle = '#ffd23a'; g.lineWidth = 2; g.strokeRect(1, cy - 16, 60, 32); text(g, String(Math.round(d.kias)), 31, cy, 24, '#fff');
-  text(g, `M.${Math.round(d.mach * 100).toString().padStart(2, '0')}`, 30, H - 70, 15, '#ccc');
+  text(g, `GS ${Math.round(d.gsKt)}`, 30, H - 90, 13, '#38bdf8');
+  text(g, `M.${Math.round(d.mach * 100).toString().padStart(2, '0')}`, 30, H - 70, 14, '#ccc');
+
   // alt tape
-  g.fillStyle = 'rgba(20,22,26,0.88)'; g.fillRect(W - 80, 50, 80, H - 110);
+  g.fillStyle = 'rgba(15,18,22,0.92)'; g.fillRect(W - 80, 50, 80, H - 110);
   g.save(); g.beginPath(); g.rect(W - 80, 50, 80, H - 110); g.clip();
   const altPx = 0.36; for (let v = Math.floor(d.altFt / 100) * 100 - 500; v <= d.altFt + 600; v += 100) { const y = cy - (v - d.altFt) * altPx; g.strokeStyle = '#fff'; g.lineWidth = 2; g.beginPath(); g.moveTo(W - 80, y); g.lineTo(W - 68, y); g.stroke(); if (v % 200 === 0) text(g, String(v), W - 38, y, 15); }
   const ya = cy - (d.apAlt - d.altFt) * altPx; g.fillStyle = '#ff4fd8'; g.fillRect(W - 84, Math.max(52, Math.min(H - 62, ya)) - 6, 10, 12);
   g.restore();
+
   g.fillStyle = '#000'; g.fillRect(W - 84, cy - 16, 84, 32); g.strokeStyle = '#ffd23a'; g.strokeRect(W - 83, cy - 16, 82, 32); text(g, String(Math.round(d.altFt / 20) * 20), W - 42, cy, 22, '#fff');
   text(g, String(Math.round(d.apAlt)), W - 42, 38, 17, '#ff7aea');
+  // Baro & Radar Altimeter
+  if (d.aglFt < 2500) {
+    text(g, `RA ${Math.round(d.aglFt)}`, W - 42, H - 90, 14, d.aglFt < 400 ? '#f59e0b' : '#34d399');
+  } else {
+    text(g, '29.92IN', W - 42, H - 90, 13, '#94a3b8');
+  }
+
   // vertical speed
   text(g, `${d.vsFpm >= 0 ? '+' : ''}${Math.round(d.vsFpm / 50) * 50}`, W - 40, H - 70, 16, Math.abs(d.vsFpm) > 2000 ? '#ff9a3a' : '#7dff9a');
+
   // heading tape
-  g.fillStyle = 'rgba(20,22,26,0.9)'; g.fillRect(60, H - 52, W - 120, 52); g.save(); g.beginPath(); g.rect(60, H - 52, W - 120, 52); g.clip();
+  g.fillStyle = 'rgba(15,18,22,0.92)'; g.fillRect(60, H - 52, W - 120, 52); g.save(); g.beginPath(); g.rect(60, H - 52, W - 120, 52); g.clip();
   for (let a = -40; a <= 40; a += 5) { const hv = Math.round((d.hdg + a) / 5) * 5, x = cx + (hv - d.hdg) * 4.4 + 0; g.strokeStyle = '#fff'; g.beginPath(); g.moveTo(x, H - 52); g.lineTo(x, H - 42); g.stroke(); if (hv % 10 === 0) text(g, String(((hv % 360) + 360) % 360 / 10).padStart(2, '0'), x, H - 24, 15); }
   const bug = ((d.apHdg - d.hdg + 540) % 360) - 180; g.fillStyle = '#ff4fd8'; g.fillRect(cx + bug * 4.4 - 5, H - 52, 10, 9);
+  // Track diamond
+  const trkDiff = ((d.trk - d.hdg + 540) % 360) - 180;
+  g.fillStyle = '#d946ef'; g.beginPath(); g.arc(cx + trkDiff * 4.4, H - 46, 4, 0, Math.PI * 2); g.fill();
   g.restore(); g.fillStyle = '#ffd23a'; g.beginPath(); g.moveTo(cx, H - 53); g.lineTo(cx - 7, H - 62); g.lineTo(cx + 7, H - 62); g.fill();
+
+  // Wind readout & Waypoint
+  if (d.wind) {
+    text(g, `WIND ${d.wind.dir}°/${d.wind.kt}kt`, 100, 64, 12, '#38bdf8', 'left');
+  }
+  if (d.activeWp) {
+    text(g, `WPT ${d.activeWp.name} ${d.activeWp.distNm.toFixed(1)}nm`, W - 90, 64, 12, '#a855f7', 'right');
+  }
+
   // ILS
   if (d.ils && d.ils.valid) {
     const dots = (v: number) => Math.max(-2.4, Math.min(2.4, v)) * 20;
