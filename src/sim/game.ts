@@ -23,6 +23,35 @@ export interface Toast { id: number; text: string; level: 'info' | 'good' | 'war
 export interface Breakdown { label: string; pts: number; }
 export interface LandingInfo { vsFpm: number; kias: number; offset: number; dist: number; bank: number; pitch: number; onRunway: boolean; airportId: string; rwy: string; }
 export interface Result { outcome: 'landed' | 'diverted' | 'crashed'; score: number; grade: string; items: Breakdown[]; landing: LandingInfo | null; rank: number; reason: string; distanceKm: number; flightTime: number; comfort: number; newBest: boolean; }
+export interface CockpitTooltip {
+  id: string;
+  label: string;
+  value: string;
+  actionHint: string;
+  x: number;
+  y: number;
+}
+
+export interface WorldScreenMarker {
+  id: string;
+  label: string;
+  distNm: number;
+  altFt: number;
+  type: 'waypoint' | 'airport' | 'runway';
+  x: number;
+  y: number;
+  inView: boolean;
+  angleDeg: number;
+}
+
+export interface ChecklistItem {
+  id: string;
+  label: string;
+  detail: string;
+  done: boolean;
+  phase: FlightPhase;
+}
+
 export interface HudState {
   phase: Phase; view: ViewId; kias: number; altFt: number; vsFpm: number; hdg: number; gsKt: number; mach: number; pitch: number; bank: number; throttle: number; n1: number; flapsIdx: number; flapsDet: number; gear: number; gearDown: boolean; brake: boolean; parking: boolean; reverse: boolean; spoilers: number;
   fuelPct: number; fuelKg: number; aglFt: number; distNm: number; brg: number; eteMin: number; warn: { text: string; level: 'caution' | 'warning'; acked?: boolean }[]; score: number; comfort: number; ap: { on: boolean; nav: boolean; appr: boolean; hdg: number; alt: number; spd: number };
@@ -44,6 +73,19 @@ export interface HudState {
   atc: AtcMessage | null;
   atcLog: AtcMessage[];
   activeWp: { name: string; distNm: number; brg: number; etaMin: number } | null;
+  // MSFS UI/UX additions
+  cockpitTooltip: CockpitTooltip | null;
+  freelookActive: boolean;
+  worldMarkers: WorldScreenMarker[];
+  show3dGates: boolean;
+  showTaxiRibbon: boolean;
+  activeChecklist: {
+    items: ChecklistItem[];
+    currentPhase: FlightPhase;
+    completedCount: number;
+    totalCount: number;
+  };
+  fov: number;
 }
 export interface MapState { lat: number; lon: number; hdg: number; track: number; from: Airport; to: Airport; trail: [number, number][]; altFt: number; depRwy: string; apprRwy: string; appr: { lat: number; lon: number; hdg: number; ident: string } | null; navPath: [number, number][]; flightPlan: FlightWaypoint[]; activeWpIdx: number; }
 interface Hooks { onHud(h: HudState): void; onToast(t: Toast): void; onPhase(p: Phase): void; onResult(r: Result): void; onCommand(cmd: string): void; }

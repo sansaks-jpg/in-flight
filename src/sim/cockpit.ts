@@ -35,9 +35,13 @@ class TouchPanel {
     }
     this.tex.needsUpdate = true;
   }
-  hit(uv: THREE.Vector2) {
+  hit(uv: THREE.Vector2, allowDisplay = false) {
     const px = uv.x * this.W, py = (1 - uv.y) * this.H;
-    for (const it of this.items) { if (it.id.startsWith('_')) continue; const b = this.cell(it); if (px >= b.x && px <= b.x + b.w && py >= b.y && py <= b.y + b.h) return it.id; }
+    for (const it of this.items) {
+      if (!allowDisplay && it.id.startsWith('_')) continue;
+      const b = this.cell(it);
+      if (px >= b.x && px <= b.x + b.w && py >= b.y && py <= b.y + b.h) return it.id;
+    }
     return null;
   }
 }
@@ -285,11 +289,11 @@ export class Cockpit {
   }
 
   /** Raycast helper: returns id (+ optional instance) of the interactive element under the pointer. */
-  pick(ray: THREE.Raycaster): { id: string; instance?: number; point: THREE.Vector3 } | null {
+  pick(ray: THREE.Raycaster, allowDisplay = false): { id: string; instance?: number; point: THREE.Vector3 } | null {
     const hits = ray.intersectObjects(this.interactive, false);
     for (const h of hits) {
       const panel = h.object.userData.panel as TouchPanel | undefined;
-      if (panel && h.uv) { const id = panel.hit(h.uv); if (id) return { id, point: h.point }; continue; }
+      if (panel && h.uv) { const id = panel.hit(h.uv, allowDisplay); if (id) return { id, point: h.point }; continue; }
       if (h.object.userData.id) return { id: h.object.userData.id as string, instance: h.instanceId, point: h.point };
     }
     return null;
