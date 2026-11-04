@@ -1,0 +1,25 @@
+# Dependencies
+node_modules/
+
+# Production build
+dist/
+dist-ssr/
+
+# Environment and local files
+.env.local
+.env.*.local
+*.local
+
+# Temporary / Cache
+.tmp/
+.temp/
+*.log
+.eslintcache
+.zcode/
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/extensions.json
+.idea/
