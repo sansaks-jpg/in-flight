@@ -5,8 +5,12 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
-    "preview": "vite preview"
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test scripts/navigation-test.ts scripts/runtime-test.ts",
+    "test:ui": "tsx scripts/ui-collision-test.ts",
+    "test:live": "tsx scripts/live-navigation-test.ts"
   },
   "dependencies": {
     "clsx": "2.1.1",
@@ -22,6 +26,7 @@
     "@types/react-dom": "19.2.3",
     "@types/three": "^0.170.0",
     "@vitejs/plugin-react": "5.1.1",
+    "playwright": "1.58.2",
     "tailwindcss": "4.1.17",
     "tsx": "^4.23.15",
     "typescript": "5.9.3",

@@ -126,16 +126,16 @@ export function SettingsPanel({ s, set }: { s: Settings; set: (p: Partial<Settin
             <option value="cockpit">Cockpit 3D (Instruments on 3D flight deck only)</option>
           </select>
         </Row>
-        <Row label="UI scale factor">
+        <Row label="In-flight text size">
           <select
             value={s.uiScale}
             onChange={(e) => set({ uiScale: +e.target.value })}
             className="bg-slate-800 rounded-xl px-3 py-1.5 text-xs border border-white/10 text-white outline-none"
           >
-            <option value={0.75}>75% (Compact / Small displays)</option>
-            <option value={1.0}>100% (Standard 1080p)</option>
-            <option value={1.25}>125% (Large / 1440p)</option>
-            <option value={1.5}>150% (Extra Large / 4K / TV)</option>
+            <option value={0.75}>Compact</option>
+            <option value={1.0}>Default</option>
+            <option value={1.25}>Large text</option>
+            <option value={1.5}>Extra large text</option>
           </select>
         </Row>
         <Row label="Colorblind high-contrast mode">
@@ -230,7 +230,7 @@ export function ControlsPanel() {
     [<><K>A</K> <K>D</K> / <K>←</K> <K>→</K></>, 'Aileron roll left / right'],
     [<><K>Q</K> <K>E</K></>, 'Rudder & nose-wheel taxi steering'],
     [<><K>Shift</K> <K>Ctrl</K> / <K>PgUp</K> <K>PgDn</K></>, 'Throttle increase / decrease'],
-    [<><K>1</K>–<K>4</K></>, 'ATC Quick Responses 1–4 (or throttle 10–40% if no ATC pending)'],
+    [<><K>1</K>–<K>4</K></>, 'Radio replies when Radio is open · otherwise throttle 10–40%'],
     [<><K>5</K>–<K>9</K> <K>0</K> <K>X</K></>, 'Direct throttle 50–100% · Idle (X)'],
     [<K>Space</K>, 'Wheel brakes (hold to brake)'],
     [<K>B</K>, 'Parking brake toggle'],
@@ -244,14 +244,14 @@ export function ControlsPanel() {
     [<><K>N</K> <K>U</K></>, 'LNAV route navigation · ILS autoland approach'],
     [<><K>,</K> <K>.</K> <K>[</K> <K>]</K> <K>-</K> <K>=</K></>, 'Autopilot heading · altitude · speed adjustment'],
     [<K>\</K>, 'Time acceleration (cruise time warp)'],
-    [<K>Tab</K>, 'Cycle destination approach runway'],
-    [<K>H</K>, 'Cycle HUD modes (Minimal / Standard / Assisted / Cockpit)'],
-    [<K>A</K>, 'Acknowledge master warning / caution alert'],
+    [<K>Tab</K>, 'Navigate interface controls · choose arrival runway in Autopilot'],
+    [<>Alert ACK button</>, 'Acknowledge the on-screen warning / caution'],
     [<K>C</K>, 'Cycle camera: Cockpit / Chase / Spotter / Cabin'],
-    [<K>M</K>, 'Interactive World moving map'],
-    [<><K>P</K> / <K>Esc</K></>, 'Pause flight simulation'],
+    [<K>M</K>, 'Full-screen map · M or Esc to return'],
+    [<K>H</K>, 'Cycle Standard / Minimal / Assisted / Cockpit HUD'],
+    [<><K>P</K> / <K>Esc</K></>, 'Pause simulation · Esc closes an open flight tool first'],
     [<><K>R</K> (hold)</>, 'Instant flight restart'],
-    [<>Mouse / Touch</>, 'Click and drag to look around · interact with cockpit controls'],
+    [<>Mouse / Touch</>, 'Right-drag to look · click cockpit controls · Home resets the view'],
   ];
 
   return (

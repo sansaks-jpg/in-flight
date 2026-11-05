@@ -1,3 +1,5 @@
+import { SpeechQueue, type SpeechKind } from './speech';
+
 // Fully procedural WebAudio: engines, wind, rolling, warnings (stall / overspeed / GPWS / gear / bank), one-shots and voice callouts.
 export type WarnSound = 'stall' | 'overspeed' | 'pullup' | 'terrain' | 'gear' | 'bank' | 'sink' | 'config' | 'fuel' | null;
 
@@ -5,14 +7,28 @@ export interface AudioState {
   kind: 'piston' | 'turboprop' | 'jet'; n: number; thrust: number; ias: number; tas: number; wow: boolean; gs: number; view: 'inside' | 'outside'; cabin: boolean; sound: WarnSound; paused: boolean; mood: number; agl: number; vol: number;
 }
 
+const WARNING_VOICES = new Set(['stall', 'os', 'pu', 'tr', 'sr', 'tlg', 'ba', 'pb', 'cf', 'ef']);
+
 export class AudioEngine {
   ctx: AudioContext | null = null; master!: GainNode; sfx!: GainNode;
   private noise!: AudioBuffer;
   private eng: { o1: OscillatorNode; o2: OscillatorNode; g1: GainNode; g2: GainNode; ng: GainNode; nf: BiquadFilterNode; wh: OscillatorNode; whg: GainNode; lp: BiquadFilterNode } | null = null;
   private wind!: { g: GainNode; f: BiquadFilterNode }; private roll!: { g: GainNode; f: BiquadFilterNode }; private murmur!: { g: GainNode };
   private warn!: { o1: OscillatorNode; o2: OscillatorNode; g: GainNode; ng: GainNode; nf: BiquadFilterNode; nG: GainNode };
-  muted = false; volume = 0.8; voiceOn = true;
-  private lastSpeak: Record<string, number> = {};
+  muted = false; volume = 0.8;
+  private voiceEnabled = true;
+  get voiceOn() { return this.voiceEnabled; }
+  set voiceOn(on: boolean) { this.voiceEnabled = on; if (!on) this.speech.clear(); }
+  private readonly speech = new SpeechQueue({
+    speak: (request, finished) => {
+      const utterance = new SpeechSynthesisUtterance(request.text);
+      utterance.rate = request.rate; utterance.pitch = request.pitch; utterance.volume = request.volume;
+      utterance.onend = finished; utterance.onerror = finished;
+      speechSynthesis.speak(utterance);
+    },
+    cancel: () => { if (typeof speechSynthesis !== 'undefined') speechSynthesis.cancel(); },
+  });
+  private readonly oneShots = new Set<AudioScheduledSourceNode>();
   private cur: WarnSound = null; private warnT = 0;
 
   /** must be called from a user gesture */
@@ -20,7 +36,7 @@ export class AudioEngine {
     if (this.ctx) { this.ctx.resume(); return; }
     try { this.ctx = new (window.AudioContext || (window as any).webkitAudioContext)(); } catch { return; }
     const c = this.ctx;
-    this.master = c.createGain(); this.master.gain.value = this.volume; this.master.connect(c.destination);
+    this.master = c.createGain(); this.master.gain.value = this.muted ? 0 : this.volume; this.master.connect(c.destination);
     const comp = c.createDynamicsCompressor(); comp.threshold.value = -14; comp.ratio.value = 6; comp.connect(this.master);
     this.sfx = c.createGain(); this.sfx.connect(comp);
     const len = c.sampleRate * 2; this.noise = c.createBuffer(1, len, c.sampleRate);
@@ -44,8 +60,8 @@ export class AudioEngine {
     wo1.connect(wgn); wo2.connect(wgn); wgn.connect(this.sfx); noiseSrc().connect(wnf).connect(nG).connect(this.sfx); void wng;
     wo1.start(); wo2.start(); this.warn = { o1: wo1, o2: wo2, g: wgn, ng: wgn, nf: wnf, nG };
   }
-  setVolume(v: number) { this.volume = v; if (this.master) this.master.gain.setTargetAtTime(this.muted ? 0 : v, this.ctx!.currentTime, 0.05); }
-  setMuted(m: boolean) { this.muted = m; if (this.master) this.master.gain.setTargetAtTime(m ? 0 : this.volume, this.ctx!.currentTime, 0.05); if (m) window.speechSynthesis?.cancel(); }
+  setVolume(v: number) { this.volume = v; if (v <= 0) this.speech.clear(); if (this.master) this.master.gain.setTargetAtTime(this.muted ? 0 : v, this.ctx!.currentTime, 0.05); }
+  setMuted(m: boolean) { this.muted = m; if (this.master) this.master.gain.setTargetAtTime(m ? 0 : this.volume, this.ctx!.currentTime, 0.05); if (m) this.speech.clear(); }
 
   update(s: AudioState, dt: number) {
     const c = this.ctx; if (!c || !this.eng) return;
@@ -99,12 +115,12 @@ export class AudioEngine {
   private burst(freq: number, dur: number, gain: number, type: OscillatorType = 'sine', slideTo?: number, delay = 0) {
     const c = this.ctx; if (!c) return; const t = c.currentTime + delay;
     const o = c.createOscillator(), g = c.createGain(); o.type = type; o.frequency.setValueAtTime(freq, t); if (slideTo) o.frequency.exponentialRampToValueAtTime(slideTo, t + dur);
-    g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(gain, t + 0.01); g.gain.exponentialRampToValueAtTime(0.0001, t + dur); o.connect(g).connect(this.sfx); o.start(t); o.stop(t + dur + 0.05);
+    g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(gain, t + 0.01); g.gain.exponentialRampToValueAtTime(0.0001, t + dur); o.connect(g).connect(this.sfx); this.oneShots.add(o); o.onended = () => { this.oneShots.delete(o); o.disconnect(); g.disconnect(); }; o.start(t); o.stop(t + dur + 0.05);
   }
   private noiseBurst(dur: number, gain: number, f0: number, f1: number, type: BiquadFilterType = 'lowpass') {
     const c = this.ctx; if (!c) return; const t = c.currentTime;
     const s = c.createBufferSource(); s.buffer = this.noise; const f = c.createBiquadFilter(); f.type = type; f.frequency.setValueAtTime(f0, t); f.frequency.exponentialRampToValueAtTime(Math.max(30, f1), t + dur);
-    const g = c.createGain(); g.gain.setValueAtTime(gain, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur); s.connect(f).connect(g).connect(this.sfx); s.start(t, Math.random()); s.stop(t + dur + 0.05);
+    const g = c.createGain(); g.gain.setValueAtTime(gain, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur); s.connect(f).connect(g).connect(this.sfx); this.oneShots.add(s); s.onended = () => { this.oneShots.delete(s); s.disconnect(); f.disconnect(); g.disconnect(); }; s.start(t, Math.random()); s.stop(t + dur + 0.05);
   }
   touchdown(severity: number) { this.noiseBurst(0.35, 0.5 + Math.min(1, severity) * 0.6, 500, 60); this.burst(90, 0.3, 0.5, 'sine', 40); this.noiseBurst(0.5, 0.18, 4200, 1500, 'bandpass'); }
   chirp() { this.noiseBurst(0.3, 0.15, 3800, 1800, 'bandpass'); }
@@ -119,11 +135,21 @@ export class AudioEngine {
   applause() { this.noiseBurst(1.8, 0.2, 3000, 2500, 'bandpass'); }
   pa() { this.burst(1000, 0.08, 0.15, 'sine'); this.burst(1500, 0.14, 0.15, 'sine', undefined, 0.1); }
   speak(text: string, key = text, cooldown = 3, rate = 1.05, pitch = 0.9) {
-    if (this.muted || !this.voiceOn || typeof speechSynthesis === 'undefined') return;
-    const now = performance.now() / 1000;
-    if (now - (this.lastSpeak[key] || -99) < cooldown) return;
-    this.lastSpeak[key] = now;
-    try { const u = new SpeechSynthesisUtterance(text); u.rate = rate; u.pitch = pitch; u.volume = Math.min(1, this.volume + 0.2); speechSynthesis.speak(u); } catch { /* ignore */ }
+    if (this.muted || this.volume <= 0 || !this.voiceOn || typeof speechSynthesis === 'undefined' || !this.speech.canRequest(key, cooldown)) return;
+    const kind: SpeechKind = WARNING_VOICES.has(key) ? 'warning' : /^c\d+$/.test(key) || key === 'ret' || key === 'hl' ? 'callout' : 'announcement';
+    this.speech.request({ text, key, cooldown, rate, pitch, volume: Math.min(1, this.volume + 0.2), kind });
   }
-  silence() { if (this.ctx && this.eng) { const T = this.ctx.currentTime; this.eng.g1.gain.setTargetAtTime(0, T, 0.05); this.eng.g2.gain.setTargetAtTime(0, T, 0.05); this.eng.ng.gain.setTargetAtTime(0, T, 0.05); this.eng.whg.gain.setTargetAtTime(0, T, 0.05); this.warn.g.gain.setTargetAtTime(0, T, 0.02); this.warn.nG.gain.setTargetAtTime(0, T, 0.02); } window.speechSynthesis?.cancel(); }
+  setWarningVoice(key: string | null) { this.speech.retainWarning(key); }
+  silence() {
+    this.speech.clear();
+    for (const source of this.oneShots) { try { source.stop(); } catch { /* already ended */ } }
+    this.oneShots.clear(); this.cur = null; this.warnT = 0;
+    if (!this.ctx || !this.eng) return;
+    const T = this.ctx.currentTime;
+    this.eng.g1.gain.setTargetAtTime(0, T, 0.05); this.eng.g2.gain.setTargetAtTime(0, T, 0.05);
+    this.eng.ng.gain.setTargetAtTime(0, T, 0.05); this.eng.whg.gain.setTargetAtTime(0, T, 0.05);
+    this.wind.g.gain.setTargetAtTime(0, T, 0.05); this.roll.g.gain.setTargetAtTime(0, T, 0.05);
+    this.murmur.g.gain.setTargetAtTime(0, T, 0.05);
+    this.warn.g.gain.setTargetAtTime(0, T, 0.02); this.warn.nG.gain.setTargetAtTime(0, T, 0.02);
+  }
 }

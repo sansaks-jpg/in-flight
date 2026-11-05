@@ -1,56 +1,90 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback, type RefObject } from 'react';
 import { CanvasMap } from './CanvasMap';
 import { AIRPORTS, Airport } from '../data/airports';
 import { TILE_STYLES, styleById } from '../sim/tiles';
 import { MapLayers, loadMapLayers, saveMapLayers } from './mapLayers';
 import { greatCircle, haversine, destination, D2R, M_PER_NM } from '../sim/geo';
 import type { Game } from '../sim/game';
+import { FlightIcon } from './FlightIcon';
 
 type NavMode = 'explore' | 'route' | 'north' | 'track' | 'free';
+export interface NavigationMapView { lat: number; lon: number; zoom: number; rot: number; nav: NavMode; focusRequest?: number }
 interface Props {
   mode: 'planner' | 'flight'; from: Airport | null; to: Airport | null; picking?: 'from' | 'to'; onPick?: (a: Airport) => void;
   styleId: string; onStyle: (id: string) => void; game?: Game | null; compact?: boolean; onExpand?: () => void; className?: string; routeKey?: string;
   rangeKm?: number; onSetAirport?: (a: Airport, role: 'from' | 'to') => void;
+  viewStateRef?: RefObject<NavigationMapView | null>; layers?: MapLayers;
+  navigation?: boolean; focusTarget?: { lat: number; lon: number; request: number; label?: string };
 }
+
+const RANGES_NM = [5, 10, 20, 40], TRACK_DASH = [4, 3], GUIDANCE_DASH = [3, 5], NO_DASH: number[] = [];
+const COMPASS_TICKS = Array.from({ length: 36 }, (_, i) => i * 10);
 
 const COL = { from: '#3ddc84', to: '#ffb02e', route: '#ff4fd8', dot: '#7fd0ff', trail: '#35e0ff' };
 
-export function MapPanel({ mode, from, to, picking, onPick, styleId, onStyle, game, compact, onExpand, className, routeKey, rangeKm, onSetAirport }: Props) {
+export function MapPanel({ mode, from, to, picking, onPick, styleId, onStyle, game, compact, onExpand, className, routeKey, rangeKm, onSetAirport, navigation = false, focusTarget, viewStateRef, layers: controlledLayers }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null), wrapRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<CanvasMap | null>(null);
+  const lastFocusRequest = useRef(viewStateRef?.current?.focusRequest);
   const hit = useRef<{ a: Airport; x: number; y: number }[]>([]);
-  const props = useRef({ from, to, picking, onPick, mode, game, compact, rangeKm, onSetAirport });
-  props.current = { from, to, picking, onPick, mode, game, compact, rangeKm, onSetAirport };
-  const [nav, setNav] = useState<NavMode>(mode === 'flight' ? (compact ? 'track' : 'free') : 'route');
+  const props = useRef({ from, to, picking, onPick, mode, game, compact, rangeKm, onSetAirport, navigation, focusTarget });
+  props.current = { from, to, picking, onPick, mode, game, compact, rangeKm, onSetAirport, navigation, focusTarget };
+  const [nav, setNav] = useState<NavMode>(viewStateRef?.current?.nav ?? (mode === 'flight' ? (compact || navigation ? 'track' : 'free') : 'route'));
   const navRef = useRef(nav); navRef.current = nav;
   const [tip, setTip] = useState<{ x: number; y: number; a: Airport } | null>(null);
   const [selectedAirport, setSelectedAirport] = useState<Airport | null>(null);
   const [layers, setLayers] = useState<MapLayers>(loadMapLayers);
-  const layersRef = useRef(layers); layersRef.current = layers;
+  const layersRef = useRef(controlledLayers ?? layers); layersRef.current = controlledLayers ?? layers;
   const [layersOpen, setLayersOpen] = useState(false);
 
   const nearestAt = useCallback((x: number, y: number, r = 14) => {
     let best: Airport | null = null, bd = r * r;
-    for (const h of hit.current) { const d = (h.x - x) ** 2 + (h.y - y) ** 2; if (d < bd) { bd = d; best = h.a; } }
+    for (const h of hit.current) { const point = mapRef.current?.project(h.a.lat, h.a.lon); if (!point) continue; const d = (point[0] - x) ** 2 + (point[1] - y) ** 2; if (d < bd) { bd = d; best = h.a; } }
     return best;
   }, []);
 
   useEffect(() => {
     const m = new CanvasMap(canvasRef.current!); mapRef.current = m;
     m.showScale = !props.current.compact;
+    m.showGrid = !!props.current.navigation && !props.current.compact;
+    m.scaleUnits = props.current.navigation ? 'nm' : 'metric';
     m.showRoads = layersRef.current.roads;
     m.showLabels = layersRef.current.labels;
     m.showHillshade = layersRef.current.terrain;
     m.setStyle(styleId);
-    m.overlay = (g, map) => {
+    let flightState = mode === 'flight' && game?.world ? game.getMapState() : null;
+    const ownshipPoint = new Float64Array(2), targetPoint = new Float64Array(2);
+    let nextNavigationUpdate = 0, lastTrailLat = NaN, lastTrailLon = NaN;
+    m.beforeFrame = (now) => {
+      const currentGame = props.current.game;
+      if (!currentGame || props.current.mode !== 'flight' || !currentGame.world) return false;
+      const oldLat = flightState?.lat, oldLon = flightState?.lon, oldHeading = flightState?.hdg, oldTrack = flightState?.track;
+      if (!flightState || now >= nextNavigationUpdate || flightState.flightPlan !== currentGame.flightPlan ||
+          flightState.activeWpIdx !== currentGame.activeWpIdx || flightState.apprRwy !== currentGame.apprKey ||
+          flightState.depRwy !== currentGame.depRwy) {
+        const next = currentGame.getMapState(), trailEnd = next.trail[next.trail.length - 1];
+        if (!flightState || next.flightPlan !== flightState.flightPlan || next.activeWpIdx !== flightState.activeWpIdx ||
+            next.apprRwy !== flightState.apprRwy || next.depRwy !== flightState.depRwy ||
+            next.appr?.ident !== flightState.appr?.ident || next.from !== flightState.from || next.to !== flightState.to ||
+            (trailEnd && (trailEnd[0] !== lastTrailLat || trailEnd[1] !== lastTrailLon))) m.invalidate();
+        if (trailEnd) { lastTrailLat = trailEnd[0]; lastTrailLon = trailEnd[1]; }
+        flightState = next; nextNavigationUpdate = now + 250;
+      }
+      currentGame.readMapPose(flightState);
+      if (navRef.current === 'north' || navRef.current === 'track') {
+        m.lat = flightState.lat; m.lon = flightState.lon;
+        m.rot = navRef.current === 'track' ? -flightState.track * D2R : 0;
+      }
+      return oldLat !== flightState.lat || oldLon !== flightState.lon || oldHeading !== flightState.hdg || oldTrack !== flightState.track;
+    };
+    m.backgroundOverlay = (g, map) => {
       const p = props.current; const L = layersRef.current; const list: { a: Airport; x: number; y: number }[] = []; hit.current = list;
       const z = map.zoom; const maxSize = z < 5.6 ? 0 : z < 7.2 ? 1 : 2;
       const dark = styleById(map.styleId).dark;
-      const gs = p.game && p.mode === 'flight' ? p.game.getMapState() : null;
+      const gs = flightState;
       const labelRects: number[][] = [];
       // Runways: true-scale footprints when zoomed in, otherwise a small orientation
       // marker for the departure/arrival airports so the runway direction is never lost.
-      // Runways, Taxiways & Aprons: true-scale footprints when zoomed in
       const drawRunways = (a: Airport, emphasized = false) => {
         if (!a.runways.length) return;
         const trueScale = z >= 9.4;
@@ -70,60 +104,15 @@ export function MapPanel({ mode, from, to, picking, onPick, styleId, onStyle, ga
             continue;
           }
 
-          // Apron and Taxiway layout when zoomed in
-          if (z >= 11.8) {
-            const cx = (x1 + x2) / 2, cy = (y1 + y2) / 2;
-            const rdx = x2 - x1, rdy = y2 - y1;
-            const rLen = Math.hypot(rdx, rdy);
-            if (rLen > 5) {
-              const rNormX = -rdy / rLen, rNormY = rdx / rLen;
-              const taxiDistPx = 60 * ppm;
-              const tx1 = x1 + rNormX * taxiDistPx, ty1 = y1 + rNormY * taxiDistPx;
-              const tx2 = x2 + rNormX * taxiDistPx, ty2 = y2 + rNormY * taxiDistPx;
-              const tw = Math.max(2, 20 * ppm);
-
-              // Parallel taxiway
-              g.beginPath(); g.moveTo(tx1, ty1); g.lineTo(tx2, ty2);
-              g.strokeStyle = dark ? 'rgba(30, 41, 59, 0.85)' : 'rgba(51, 65, 85, 0.75)';
-              g.lineWidth = tw; g.stroke();
-
-              // Taxiway yellow centerline
-              g.beginPath(); g.moveTo(tx1, ty1); g.lineTo(tx2, ty2);
-              g.strokeStyle = '#facc15'; g.lineWidth = 1; g.stroke();
-
-              // Connecting taxiways
-              for (const f of [0.15, 0.5, 0.85]) {
-                const mx = x1 + rdx * f, my = y1 + rdy * f;
-                const mtx = tx1 + (tx2 - tx1) * f, mty = ty1 + (ty2 - ty1) * f;
-                g.beginPath(); g.moveTo(mx, my); g.lineTo(mtx, mty);
-                g.strokeStyle = dark ? 'rgba(30, 41, 59, 0.85)' : 'rgba(51, 65, 85, 0.75)';
-                g.lineWidth = tw; g.stroke();
-                g.beginPath(); g.moveTo(mx, my); g.lineTo(mtx, mty);
-                g.strokeStyle = '#facc15'; g.lineWidth = 1; g.stroke();
-              }
-
-              // Main terminal apron slab
-              const apronDistPx = (60 + 55) * ppm;
-              const ax = cx + rNormX * apronDistPx, ay = cy + rNormY * apronDistPx;
-              const aw = Math.min(rLen * 0.7, 380 * ppm), ad = 90 * ppm;
-              g.save();
-              g.translate(ax, ay);
-              g.rotate(Math.atan2(rdy, rdx));
-              g.fillStyle = dark ? 'rgba(51, 65, 85, 0.85)' : 'rgba(100, 116, 139, 0.75)';
-              g.fillRect(-aw / 2, -ad / 2, aw, ad);
-              g.strokeStyle = dark ? 'rgba(30, 41, 59, 0.9)' : 'rgba(71, 85, 105, 0.8)';
-              g.lineWidth = 1; g.strokeRect(-aw / 2, -ad / 2, aw, ad);
-              g.restore();
-            }
-          }
-
+          // Only runway endpoints/widths are in the simulator database. Do not invent
+          // parallel taxiways or aprons; real surface detail comes from imagery/road tiles.
           const w = Math.min(18, Math.max(1, r.width * ppm));
           g.beginPath(); g.moveTo(x1, y1); g.lineTo(x2, y2);
           g.strokeStyle = dark ? 'rgba(4,10,16,.9)' : 'rgba(10,28,40,.55)'; g.lineWidth = w + 1.8; g.stroke();
           g.strokeStyle = p.to && a.id === p.to.id ? '#ffd27a' : dark ? '#c3cfd6' : '#7e8b93'; g.lineWidth = w; g.stroke();
         }
       };
-      const compactMap = !!p.compact;
+      const compactMap = !!p.compact || (!!p.navigation && map.viewportW < 480);
       if (L.airports && !(compactMap && z < 6.5)) for (const a of AIRPORTS) {
         if (a.size > maxSize) continue;
         const [x, y] = map.project(a.lat, a.lon);
@@ -142,7 +131,7 @@ export function MapPanel({ mode, from, to, picking, onPick, styleId, onStyle, ga
           }
         }
       }
-      // The navigation map is deliberately flat 2D: raster chart, runways, route and traffic only.
+      // The navigation map is deliberately flat 2D: raster chart, runways and the simulator's route/trail only.
       // Extruding building footprints on every redraw is what made opening it feel heavy.
       // route / navigation: multi-waypoint flight plan or great circle
       if (L.route && p.from && p.to && p.from !== p.to) {
@@ -154,15 +143,27 @@ export function MapPanel({ mode, from, to, picking, onPick, styleId, onStyle, ga
           g.beginPath(); pts.forEach(([x, y], i) => (i ? g.lineTo(x, y) : g.moveTo(x, y)));
           g.strokeStyle = 'rgba(0,0,0,0.55)'; g.lineWidth = compactMap ? 5 : 7; g.stroke();
           // Route dashed line
-          g.setLineDash(compactMap ? [] : [10, 8]); g.strokeStyle = COL.route; g.lineWidth = compactMap ? 3 : 3.5; g.stroke();
+          g.setLineDash(compactMap ? [] : [10, 8]); g.strokeStyle = p.navigation ? 'rgba(186,170,205,.5)' : COL.route; g.lineWidth = compactMap ? 2 : 3.5; g.stroke();
           g.restore();
 
-          // Waypoint symbols and labels
-          if (!compactMap && z >= 4.8) {
+          // Emphasize the active leg; the rest of the plan stays readable but subordinate.
+          if (p.navigation) {
+            const active = fp[Math.min(gs.activeWpIdx, fp.length - 1)];
+            const previous = fp[Math.max(0, gs.activeWpIdx - 1)];
+            const [ax, ay] = map.project(previous.lat, previous.lon);
+            const [bx, by] = map.project(active.lat, active.lon);
+            g.beginPath(); g.moveTo(ax, ay); g.lineTo(bx, by);
+            g.strokeStyle = '#e7a0eb'; g.lineWidth = 3; g.stroke();
+
+          }
+
+          // Waypoint symbols and labels. Keep the active fix visible even in the small map.
+          if (z >= 4.8) {
             fp.forEach((wp, idx) => {
               const [wx, wy] = pts[idx];
               if (wx < -60 || wx > map.W + 60 || wy < -60 || wy > map.H + 60) return;
               const isActive = idx === gs.activeWpIdx;
+              if (compactMap && !isActive) return;
 
               g.save();
               if (wp.type === 'tod') {
@@ -180,22 +181,22 @@ export function MapPanel({ mode, from, to, picking, onPick, styleId, onStyle, ga
                 g.beginPath(); g.arc(wx, wy, isActive ? 6 : 4.5, 0, Math.PI * 2); g.fill();
                 g.strokeStyle = '#06121c'; g.lineWidth = 2; g.stroke();
               } else {
-                g.fillStyle = isActive ? '#38bdf8' : '#e2e8f0';
+                g.fillStyle = isActive ? (p.navigation ? '#e7a0eb' : '#38bdf8') : '#e2e8f0';
                 g.beginPath(); g.arc(wx, wy, isActive ? 5 : 3.5, 0, Math.PI * 2); g.fill();
                 g.strokeStyle = '#06121c'; g.lineWidth = 1.5; g.stroke();
               }
 
-              if (z >= 6.0 || isActive) {
+              if (!p.compact && (z >= 6.0 || isActive)) {
                 const label = wp.name;
                 const altTxt = wp.altM > 0 ? `${Math.round(wp.altM / 0.3048 / 100) * 100}ft` : '';
                 g.font = isActive ? '800 11px ui-sans-serif, system-ui' : '600 10px ui-sans-serif, system-ui';
                 g.textAlign = 'left'; g.textBaseline = 'middle';
                 g.lineWidth = 3; g.strokeStyle = 'rgba(0,0,0,0.85)';
                 g.strokeText(label, wx + 8, wy - 4);
-                g.fillStyle = isActive ? '#38bdf8' : '#f8fafc';
+                g.fillStyle = isActive ? (p.navigation ? '#e7a0eb' : '#38bdf8') : '#f8fafc';
                 g.fillText(label, wx + 8, wy - 4);
 
-                if (altTxt && z >= 6.8) {
+                if (altTxt && z >= 6.8 && !compactMap) {
                   g.font = '500 9px ui-sans-serif, system-ui';
                   g.strokeStyle = 'rgba(0,0,0,0.85)';
                   g.strokeText(altTxt, wx + 8, wy + 7);
@@ -238,7 +239,7 @@ export function MapPanel({ mode, from, to, picking, onPick, styleId, onStyle, ga
         if (!a) return; const [x, y] = map.project(a.lat, a.lon); list.push({ a, x, y }); drawRunways(a, true);
         g.beginPath(); g.arc(x, y, compactMap ? 6 : 9, 0, 7); g.fillStyle = col; g.fill(); g.lineWidth = 3; g.strokeStyle = '#06121c'; g.stroke();
         g.beginPath(); g.arc(x, y, compactMap ? 11 : 16, 0, 7); g.lineWidth = 2; g.strokeStyle = col; g.globalAlpha = 0.6; g.stroke(); g.globalAlpha = 1;
-        if (compactMap) return;
+        if (compactMap) { drawMapCompass(g, map); return; }
         g.font = '800 11px ui-sans-serif, system-ui'; const t = `${label} ${a.icao}`; const w = g.measureText(t).width + 14; g.fillStyle = col; g.beginPath(); g.roundRect(x + 14, y - 28, w, 20, 10); g.fill(); g.fillStyle = '#06121c'; g.textBaseline = 'middle'; g.fillText(t, x + 21, y - 18);
       };
       pin(p.from, COL.from, 'DEP');
@@ -266,18 +267,6 @@ export function MapPanel({ mode, from, to, picking, onPick, styleId, onStyle, ga
           g.fillText(`AIRCRAFT MAX RANGE (${Math.round(p.rangeKm).toLocaleString()} km)`, fx + rPx * 0.707 + 6, fy - rPx * 0.707);
           g.restore();
         }
-      }
-      if (gs) {
-        const [x, y] = map.project(gs.lat, gs.lon);
-        if (z > 5) { const pxPerNm = (256 * 2 ** z) / (360 * 60) * 1; void pxPerNm; const ppm = (256 * 2 ** z) / (40075016.7 * Math.cos(gs.lat * D2R)); g.strokeStyle = 'rgba(255,255,255,.35)'; g.lineWidth = 1; for (const nm of [5, 10, 20, 40]) { const r = nm * M_PER_NM * ppm; if (r > 24 && r < map.W) { g.beginPath(); g.arc(x, y, r, 0, 7); g.stroke(); g.fillStyle = 'rgba(255,255,255,.7)'; g.font = '10px ui-sans-serif'; g.fillText(`${nm}nm`, x + r * 0.7 + 3, y - r * 0.7); } } }
-        const face = gs.track;
-        const ha = face * D2R + map.rot;
-        g.beginPath(); g.moveTo(x + Math.sin(ha) * 16, y - Math.cos(ha) * 16); g.lineTo(x + Math.sin(ha) * 46, y - Math.cos(ha) * 46);
-        g.strokeStyle = 'rgba(53,224,255,.85)'; g.lineWidth = 2; g.setLineDash([4, 3]); g.stroke(); g.setLineDash([]);
-        if (!compactMap) { g.font = '700 10px ui-sans-serif, system-ui'; g.textAlign = 'left'; g.textBaseline = 'middle'; g.fillStyle = '#d9f6ff'; g.fillText(`TRK ${String(Math.round(face) % 360).padStart(3, '0')}°`, x + 18, y - 18); }
-        g.save(); g.translate(x, y); g.rotate(face * D2R + map.rot);
-        g.shadowColor = 'rgba(0,0,0,.6)'; g.shadowBlur = 6; g.fillStyle = '#fff'; g.strokeStyle = '#0a1a28'; g.lineWidth = 2;
-        g.beginPath(); g.moveTo(0, -14); g.lineTo(3.5, -4); g.lineTo(14, 3); g.lineTo(14, 6.5); g.lineTo(3.2, 3.5); g.lineTo(2.6, 11); g.lineTo(6, 13.5); g.lineTo(6, 15.5); g.lineTo(0, 14); g.lineTo(-6, 15.5); g.lineTo(-6, 13.5); g.lineTo(-2.6, 11); g.lineTo(-3.2, 3.5); g.lineTo(-14, 6.5); g.lineTo(-14, 3); g.lineTo(-3.5, -4); g.closePath(); g.fill(); g.stroke(); g.restore();
       }
       // Enhanced ILS Feather (Extended Centerline Cone with angle markings)
       if (L.route && gs && gs.appr && z >= 4.8) {
@@ -333,12 +322,51 @@ export function MapPanel({ mode, from, to, picking, onPick, styleId, onStyle, ga
           g.fillStyle = '#ffd9a6'; g.fillText(txt, tx + 12, ty + 14);
         }
       }
+      // Inspecting a flight-log fix is distinct from changing the active navigation leg.
+      if (p.navigation && p.focusTarget) {
+        const [x, y] = map.project(p.focusTarget.lat, p.focusTarget.lon);
+        if (x > 0 && y > 0 && x < map.W && y < map.H) {
+          g.save(); g.beginPath(); g.arc(x, y, 9, 0, Math.PI * 2);
+          g.strokeStyle = '#d7e7f2'; g.lineWidth = 1.5; g.stroke();
+          g.beginPath(); g.moveTo(x - 13, y); g.lineTo(x - 6, y); g.moveTo(x + 6, y); g.lineTo(x + 13, y);
+          g.moveTo(x, y - 13); g.lineTo(x, y - 6); g.moveTo(x, y + 6); g.lineTo(x, y + 13); g.stroke();
+          if (p.focusTarget.label) {
+            g.font = '600 10px ui-sans-serif, system-ui'; g.textAlign = 'left'; g.textBaseline = 'middle';
+            g.lineWidth = 3; g.strokeStyle = '#0b1522'; g.strokeText(p.focusTarget.label, x + 16, y);
+            g.fillStyle = '#deedf8'; g.fillText(p.focusTarget.label, x + 16, y);
+          }
+          g.restore();
+        }
+      }
+    };
+    m.overlay = (g, map) => {
+      const p = props.current, L = layersRef.current, gs = flightState;
+      const compactMap = !!p.compact, z = map.zoom;
+      // The direct-to cue starts at the current physics position, never at a cached breadcrumb.
+      if (gs && L.route && p.navigation && gs.flightPlan[gs.activeWpIdx]) {
+        const active = gs.flightPlan[gs.activeWpIdx];
+        map.projectInto(gs.lat, gs.lon, ownshipPoint); map.projectInto(active.lat, active.lon, targetPoint);
+        g.save(); g.setLineDash(compactMap ? NO_DASH : GUIDANCE_DASH); g.lineWidth = compactMap ? 2 : 1; g.strokeStyle = compactMap ? '#e58ada' : 'rgba(231,160,235,.6)';
+        g.beginPath(); g.moveTo(ownshipPoint[0], ownshipPoint[1]); g.lineTo(targetPoint[0], targetPoint[1]); g.stroke(); g.restore();
+      }
+      if (gs) {
+        map.projectInto(gs.lat, gs.lon, ownshipPoint); const x = ownshipPoint[0], y = ownshipPoint[1];
+        if (!compactMap && z > 5) { const ppm = (256 * 2 ** z) / (40075016.7 * Math.cos(gs.lat * D2R)); g.strokeStyle = 'rgba(255,255,255,.35)'; g.lineWidth = 1; for (const nm of RANGES_NM) { const r = nm * M_PER_NM * ppm; if (r > 24 && r < map.W) { g.beginPath(); g.arc(x, y, r, 0, 7); g.stroke(); g.fillStyle = 'rgba(255,255,255,.7)'; g.font = '10px ui-sans-serif'; g.fillText(`${nm}nm`, x + r * 0.7 + 3, y - r * 0.7); } } }
+        const face = gs.track;
+        const ha = face * D2R + map.rot;
+        g.beginPath(); g.moveTo(x + Math.sin(ha) * 16, y - Math.cos(ha) * 16); g.lineTo(x + Math.sin(ha) * 46, y - Math.cos(ha) * 46);
+        g.strokeStyle = 'rgba(53,224,255,.85)'; g.lineWidth = 2; g.setLineDash(TRACK_DASH); g.stroke(); g.setLineDash(NO_DASH);
+        if (!compactMap) { g.font = '700 10px ui-sans-serif, system-ui'; g.textAlign = 'left'; g.textBaseline = 'middle'; g.fillStyle = '#d9f6ff'; g.fillText(`TRK ${String(Math.round(face) % 360).padStart(3, '0')}°`, x + 18, y - 18); }
+        g.save(); g.translate(x, y); g.rotate(gs.hdg * D2R + map.rot);
+        g.shadowColor = 'rgba(0,0,0,.6)'; g.shadowBlur = 6; g.fillStyle = '#fff'; g.strokeStyle = '#0a1a28'; g.lineWidth = 2;
+        g.beginPath(); g.moveTo(0, -14); g.lineTo(3.5, -4); g.lineTo(14, 3); g.lineTo(14, 6.5); g.lineTo(3.2, 3.5); g.lineTo(2.6, 11); g.lineTo(6, 13.5); g.lineTo(6, 15.5); g.lineTo(0, 14); g.lineTo(-6, 15.5); g.lineTo(-6, 13.5); g.lineTo(-2.6, 11); g.lineTo(-3.2, 3.5); g.lineTo(-14, 6.5); g.lineTo(-14, 3); g.lineTo(-3.5, -4); g.closePath(); g.fill(); g.stroke(); g.restore();
+      }
       // Destination pointer when it is outside the visible map area (threshold when an approach is active).
       const dest = p.to;
       if (L.route && dest) {
         const appr = gs?.appr ?? null;
         const target = appr ?? dest;
-        const [dx, dy] = map.project(target.lat, target.lon);
+        map.projectInto(target.lat, target.lon, targetPoint); const dx = targetPoint[0], dy = targetPoint[1];
         if (dx < 10 || dx > map.W - 10 || dy < 10 || dy > map.H - 10) {
           const cx = map.W / 2, cy = map.H / 2, ang = Math.atan2(dy - cy, dx - cx);
           const rad = Math.min(map.W, map.H) / 2 - 24;
@@ -347,9 +375,11 @@ export function MapPanel({ mode, from, to, picking, onPick, styleId, onStyle, ga
           g.fillStyle = '#ffb02e'; g.strokeStyle = '#06121c'; g.lineWidth = 2;
           g.beginPath(); g.moveTo(13, 0); g.lineTo(-6, -7); g.lineTo(-6, 7); g.closePath(); g.fill(); g.stroke();
           g.restore();
-          const fromLL = gs ? [gs.lat, gs.lon] : p.from ? [p.from.lat, p.from.lon] : [target.lat, target.lon];
-          const km = Math.round(haversine(fromLL[0], fromLL[1], target.lat, target.lon) / 1000).toLocaleString();
-          const txt = `${dest.iata || dest.icao}${appr ? ` RWY ${appr.ident}` : ''} · ${km} km`;
+          if (compactMap) { drawMapCompass(g, map); return; }
+          const fromLat = gs?.lat ?? p.from?.lat ?? target.lat, fromLon = gs?.lon ?? p.from?.lon ?? target.lon;
+          const km = Math.round(haversine(fromLat, fromLon, target.lat, target.lon) / 1000).toLocaleString();
+          const distance = p.navigation ? `${(haversine(fromLat, fromLon, target.lat, target.lon) / M_PER_NM).toFixed(0)} nm` : `${km} km`;
+          const txt = `${dest.iata || dest.icao}${appr ? ` RWY ${appr.ident}` : ''} · ${distance}`;
           const lx = Math.min(map.W - 40, Math.max(40, ax)), ly = Math.min(map.H - 12, Math.max(12, ay + 20));
           g.font = '700 11px ui-sans-serif, system-ui'; g.textAlign = 'center'; g.textBaseline = 'middle';
           g.lineWidth = 3; g.strokeStyle = 'rgba(0,0,0,.75)'; g.strokeText(txt, lx, ly);
@@ -358,6 +388,7 @@ export function MapPanel({ mode, from, to, picking, onPick, styleId, onStyle, ga
       }
       // north indicator when rotated
       if (Math.abs(map.rot) > 0.01 && !compactMap) { g.save(); g.translate(map.W - 34, 40); g.rotate(map.rot); g.fillStyle = '#ff5050'; g.beginPath(); g.moveTo(0, -14); g.lineTo(6, 4); g.lineTo(-6, 4); g.fill(); g.fillStyle = '#fff'; g.font = '700 11px ui-sans-serif'; g.textAlign = 'center'; g.fillText('N', 0, 17); g.restore(); }
+      if (compactMap && p.navigation) drawMapCompass(g, map);
     };
     m.onTap = (x, y) => {
       const a = nearestAt(x, y, 16);
@@ -368,12 +399,16 @@ export function MapPanel({ mode, from, to, picking, onPick, styleId, onStyle, ga
         setSelectedAirport(null);
       }
     };
-    m.onHover = (x, y) => { const a = nearestAt(x, y, 10); setTip((t) => (a ? { x, y, a } : t ? null : t)); };
-    m.onViewChange = () => { if (navRef.current !== 'free' && props.current.mode === 'flight') setNav('free'); else if (props.current.mode === 'planner' && navRef.current === 'route') setNav('explore'); };
+    m.onHover = (x, y) => { if (props.current.navigation) return; const a = nearestAt(x, y, 10); setTip((t) => (a ? { x, y, a } : t ? null : t)); };
+    m.onViewChange = (kind) => {
+      // Zooming does not unlock aircraft-follow. Only a deliberate pan does.
+      if (kind === 'pan' && props.current.mode === 'flight') { navRef.current = 'free'; setNav('free'); }
+      else if (props.current.mode === 'planner' && navRef.current === 'route') { navRef.current = 'explore'; setNav('explore'); }
+    };
     const ro = new ResizeObserver(() => m.resize()); ro.observe(wrapRef.current!); m.resize();
     if (mode === 'flight') {
       m.interactive = !compact;
-      if (compact) m.setView(from?.lat ?? -2.2, from?.lon ?? 118, 9);
+      if (compact || navigation) { const position = game?.getMapState(); m.setView(position?.lat ?? from?.lat ?? -2.2, position?.lon ?? from?.lon ?? 118, 9); }
       else if (game && to) {
         const s = game.getMapState();
         const bounds: [number, number][] = [[s.lat, s.lon], ...s.navPath];
@@ -385,16 +420,27 @@ export function MapPanel({ mode, from, to, picking, onPick, styleId, onStyle, ga
     else if (from && to) m.fitBounds([[from.lat, from.lon], [to.lat, to.lon]]);
     else if (from) m.setView(from.lat, from.lon, 6);
     else m.setView(-2.2, 118, 4.8); // featured region: Indonesia
-    return () => { ro.disconnect(); m.dispose(); mapRef.current = null; };
+    const savedView = viewStateRef?.current;
+    if (savedView) {
+      // The previous chart saves during unmount, after this component's initial render.
+      // Restore its latest mode as well as its geometry when exchanging mini / full charts.
+      navRef.current = savedView.nav; setNav(savedView.nav); lastFocusRequest.current = savedView.focusRequest;
+      m.setView(savedView.lat, savedView.lon, savedView.zoom); m.rot = savedView.rot;
+    }
+    return () => {
+      if (viewStateRef) viewStateRef.current = { lat: m.lat, lon: m.lon, zoom: m.zoom, rot: m.rot, nav: navRef.current, focusRequest: lastFocusRequest.current };
+      ro.disconnect(); m.dispose(); mapRef.current = null;
+    };
     // eslint-disable-next-line
   }, []);
 
   useEffect(() => { mapRef.current?.setStyle(styleId); }, [styleId]);
   useEffect(() => {
-    saveMapLayers(layers);
+    const active = controlledLayers ?? layers;
+    saveMapLayers(active);
     const m = mapRef.current; if (!m) return;
-    m.showRoads = layers.roads; m.showLabels = layers.labels; m.showHillshade = layers.terrain; m.invalidate();
-  }, [layers]);
+    m.showRoads = active.roads; m.showLabels = active.labels; m.showHillshade = active.terrain; m.invalidate();
+  }, [layers, controlledLayers]);
   useEffect(() => {
     const m = mapRef.current; if (!m) return; m.invalidate();
     if (mode === 'planner' && navRef.current === 'route' && from && to) m.fitBounds([[from.lat, from.lon], [to.lat, to.lon]]);
@@ -402,30 +448,33 @@ export function MapPanel({ mode, from, to, picking, onPick, styleId, onStyle, ga
   }, [from, to, routeKey, mode]);
   useEffect(() => { mapRef.current?.invalidate(); }, [picking]);
 
-  // flight-mode follow loop
-  useEffect(() => {
-    if (mode !== 'flight' || !game) return;
-    const id = setInterval(() => {
-      const m = mapRef.current; if (!m || !game.world) return; const s = game.getMapState();
-      if (navRef.current !== 'free') { m.lat = s.lat; m.lon = s.lon; m.rot = navRef.current === 'track' ? -s.track * D2R : 0; }
-      m.invalidate();
-    }, 120);
-    return () => clearInterval(id);
-  }, [mode, game]);
+  // Aircraft follow is native RAF in CanvasMap.beforeFrame, not a 120 ms React/timer tick.
 
   const setMode = (n: NavMode) => {
-    setNav(n); const m = mapRef.current; if (!m) return;
-    if (n === 'route' && from && to) { m.fitBounds([[from.lat, from.lon], [to.lat, to.lon]]); }
-    if (n === 'north') m.rot = 0;
+    navRef.current = n; setNav(n); const m = mapRef.current; if (!m) return;
+    if (n === 'route' && from && to) {
+      if (mode === 'flight' && game) {
+        const s = game.getMapState();
+        m.fitBounds([[s.lat, s.lon], ...s.flightPlan.slice(s.activeWpIdx).map((wp): [number, number] => [wp.lat, wp.lon])], 48);
+      } else m.fitBounds([[from.lat, from.lon], [to.lat, to.lon]]);
+    }
+    if (n === 'north') { m.rot = 0; if (game) { const s = game.getMapState(); m.lat = s.lat; m.lon = s.lon; } }
     if (n === 'track' && game) { const s = game.getMapState(); m.rot = -s.track * D2R; m.lat = s.lat; m.lon = s.lon; }
     m.invalidate();
   };
+  useEffect(() => {
+    if (!focusTarget || !mapRef.current || focusTarget.request === lastFocusRequest.current) return;
+    lastFocusRequest.current = focusTarget.request;
+    navRef.current = 'free'; setNav('free');
+    mapRef.current.setView(focusTarget.lat, focusTarget.lon, Math.max(8, mapRef.current.zoom));
+  }, [focusTarget]);
+
   const st = styleById(styleId);
   const btn = 'px-2.5 py-1.5 text-[11px] font-semibold rounded-md transition border backdrop-blur ';
   return (
-    <div ref={wrapRef} className={`overflow-hidden bg-slate-900 ${className || "relative"}`}>
-      <canvas ref={canvasRef} className="absolute inset-0 w-full h-full cursor-grab active:cursor-grabbing" />
-      {!compact && (
+    <div ref={wrapRef} className={`overflow-hidden bg-slate-900 ${navigation ? 'flight-map-canvas' : ''} ${className || "relative"}`}>
+      <canvas ref={canvasRef} aria-label={navigation ? 'Live navigation map. Drag to pan, scroll to zoom.' : 'Airport map'} className="absolute inset-0 w-full h-full cursor-grab active:cursor-grabbing" />
+      {!compact && !navigation && (
         <>
           <div className="absolute top-3 left-3 z-30 flex flex-wrap items-center gap-1.5 max-w-[calc(100%-140px)] sm:max-w-none">
             <button onClick={() => setLayersOpen((o) => !o)} className={btn + 'bg-slate-900/85 text-white border-white/20 shadow-lg'}>▤ Layers{layers.roads ? ' · roads' : ''}</button>
@@ -477,11 +526,34 @@ export function MapPanel({ mode, from, to, picking, onPick, styleId, onStyle, ga
           </div>
         </>
       )}
+      {navigation && !compact && (
+        <>
+          <div className="flight-map-top-controls">
+            <button className="flight-map-control" onClick={() => setMode(nav === 'track' ? 'north' : 'track')}
+              aria-label={nav === 'track' ? 'Switch to north-up' : 'Switch to track-up'} title="Map orientation">
+              <FlightIcon name="arrow" size={13} />{nav === 'track' ? 'TRK UP' : nav === 'north' ? 'NORTH UP' : nav === 'route' ? 'ROUTE' : 'FREE PAN'}
+            </button>
+            <button className="flight-map-control" onClick={() => setMode('route')} aria-label="Fit remaining route" title="Fit remaining route">
+              <FlightIcon name="route" size={14} />Route
+            </button>
+          </div>
+          <div className="flight-map-zoom">
+            <button className="flight-map-fit-icon" onClick={() => setMode('route')} aria-label="Fit remaining route" title="Fit remaining route"><FlightIcon name="route" size={16} /></button>
+            <button onClick={() => mapRef.current?.zoomBy(0.5)} aria-label="Zoom in" title="Zoom in"><FlightIcon name="plus" size={17} /></button>
+            <button onClick={() => mapRef.current?.zoomBy(-0.5)} aria-label="Zoom out" title="Zoom out"><FlightIcon name="minus" size={17} /></button>
+            <button onClick={() => setMode(nav === 'north' ? 'north' : 'track')} aria-label="Recenter on aircraft"
+              title="Recenter on aircraft" data-active={nav === 'track' || nav === 'north'}><FlightIcon name="target" size={17} /></button>
+          </div>
+          {(nav === 'free' || nav === 'route') && <button className="flight-map-recenter" onClick={() => setMode('track')}>
+            <FlightIcon name="target" size={13} />Follow aircraft
+          </button>}
+        </>
+      )}
       {compact && (
-        <button onClick={onExpand} className="absolute inset-0 w-full h-full" aria-label="Expand map"><span className="absolute top-1 right-1 text-[10px] bg-black/60 text-white rounded px-1.5 py-0.5">M ⤢</span></button>
+        <button onClick={onExpand} className="flight-mini-expand absolute inset-0 w-full h-full" aria-label="Expand map" aria-keyshortcuts="M"><span className="flight-mini-expand-hint" aria-hidden="true"><FlightIcon name="expand" size={13} />Full screen <kbd>M</kbd></span></button>
       )}
       {picking && !compact && <div className="absolute top-14 left-3 text-[11px] font-bold px-2.5 py-1 rounded-full" style={{ background: picking === 'from' ? COL.from : COL.to, color: '#06121c' }}>Click an airport to set {picking === 'from' ? 'DEPARTURE' : 'DESTINATION'}</div>}
-      {tip && !compact && (
+      {tip && !compact && !navigation && (
         <div className="pointer-events-none absolute z-10 px-2.5 py-1.5 rounded-lg bg-slate-950/90 text-white text-xs border border-white/15 shadow-xl" style={{ left: Math.min(tip.x + 14, (wrapRef.current?.clientWidth || 400) - 220), top: tip.y + 12 }}>
           <div className="font-bold">{tip.a.name} <span className="text-cyan-300">{tip.a.icao}{tip.a.iata ? ` / ${tip.a.iata}` : ''}</span></div>
           <div className="text-slate-300">{tip.a.city}, {tip.a.country} · {Math.round(tip.a.elev / 0.3048).toLocaleString()} ft · {tip.a.runways.length} rwy · longest {Math.max(...tip.a.runways.map((r) => r.length)).toLocaleString()} m</div>
@@ -542,7 +614,25 @@ export function MapPanel({ mode, from, to, picking, onPick, styleId, onStyle, ga
           </div>
         </div>
       )}
-      {!compact && <div className="absolute bottom-1 right-2 text-[10px] text-white/80 bg-black/45 px-1.5 rounded">{st.attribution}</div>}
+      {!compact && <div className={navigation ? 'flight-map-attribution' : 'absolute bottom-1 right-2 text-[10px] text-white/80 bg-black/45 px-1.5 rounded'}>{st.attribution}</div>}
     </div>
   );
+}
+
+/** True-north rose uses the same projection rotation as the live map, including free-pan. */
+function drawMapCompass(g: CanvasRenderingContext2D, map: CanvasMap) {
+  const cx = map.W / 2, cy = map.H / 2, radius = Math.min(map.W, map.H) / 2 - 5;
+  g.save(); g.strokeStyle = 'rgba(241,245,241,.65)'; g.fillStyle = '#f3f5f0'; g.lineWidth = 1;
+  g.font = '600 9px ui-sans-serif, system-ui'; g.textAlign = 'center'; g.textBaseline = 'middle';
+  for (const degrees of COMPASS_TICKS) {
+    const angle = degrees * D2R + map.rot, sn = Math.sin(angle), co = Math.cos(angle);
+    const inner = radius - (degrees % 30 === 0 ? 9 : 4);
+    g.beginPath(); g.moveTo(cx + sn * inner, cy - co * inner); g.lineTo(cx + sn * radius, cy - co * radius); g.stroke();
+    if (degrees % 30 === 0 && radius > 56) {
+      const label = degrees === 0 ? 'N' : degrees === 90 ? 'E' : degrees === 180 ? 'S' : degrees === 270 ? 'W' : String(degrees / 10);
+      g.fillText(label, cx + sn * (radius - 18), cy - co * (radius - 18));
+    }
+  }
+  g.beginPath(); g.moveTo(cx - 4, 3); g.lineTo(cx, 9); g.lineTo(cx + 4, 3); g.stroke();
+  g.restore();
 }

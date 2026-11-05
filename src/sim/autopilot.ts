@@ -44,9 +44,11 @@ export class Autopilot {
   takeoffHdg = 0;
   targetWpIdx = 0;
   activeWpName = '';
+  /** Instrument telemetry only: the attitude reference implied by the existing FPA controller. */
+  pitchTargetRad: number | null = null;
 
   armTakeoff(fm: FlightModel, rwyHdg: number, vrKt?: number, targetAltM?: number) {
-    this.on = true;
+    this.on = true; this.pitchTargetRad = null;
     this.gsCaptured = false;
     this.phase = 'takeoff';
     this.nav = true;
@@ -62,7 +64,7 @@ export class Autopilot {
       this.armTakeoff(fm, initialHdg ?? fm.heading);
       return;
     }
-    this.on = true;
+    this.on = true; this.pitchTargetRad = null;
     this.gsCaptured = false;
     this.takeoffHdg = initialHdg ?? Math.round(fm.heading);
     this.hdg = this.takeoffHdg;
@@ -73,8 +75,14 @@ export class Autopilot {
     this.spd = Math.round(clamp(fm.ias / 0.514444, fm.spec.vs1 * 1.3, fm.spec.vne * 0.8) / 5) * 5;
   }
 
+  /** Changing lateral guidance must also release a captured automatic approach. */
+  setLateralMode(mode: 'heading' | 'nav') {
+    this.nav = mode === 'nav'; this.appr = false; this.gsCaptured = false;
+    if (this.phase === 'approach' || this.phase === 'flare') this.phase = 'cruise';
+  }
+
   disengage() {
-    this.on = false;
+    this.on = false; this.pitchTargetRad = null;
     this.phase = 'idle';
     this.appr = false;
     this.nav = false;
@@ -294,6 +302,7 @@ export class Autopilot {
     // Limit flight path angle to safe flight envelope (-15° to +12°)
     const gamma = Math.asin(clamp(fm.vel.y / V, -1, 1));
     const gCmd = Math.asin(clamp(vsCmd / V, -0.25, 0.21));
+    this.pitchTargetRad = fm.pitch + gCmd - gamma;
     const pitchIn = clamp(((gCmd - gamma) * 0.88) / s.maxPitchRate, -0.9, 0.9);
 
     // -------------------------------------------------------------

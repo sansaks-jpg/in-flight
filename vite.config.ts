@@ -19,6 +19,14 @@ process.env.TMP = localTmp;
 
 // https://vite.dev/config/
 export default defineConfig({
+  server: {
+    host: '0.0.0.0',
+    allowedHosts: ['.e2b.app'],
+  },
+  preview: {
+    host: '0.0.0.0',
+    allowedHosts: ['.e2b.app'],
+  },
   plugins: [react(), tailwindcss(), viteSingleFile()],
   resolve: {
     alias: {

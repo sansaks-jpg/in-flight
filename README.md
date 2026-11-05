@@ -36,6 +36,25 @@
   - Primary Flight Display (PFD) with artificial horizon, flight director, airspeed tape, altimeter tape, vertical speed indicator, and compass rose.
   - Top-down tactical navigation moving map (`CanvasMap`) with airspace boundaries, ILS feathers, and flight plan waypoints.
 
+### 🧭 In-flight navigation workspace
+
+The flight starts with a clear view, a compact **MSFS-style icon toolbar**, and next-waypoint information beside the route. A small live navigation map is visible by default. External standard view uses a heading compass and edge-mounted round gauges, leaving the aircraft and horizon clear. The toolbar stays visible by default; its **pin** button enables MSFS-style auto-hide when desired.
+
+- **Navigation** — one window with **Map** and **Flight plan** tabs, rather than competing map/route panels. Click the route at the top left to open the flight plan directly. Selecting a waypoint shows it on the map without changing the active leg. Map position/orientation and flight-log scroll position survive tab switches.
+- **Map (`M`)** — expands the small circular moving-map/compass at the left of the flight view to fill the entire screen, hiding the toolbar, instruments, touch controls, notifications and tool windows. Press `M` or `Esc` to return to the same flight workspace. Clicking the small map does the same. Map view/zoom/orientation are shared across the small chart, Navigation window and full-screen chart. Dragging releases follow; the target button restores aircraft-follow. Style, layers and arrival runway remain available under the collapsed **Map options** control. `Shift+M` remains an alias.
+- **Autopilot** — plain-language **Route / Heading / Approach** choices retain NAV / HDG / APPR annotations. Managed altitude/speed are clearly read-only. The arrival-runway dropdown lists the actual available runways instead of cycling blindly through them.
+- **Radio** — the current call and all four responses are together; older transmissions are behind **Transmission history**. Number keys `1`–`4` send replies only while this window is expanded; otherwise they remain throttle presets. One exchange is active at a time (shown as **Transmitting**); replies follow simulation time, pause with the flight, and cannot leak into a restarted flight.
+- **Camera** — Cockpit and External are the primary choices. Cabin, Window and Spotter are under **More camera views**. Choosing a view returns straight to flying.
+- **Display** — the four layouts **Standard / Minimal / Assisted / Cockpit** are available with `H` and in Display. Standard restores the external round gauges; Minimal keeps essential telemetry; Assisted adds glass instruments and guidance; Cockpit uses the working 3D instruments. Text size, units, accessibility and shortcut references use expandable sections. Changing HUD mode never opens, closes or switches a tool.
+
+Only **one task window** is open at a time, in a predictable location. Its title bar can minimize or close it; click the minimized title or its toolbar button to restore it in one action. **Return to flight** or `Esc` closes the window and restores aircraft keyboard input—not toolbar navigation. In full-screen map mode, `M` and `Esc` return without changing the previously open tool. An active target edit owns the first `Esc`; `Esc` pauses only when no tool is open.
+
+Panel geometry stays compact at every text-size setting. On short screens, navigation tabs merge into the title bar; touch layouts keep both thumb-control zones clear. The four HUD modes remain available with `H` and the controller HUD button. Cockpit views avoid duplicating the aircraft’s instruments. High contrast, reduced motion and keyboard tab/arrow navigation are supported.
+
+The chart reads aircraft position, heading and ground track directly from the flight model on animation frames, while caching geographic artwork instead of rebuilding it every frame. Full-screen mode skips hidden 3D rendering but continues physics, terrain streaming and audio. Map/ILS runway geometry uses the airport database; invented taxiway/apron diagrams are not shown. Wind readouts use the aircraft's actual local wind/gust vector, and the flight director uses the existing autopilot command rather than a fixed climb angle. Missing external imagery does not disable the live aircraft, route, airports or georeferenced grid; failed providers use bounded retry backoff.
+
+Speech is serialized and deduplicated, stale callouts are dropped, and pause/mute/voice-off/restart clear pending playback. Genuine active safety warnings may still repeat after their cooldown; resolved warnings do not continue playing from a backlog. Flight-phase hysteresis prevents repeated clearance chimes during go-around and speed-threshold jitter. The aerodynamic flight model is unchanged.
+
 ### 🔊 Procedural Web Audio & GPWS
 - Real-time synthesized engine sounds: piston rumble, turboprop whine, and twin-spool turbofan jet roar.
 - Aerodynamic wind rush scaling with airspeed ($V^2$) and flap/gear extension.
@@ -74,7 +93,7 @@
 | **Speedbrake / Spoilers** | `Z` | Deploy / retract aerodynamic spoilers (Jet only) |
 | **Reverse Thrust** | `T` | Toggle thrust reversers (Turboprop & Jet) |
 | **Elevator Trim** | `Insert` / `Delete` | Trim pitch up / down |
-| **Camera View** | `C` | Cycle Cockpit / Chase / Orbit / Flyby |
+| **Camera View** | `C` | Cycle Cockpit / Chase / Spotter / Cabin |
 | **Look Around** | `Right Click + Drag` | Pan camera (`Home` to reset view) |
 | **Autopilot Master** | `Y` | Engage / Disengage Autopilot |
 | **Autopilot NAV Mode** | `N` | Toggle LNAV waypoint tracking |
@@ -82,10 +101,10 @@
 | **Heading Bug Adjust** | `,` / `.` | Heading decrements / increments |
 | **Altitude Target Adjust** | `[` / `]` | `Shift + [` / `]` for 1000 ft steps |
 | **Speed Target Adjust** | `-` / `=` | Target airspeed adjust |
-| **Navigation Map** | `M` | Toggle tactical moving map overlay |
-| **HUD Mode** | `H` | Cycle HUD display styles |
+| **Navigation Map** | `M` | Full-screen map with other UI hidden; `M` or `Esc` returns to flight |
+| **HUD Mode** | `H` | Cycle Standard / Minimal / Assisted / Cockpit HUD layouts |
 | **Time Warp** | `\` | Cycle 1x, 2x, 4x simulation rate |
-| **ATC Response** | `1`, `2`, `3`, `4` | Select active ATC communication option |
+| **ATC Response** | `1`, `2`, `3`, `4` | Respond while the Radio panel is open; otherwise throttle presets |
 | **Pause / Resume** | `Esc` or `P` | Pause simulation |
 | **Restart Flight** | `R` (Hold) | Reset flight to runway |
 
@@ -149,6 +168,26 @@ The optimized bundle will be created inside the `dist/` directory.
 
 ---
 
+## ✅ Verification
+
+```bash
+npm test                 # Navigation, speech queue, tile backoff and phase/telemetry regressions
+npm run build            # Strict TypeScript check + single-file production build
+```
+
+For browser interaction and layout regression checks:
+
+```bash
+npx playwright install chromium
+npm run dev              # Leave running in one terminal
+npm run test:ui           # Layout, keyboard and touch interactions in another terminal
+npm run test:live         # Unfrozen physics/map tracking, data and radio lifecycle checks
+```
+
+The browser suite exercises real map, autopilot, radio and keyboard interactions, then measures actual DOM geometry across **672 combinations** of viewport, UI scale, HUD mode, alerts and open tools on desktop and touch devices. It also checks expanded-map space and clipped map controls, with third-party scenery requests disabled to verify offline navigation. The separate live suite samples the actual drawn aircraft transform against the running flight model, checks chart-cache reprojection, validates live navigation values and selected runway endpoints, and exercises radio pause/restart safety. Failures save a screenshot under the ignored `.tmp/` directory. Set `FLIGHT_UI_URL` to test another dev-server URL, or `CHROMIUM_PATH` to use an existing Chromium executable.
+
+---
+
 ## 📂 Project Structure
 
 ```text
@@ -179,7 +218,10 @@ in-flight/
 │   │   └── world.ts        # Atmosphere, skybox, sun/moon, volumetric fog & clouds
 │   ├── ui/                 # React UI layer
 │   │   ├── CanvasMap.ts    # Tactical 2D moving map
-│   │   ├── Hud.tsx         # In-flight HUD overlay, instruments, annunciator panel
+│   │   ├── Hud.tsx         # Flight screens and HUD exports
+│   │   ├── FlightHud.tsx   # In-flight toolbar, tool workspace and contextual telemetry
+│   │   ├── FlightMap.tsx   # Navigation panel and expanded live map
+│   │   ├── FlightInstruments.tsx # PFD instruments and touch flight controls
 │   │   ├── MapPanel.tsx    # Interactive flight planner map
 │   │   ├── Planner.tsx     # Route planning & runway departure/arrival selector
 │   │   └── Screens.tsx     # Main menu, aircraft selection, settings
