@@ -1,9 +1,12 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, useReducer } from 'react';
 import { Game, HudState, Phase, Result, Toast, ScenarioConfig } from './sim/game';
 import { AIRPORT_BY_ID, Airport, DEFAULT_FROM, DEFAULT_TO } from './data/airports';
 import { Settings, loadSettings, saveSettings, loadRoute, saveRoute, loadScores } from './sim/storage';
 import { StartScreen } from './ui/Screens';
 import { Planner } from './ui/Planner';
+import { nextHudMode } from './ui/navigation';
+import { flightWorkspaceReducer, INITIAL_WORKSPACE } from './ui/flightWorkspace';
+import type { NavigationMapView } from './ui/MapPanel';
 import { Hud, LoadingScreen, ReadyScreen, PauseMenu, ResultScreen, FullMap } from './ui/Hud';
 
 type Screen = 'start' | 'planner' | 'flight';
@@ -24,6 +27,8 @@ export default function App() {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [result, setResult] = useState<Result | null>(null);
   const [mapOpen, setMapOpen] = useState(false);
+  const mapView = useRef<NavigationMapView | null>(null);
+  const [workspace, dispatchWorkspace] = useReducer(flightWorkspaceReducer, INITIAL_WORKSPACE);
   const [game, setGame] = useState<Game | null>(null);
   const [attractReady, setAttractReady] = useState(false);
   const cur = useRef({ aircraftId, from, to }); cur.current = { aircraftId, from, to };
@@ -43,24 +48,16 @@ export default function App() {
         setPhase(p);
         if (p === 'playing') setResult(null);
         if (p === 'idle' && g.mode === 'attract') setAttractReady(true);
-        if (p === 'crashed' || p === 'complete') setMapOpen(false);
+        if (p === 'paused' || p === 'crashed' || p === 'complete') setMapOpen(false);
       },
       onResult: (r) => {
         setResult(r);
         setMapOpen(false);
       },
       onCommand: (c) => {
-        if (c === 'map') setMapOpen(true);
+        if (c === 'map' || c === 'fullMap') { gameRef.current?.clearInput(); setMapOpen((open) => !open); }
         else if (c === 'cycleHudMode') {
-          const nextMap: Record<string, string> = {
-            standard: 'minimal',
-            minimal: 'assisted',
-            assisted: 'standard',
-            cockpit: 'standard',
-          };
-          const curMode = settingsRef.current.hudMode || 'standard';
-          const next = (nextMap[curMode] || 'standard') as any;
-          setSettings({ hudMode: next });
+          setSettings({ hudMode: nextHudMode(settingsRef.current.hudMode) });
         }
       },
     });
@@ -79,7 +76,7 @@ export default function App() {
   const startFlight = useCallback(() => {
     const g = gameRef.current; if (!g) return; const s = settingsRef.current;
     saveRoute({ from: cur.current.from.id, to: cur.current.to.id, aircraft: cur.current.aircraftId });
-    g.suspended = false; setResult(null); setMapOpen(false); setScreen('flight'); setToasts([]);
+    g.suspended = false; mapView.current = null; setResult(null); setMapOpen(false); dispatchWorkspace({ type: 'close' }); setScreen('flight'); setToasts([]);
     g.load(cfgOf(s), 'play', s.startMode);
   }, [cfgOf]);
 
@@ -100,14 +97,14 @@ export default function App() {
 
   return (
     <div className="fixed inset-0 bg-[#05080f] overflow-hidden font-sans" style={{ touchAction: 'none' }}>
-      <canvas ref={canvasRef} className="absolute inset-0 w-full h-full block outline-none" />
+      <canvas ref={canvasRef} tabIndex={-1} aria-label="Flight view" className="absolute inset-0 w-full h-full block outline-none" />
       {screen === 'start' && <StartScreen onStart={() => { setScreen('planner'); if (gameRef.current) { gameRef.current.suspended = true; } }} onQuick={quick} settings={settings} set={setSettings} bestScore={best} ready={attractReady} />}
       {screen === 'planner' && <Planner settings={settings} setSettings={(s) => setSettings(s)} aircraftId={aircraftId} setAircraft={setAircraft} from={from} to={to} setFrom={setFrom} setTo={setTo} onFly={startFlight} onBack={backFromPlanner} />}
       {screen === 'flight' && g && phase === 'loading' && <LoadingScreen hud={hud} from={from} to={to} aircraft={g.spec?.name || ''} />}
-      {showHud && hud && g && <Hud game={g} hud={hud} toasts={toasts} settings={settings} setSettings={setSettings} onMap={() => setMapOpen(true)} mapOpen={mapOpen} from={from} to={to} phase={phase} />}
+      {showHud && hud && g && <Hud game={g} hud={hud} toasts={toasts} settings={settings} setSettings={setSettings} onMap={() => { g.clearInput(); setMapOpen(true); }} mapOpen={mapOpen} mapViewRef={mapView} workspace={workspace} dispatchWorkspace={dispatchWorkspace} from={from} to={to} phase={phase} />}
       {playing && phase === 'idle' && g!.mode === 'play' && <ReadyScreen hud={hud!} from={from} to={to} aircraft={g!.spec.name} onGo={() => g!.begin()} />}
       {playing && phase === 'paused' && !mapOpen && <PauseMenu game={g!} settings={settings} setSettings={setSettings} onMenu={toMenu} onResume={() => g!.resume()} />}
-      {playing && mapOpen && phase !== 'crashed' && <FullMap game={g!} from={from} to={to} settings={settings} setSettings={setSettings} onClose={() => setMapOpen(false)} />}
+      {playing && mapOpen && phase !== 'crashed' && <FullMap game={g!} hud={hud!} from={from} to={to} settings={settings} setSettings={setSettings} viewStateRef={mapView} onClose={() => setMapOpen(false)} />}
       {playing && result && (phase === 'crashed' || phase === 'complete') && <ResultScreen r={result} onRetry={() => { setResult(null); g!.restart(); }} onNew={toPlanner} onMenu={toMenu} />}
       {playing && phase === 'crashed' && !result && <div className="absolute inset-0 pointer-events-none" style={{ background: 'radial-gradient(circle, rgba(255,70,0,.25), rgba(120,0,0,.55))' }} />}
     </div>

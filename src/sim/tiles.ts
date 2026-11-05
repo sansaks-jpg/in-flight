@@ -78,9 +78,25 @@ export function tileUrl(tpl: string, z: number, x: number, y: number) {
 }
 
 // ---- image loader with concurrency limit, de-duplication and LRU ----
-type Entry = { img: HTMLImageElement | null; failed: boolean; promise: Promise<HTMLImageElement | null>; t: number };
+type Entry = { img: HTMLImageElement | null; failed: boolean; promise: Promise<HTMLImageElement | null>; t: number; attempts: number; retryAt: number };
+// A disconnected imagery provider must not turn every map/terrain frame into another request.
+const RETRY_BASE_MS = 15_000, RETRY_MAX_MS = 120_000;
 const cache = new Map<string, Entry>();
-const queue: { url: string; start: () => void; prio: number }[] = [];
+// Keep retry deadlines independently of raster LRU eviction. Opening/zooming a large chart
+// can evict >900 failed images; eviction must not silently bypass the network backoff.
+const failures = new Map<string, { attempts: number; retryAt: number }>();
+const NO_IMAGE = Promise.resolve<HTMLImageElement | null>(null);
+function rememberFailure(url: string, entry: Entry) {
+  failures.delete(url); failures.set(url, { attempts: entry.attempts, retryAt: entry.retryAt });
+  if (failures.size <= 4096) return;
+  const now = Date.now();
+  for (const [key, failure] of failures) {
+    if (failure.retryAt <= now && key !== url) failures.delete(key);
+    if (failures.size <= 3072) break;
+  }
+  while (failures.size > 4096) failures.delete(failures.keys().next().value!);
+}
+const queue: { url: string; start: () => void; cancel: () => void; prio: number }[] = [];
 let active = 0;
 const MAX_ACTIVE = 10;
 let clock = 0;
@@ -92,9 +108,11 @@ function pump() {
   }
 }
 export function loadImage(url: string, prio = 5): Promise<HTMLImageElement | null> {
-  if (!url || url.includes('NaN')) return Promise.resolve(null);
+  if (!url || url.includes('NaN')) return NO_IMAGE;
+  const failure = failures.get(url);
+  if (failure && Date.now() < failure.retryAt) return NO_IMAGE;
   const hit = cache.get(url);
-  if (hit && !hit.failed) { hit.t = ++clock; return hit.promise; }
+  if (hit && (!hit.failed || Date.now() < hit.retryAt)) { hit.t = ++clock; return hit.promise; }
   let entry: Entry;
   const promise = new Promise<HTMLImageElement | null>((resolve) => {
     const start = () => {
@@ -102,13 +120,26 @@ export function loadImage(url: string, prio = 5): Promise<HTMLImageElement | nul
       const img = new Image();
       img.crossOrigin = 'anonymous';
       img.decoding = 'async';
-      img.onload = () => { active--; entry.img = img; resolve(img); pump(); };
-      img.onerror = () => { active--; entry.failed = true; resolve(null); pump(); };
+      let settled = false;
+      const timeout = setTimeout(() => finish(false), 12_000);
+      const finish = (ok: boolean) => {
+        if (settled) return;
+        settled = true; clearTimeout(timeout); img.onload = img.onerror = null; active--;
+        if (ok) { entry.img = img; entry.retryAt = 0; failures.delete(url); }
+        else {
+          entry.failed = true;
+          entry.retryAt = Date.now() + Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** Math.min(4, entry.attempts - 1));
+          rememberFailure(url, entry);
+          img.src = ''; // Release a hung network request, not just its concurrency slot.
+        }
+        resolve(ok ? img : null); pump();
+      };
+      img.onload = () => finish(true); img.onerror = () => finish(false);
       img.src = url;
     };
-    queue.push({ url, start, prio });
+    queue.push({ url, start, cancel: () => resolve(null), prio });
   });
-  entry = { img: null, failed: false, promise, t: ++clock };
+  entry = { img: null, failed: false, promise, t: ++clock, attempts: Math.max(hit?.attempts ?? 0, failure?.attempts ?? 0) + 1, retryAt: 0 };
   cache.set(url, entry);
   if (cache.size > 900) {
     const old = [...cache.entries()].filter(([, e]) => e.img || e.failed).sort((a, b) => a[1].t - b[1].t).slice(0, 200);
@@ -117,6 +148,9 @@ export function loadImage(url: string, prio = 5): Promise<HTMLImageElement | nul
   pump();
   return promise;
 }
+/** Earliest retry after a failed request; zero means an image may be requested now. */
+export function imageRetryAt(url: string): number { return failures.get(url)?.retryAt ?? cache.get(url)?.retryAt ?? 0; }
+
 /** Synchronously peek at an already loaded image (used by the canvas map). */
 export function peekImage(url: string): HTMLImageElement | null {
   const e = cache.get(url);
@@ -128,5 +162,5 @@ export function bumpPriority(url: string, prio: number) {
   if (q) q.prio = prio;
 }
 export function cancelQueued(pred: (url: string) => boolean) {
-  for (let i = queue.length - 1; i >= 0; i--) if (pred(queue[i].url)) { const q = queue.splice(i, 1)[0]; cache.delete(q.url); }
+  for (let i = queue.length - 1; i >= 0; i--) if (pred(queue[i].url)) { const q = queue.splice(i, 1)[0]; cache.delete(q.url); q.cancel(); }
 }
