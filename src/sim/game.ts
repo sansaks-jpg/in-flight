@@ -93,7 +93,7 @@ interface Hooks { onHud(h: HudState): void; onToast(t: Toast): void; onPhase(p: 
 const gLimits = { piston: { p: 5.2, n: -2.4 }, turboprop: { p: 4.4, n: -1.8 }, jet: { p: 3.6, n: -1.4 } };
 const TAU = Math.PI * 2;
 const FINAL_GATE_M = 18000; // join final 18 km (9.7 nm) before the threshold
-const tmpV = new THREE.Vector3(), tmpV2 = new THREE.Vector3(), tmpQ = new THREE.Quaternion(), tmpE = new THREE.Euler();
+const tmpV = new THREE.Vector3(), tmpV2 = new THREE.Vector3(), tmpV3 = new THREE.Vector3(), tmpQ = new THREE.Quaternion(), tmpE = new THREE.Euler();
 
 export function buildFlightPlan(
   from: Airport,
@@ -284,6 +284,50 @@ export class Game {
   private nextAtcId = 1;
   private ackedWarnings = new Set<string>();
 
+  // 3D Navigation Assists
+  private navAssistsGroup = new THREE.Group();
+  private approachGatesGroup = new THREE.Group();
+  private taxiRibbonGroup = new THREE.Group();
+  show3dGates = true;
+  showTaxiRibbon = true;
+
+  // Cockpit Tooltip & Freelook
+  cockpitTooltip: CockpitTooltip | null = null;
+  freelookActive = false;
+
+  // Checklist state
+  checklistItems: ChecklistItem[] = [
+    { id: 'park_brake', label: 'PARKING BRAKE', detail: 'Release before taxi roll (B)', done: false, phase: 'taxi' },
+    { id: 'flaps_takeoff', label: 'FLAPS POSITION 1', detail: 'Set takeoff flap detent (F)', done: false, phase: 'taxi' },
+    { id: 'lights_taxi', label: 'LIGHTS BEACON & NAV', detail: 'Verify anti-collision beacon ON', done: false, phase: 'taxi' },
+    { id: 'atc_ground', label: 'TAXI CLEARANCE', detail: 'Acknowledge Ground taxi clearance', done: false, phase: 'taxi' },
+
+    { id: 'throttle_takeoff', label: 'TAKEOFF THRUST', detail: 'Advance throttle to 100% N1 (F4)', done: false, phase: 'takeoff' },
+    { id: 'centerline', label: 'CENTERLINE ALIGNMENT', detail: 'Keep nose wheel on runway line', done: false, phase: 'takeoff' },
+    { id: 'rotate_vr', label: 'ROTATE AT Vr', detail: 'Pitch up smoothly to +12° attitude', done: false, phase: 'takeoff' },
+
+    { id: 'gear_retract', label: 'LANDING GEAR RETRACT', detail: 'Positive climb rate: Gear UP (G)', done: false, phase: 'climb' },
+    { id: 'flaps_retract', label: 'FLAPS RETRACT', detail: 'Accelerate through clean speed (V)', done: false, phase: 'climb' },
+    { id: 'autopilot_arm', label: 'AUTOPILOT ENGAGE', detail: 'Arm LNAV and climb mode (Y)', done: false, phase: 'climb' },
+
+    { id: 'cruise_level', label: 'LEVEL OFF AT CRUISE', detail: 'Establish level cruise flight', done: false, phase: 'cruise' },
+    { id: 'cruise_power', label: 'CRUISE POWER 75%', detail: 'Set fuel-efficient cruise thrust', done: false, phase: 'cruise' },
+    { id: 'monitor_fuel', label: 'FUEL CROSSCHECK', detail: 'Verify fuel endurance vs distance', done: false, phase: 'cruise' },
+
+    { id: 'descent_power', label: 'DESCENT POWER', detail: 'Reduce thrust to establish 3° descent', done: false, phase: 'descent' },
+    { id: 'seatbelt_on', label: 'SEATBELT SIGN ON', detail: 'Notify passengers for approach (J)', done: false, phase: 'descent' },
+    { id: 'approach_prep', label: 'APPROACH BRIEFING', detail: 'Verify landing runway and ILS', done: false, phase: 'descent' },
+
+    { id: 'gear_down', label: 'LANDING GEAR 3-GREEN', detail: 'Extend gear and verify locked (G)', done: false, phase: 'final' },
+    { id: 'flaps_full', label: 'FULL LANDING FLAPS', detail: 'Extend full flaps for landing (F)', done: false, phase: 'final' },
+    { id: 'glideslope', label: 'GLIDESLOPE TRACKING', detail: 'Fly 3D approach gates or ILS', done: false, phase: 'final' },
+    { id: 'flare', label: 'TOUCHDOWN FLARE', detail: 'Retard throttle to IDLE, pitch +4°', done: false, phase: 'final' },
+
+    { id: 'reverse_thrust', label: 'REVERSE THRUST', detail: 'Deploy reverse thrust on touchdown', done: false, phase: 'rollout' },
+    { id: 'wheel_brakes', label: 'WHEEL BRAKES', detail: 'Decelerate smoothly to taxi speed', done: false, phase: 'rollout' },
+    { id: 'vacate_runway', label: 'RUNWAY VACATED', detail: 'Turn onto exit taxiway to apron', done: false, phase: 'rollout' },
+  ];
+
   constructor(public canvas: HTMLCanvasElement, hooks: Hooks) {
     this.hooks = hooks;
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance', logarithmicDepthBuffer: false });
@@ -352,6 +396,14 @@ export class Game {
     this.windFrom = Math.round(seed / 10) * 10; this.windKt = s.wind === 'calm' ? 0 : Math.round(s.wind === 'light' ? 6 + (seed % 5) : 14 + (seed % 7));
     this.turb = s.wind === 'calm' ? 0.02 : s.wind === 'light' ? 0.16 : 0.5; if (s.weather === 'overcast') this.turb += 0.1;
     this.world.rebuildAirports(from.lat, from.lon);
+
+    // 3D Navigation Assists in World Scene
+    this.navAssistsGroup.clear();
+    this.approachGatesGroup.clear();
+    this.taxiRibbonGroup.clear();
+    this.navAssistsGroup.add(this.approachGatesGroup, this.taxiRibbonGroup);
+    this.world.scene.add(this.navAssistsGroup);
+
     this.resetFlight(startMode);
     this.camera.fov = 65; this.setView(mode === 'attract' ? 'chase' : s.startMode === 'runway' ? 'cockpit' : 'cockpit');
     this.world.update(this.camera, this.fm.pos, 1, 0);
@@ -414,6 +466,7 @@ export class Game {
     this.lastLL = [this.lat(), this.lon()]; this.bestRem = dist; this.chaseInit = false; this.shakeImpulse = 0; this.lookYaw = this.lookPitch = 0; this.zoom = 1;
     this.effects?.update(0);
     this.audio.silence();
+    this.rebuild3dNavAssists();
   }
 
   rebuildFlightPlan() {
@@ -430,6 +483,7 @@ export class Game {
     } else {
       this.activeWpIdx = Math.min(1, this.flightPlan.length - 1);
     }
+    this.rebuild3dNavAssists();
   }
 
   setDepRunway(ident: string) {
@@ -489,7 +543,437 @@ export class Game {
     return best;
   }
   private disposeScenario() {
+    this.navAssistsGroup.clear();
+    this.approachGatesGroup.clear();
+    this.taxiRibbonGroup.clear();
     this.world?.dispose(); this.effects?.dispose(); this.cockpit?.dispose(); this.world = null; this.effects = null; this.cockpit = null; this.visual = null;
+  }
+
+  rebuild3dNavAssists() {
+    this.approachGatesGroup.clear();
+    this.taxiRibbonGroup.clear();
+    if (!this.world || !this.cfg) return;
+
+    // 1. Approach Corridor 3D Gates
+    const th = this.approachTh() || (this.cfg.to ? this.world.thresholds(this.cfg.to)[0] : null);
+    if (th) {
+      const dirX = -Math.sin(th.hdg * D2R);
+      const dirZ = -Math.cos(th.hdg * D2R);
+      const elev = this.cfg.to.elev;
+      const glideSlope = Math.tan(3 * D2R);
+      const distances = [450, 900, 1600, 2600, 4200, 6500, 9800, 14000, 20000];
+
+      for (const d of distances) {
+        const gx = th.x + dirX * d;
+        const gy = elev + 2.5 + d * glideSlope;
+        const gz = th.z + dirZ * d;
+        const w = 40 + d * 0.0025;
+        const h = 24 + d * 0.0015;
+
+        const pts = [
+          new THREE.Vector3(-w / 2, -h / 2, 0),
+          new THREE.Vector3(w / 2, -h / 2, 0),
+          new THREE.Vector3(w / 2, h / 2, 0),
+          new THREE.Vector3(0, h / 2 + 5, 0), // gate peak
+          new THREE.Vector3(-w / 2, h / 2, 0),
+          new THREE.Vector3(-w / 2, -h / 2, 0),
+        ];
+        const geo = new THREE.BufferGeometry().setFromPoints(pts);
+        const mat = new THREE.LineBasicMaterial({
+          color: 0x06b6d4,
+          transparent: true,
+          opacity: 0.75,
+          depthWrite: false,
+        });
+        const gate = new THREE.Line(geo, mat);
+        gate.position.set(gx, gy, gz);
+        gate.rotation.y = -th.hdg * D2R;
+        gate.userData = { distM: d, gx, gy, gz };
+        this.approachGatesGroup.add(gate);
+      }
+    }
+    this.approachGatesGroup.visible = this.show3dGates;
+
+    // 2. Taxi Ribbon Chevrons
+    if (this.depTh && this.fm) {
+      const shape = new THREE.Shape();
+      shape.moveTo(-3, -2);
+      shape.lineTo(0, 3);
+      shape.lineTo(3, -2);
+      shape.lineTo(1.5, -1.2);
+      shape.lineTo(0, 1.6);
+      shape.lineTo(-1.5, -1.2);
+      shape.closePath();
+      const arrowGeo = new THREE.ShapeGeometry(shape);
+      arrowGeo.rotateX(-Math.PI / 2);
+      const arrowMat = new THREE.MeshBasicMaterial({
+        color: 0x06b6d4,
+        transparent: true,
+        opacity: 0.8,
+        side: THREE.DoubleSide,
+        polygonOffset: true,
+        polygonOffsetFactor: -4,
+      });
+
+      const count = 16;
+      for (let i = 1; i <= count; i++) {
+        const t = i / (count + 1);
+        const ax = this.fm.pos.x + (this.depTh.x - this.fm.pos.x) * t;
+        const az = this.fm.pos.z + (this.depTh.z - this.fm.pos.z) * t;
+        const ay = (this.world.terrain.heightAt(ax, az) ?? this.cfg.from.elev) + 0.12;
+        const mesh = new THREE.Mesh(arrowGeo, arrowMat);
+        mesh.position.set(ax, ay, az);
+        mesh.rotation.y = -this.depTh.hdg * D2R;
+        this.taxiRibbonGroup.add(mesh);
+      }
+    }
+    this.taxiRibbonGroup.visible = this.showTaxiRibbon && this.currentFlightPhase === 'taxi' && this.fm?.wow;
+  }
+
+  setCockpitSubview(sub: 'pilot' | 'instruments' | 'copilot' | 'overhead') {
+    if (!this.cockpit) return;
+    this.setView('cockpit');
+    const [ex, ey, ez] = this.spec.eye;
+    switch (sub) {
+      case 'pilot':
+        this.cockpit.views.cockpit.pos.set(ex, ey, ez);
+        this.cockpit.views.cockpit.yaw = 0;
+        this.cockpit.views.cockpit.pitch = -0.1;
+        this.camera.fov = 65;
+        break;
+      case 'instruments':
+        this.cockpit.views.cockpit.pos.set(ex, ey - 0.12, ez + 0.15);
+        this.cockpit.views.cockpit.yaw = 0;
+        this.cockpit.views.cockpit.pitch = -0.38;
+        this.camera.fov = 50;
+        break;
+      case 'copilot':
+        this.cockpit.views.cockpit.pos.set(-ex, ey, ez);
+        this.cockpit.views.cockpit.yaw = 0.08;
+        this.cockpit.views.cockpit.pitch = -0.1;
+        this.camera.fov = 65;
+        break;
+      case 'overhead':
+        this.cockpit.views.cockpit.pos.set(0, ey - 0.22, ez + 0.1);
+        this.cockpit.views.cockpit.yaw = 0;
+        this.cockpit.views.cockpit.pitch = -0.65;
+        this.camera.fov = 68;
+        break;
+    }
+    this.lookYaw = 0;
+    this.lookPitch = 0;
+    this.toast(`Cockpit Camera: ${sub.toUpperCase()}`, 'info');
+  }
+
+  setFov(fov: number) {
+    this.camera.fov = clamp(fov, 35, 95);
+    this.camera.updateProjectionMatrix();
+  }
+
+  setTimeOfDay(tod: TimeOfDay) {
+    this.world?.setTimeOfDay(tod);
+    this.cfg.settings.tod = tod;
+    this.toast(`Time of Day: ${tod.toUpperCase()}`, 'info');
+  }
+
+  setWeather(w: Weather) {
+    this.world?.setWeather(w);
+    this.cfg.settings.weather = w;
+    this.toast(`Weather: ${w.toUpperCase()}`, 'info');
+  }
+
+  setWindPreset(preset: 'calm' | 'light' | 'strong') {
+    this.cfg.settings.wind = preset;
+    this.windKt = preset === 'calm' ? 0 : preset === 'light' ? 8 : 22;
+    this.toast(`Wind: ${preset.toUpperCase()} (${this.windKt} kt)`, 'info');
+  }
+
+  setAssistGates(v: boolean) {
+    this.show3dGates = v;
+    this.approachGatesGroup.visible = v;
+    this.toast(`3D Flight Path Gates: ${v ? 'ON' : 'OFF'}`, 'info');
+  }
+
+  setAssistTaxi(v: boolean) {
+    this.showTaxiRibbon = v;
+    this.taxiRibbonGroup.visible = v;
+    this.toast(`3D Taxi Ribbon: ${v ? 'ON' : 'OFF'}`, 'info');
+  }
+
+  private resolveCockpitTooltip(id: string, x: number, y: number): CockpitTooltip | null {
+    if (!this.fm) return null;
+    const c = this.fm.ctl, s = this.spec;
+    switch (id) {
+      case 'throttle':
+        return {
+          id,
+          label: 'THROTTLE CONTROL',
+          value: `${Math.round(c.throttle * 100)}% THRUST (${Math.round(this.fm.n[0] * 100)}% N1)`,
+          actionHint: 'Drag up/down or press keys 1–9 / F1–F4',
+          x,
+          y,
+        };
+      case 'flaps':
+        return {
+          id,
+          label: 'FLAPS LEVER',
+          value: `Position ${c.flapsIdx} of ${s.flapDetents}`,
+          actionHint: 'Drag or press [F] Flaps+, [V] Flaps−',
+          x,
+          y,
+        };
+      case 'gear':
+        return {
+          id,
+          label: 'LANDING GEAR LEVER',
+          value: c.gearDown ? 'DOWN & LOCKED (3-GREEN)' : 'UP & RETRACTED',
+          actionHint: 'Click or press [G] to toggle',
+          x,
+          y,
+        };
+      case 'speedbrake':
+        return {
+          id,
+          label: 'SPEEDBRAKE / SPOILERS',
+          value: c.speedbrake > 0.05 ? 'DEPLOYED' : 'RETRACTED',
+          actionHint: 'Drag or press [Z] to toggle',
+          x,
+          y,
+        };
+      case 'yoke':
+        return {
+          id,
+          label: s.kind === 'jet' ? 'SIDE STICK CONTROLLER' : 'PRIMARY FLIGHT YOKE',
+          value: `Pitch ${(this.fm.pitch * R2D).toFixed(1)}° · Roll ${(this.fm.bank * R2D).toFixed(1)}°`,
+          actionHint: 'Drag to fly or use Arrow / WASD keys',
+          x,
+          y,
+        };
+      case 'park':
+        return {
+          id,
+          label: 'PARKING BRAKE',
+          value: c.parking ? 'SET (ON)' : 'RELEASED (OFF)',
+          actionHint: 'Click or press [B] to toggle',
+          x,
+          y,
+        };
+      case 'rev':
+        return {
+          id,
+          label: 'REVERSE THRUST',
+          value: c.reverse ? 'ARMED (ACTIVE)' : 'OFF (FORWARD)',
+          actionHint: 'Click or press [T] to toggle',
+          x,
+          y,
+        };
+      case 'ap':
+        return {
+          id,
+          label: 'AUTOPILOT MASTER',
+          value: this.ap.on ? `ENGAGED · ${this.ap.phase.toUpperCase()}` : 'DISENGAGED (FD ONLY)',
+          actionHint: 'Click or press [Y] to engage/disengage',
+          x,
+          y,
+        };
+      case 'apnav':
+        return {
+          id,
+          label: 'AUTOPILOT NAV (LNAV)',
+          value: this.ap.nav ? `ACTIVE · TRACKING ${this.cfg.to.icao}` : 'HDG SELECT MODE',
+          actionHint: 'Click or press [N] to toggle',
+          x,
+          y,
+        };
+      case 'appr':
+        return {
+          id,
+          label: 'AUTOPILOT APPROACH (APPR)',
+          value: this.ap.appr ? 'ARMED · ILS GLIDESLOPE CAPTURE' : 'OFF',
+          actionHint: 'Click or press [U] to arm approach',
+          x,
+          y,
+        };
+      case '_hdg':
+      case 'hdg-':
+      case 'hdg+':
+        return {
+          id,
+          label: 'AUTOPILOT HEADING BUG',
+          value: `${String(Math.round(this.ap.hdg)).padStart(3, '0')}° MAG`,
+          actionHint: 'Click [- / +] or press [, / .] to change',
+          x,
+          y,
+        };
+      case '_alt':
+      case 'alt-':
+      case 'alt+':
+        return {
+          id,
+          label: 'AUTOPILOT TARGET ALTITUDE',
+          value: `${this.ap.altFt.toLocaleString()} FT MSL`,
+          actionHint: 'Click [- / +] or press [[ / ]] to change',
+          x,
+          y,
+        };
+      case '_spd':
+      case 'spd-':
+      case 'spd+':
+        return {
+          id,
+          label: 'AUTOPILOT TARGET AIRSPEED',
+          value: `${this.ap.spd} KT IAS`,
+          actionHint: 'Click [- / +] or press [- / =] to change',
+          x,
+          y,
+        };
+      case 'bcn':
+        return {
+          id,
+          label: 'BEACON LIGHT SWITCH',
+          value: this.lights.beacon ? 'ON (FLASHING)' : 'OFF',
+          actionHint: 'Click to toggle',
+          x,
+          y,
+        };
+      case 'strb':
+        return {
+          id,
+          label: 'STROBE LIGHTS SWITCH',
+          value: this.lights.strobe ? 'ON (HIGH INTENSITY)' : 'OFF',
+          actionHint: 'Click or press [O] to toggle',
+          x,
+          y,
+        };
+      case 'nav':
+        return {
+          id,
+          label: 'NAVIGATION LIGHTS',
+          value: this.lights.nav ? 'ON (PORT/STBD/TAIL)' : 'OFF',
+          actionHint: 'Click to toggle',
+          x,
+          y,
+        };
+      case 'land':
+        return {
+          id,
+          label: 'LANDING LIGHTS',
+          value: this.lights.land ? 'ON (RUNWAY BEAMS)' : 'OFF',
+          actionHint: 'Click or press [L] to toggle',
+          x,
+          y,
+        };
+      case 'belt':
+        return {
+          id,
+          label: 'SEATBELT SIGN',
+          value: this.seatbelt ? 'ON (CHIME ARMED)' : 'OFF',
+          actionHint: 'Click or press [J] to chime',
+          x,
+          y,
+        };
+      case 'pa':
+        return {
+          id,
+          label: 'PASSENGER ADDRESS (CABIN PA)',
+          value: 'CAPTAIN MICROPHONE',
+          actionHint: 'Click or press [K] to make broadcast',
+          x,
+          y,
+        };
+      case 'pax':
+        return {
+          id,
+          label: 'PASSENGER CABIN',
+          value: `${Math.round(this.comfort)}% PAX COMFORT`,
+          actionHint: 'Click to interact with passengers',
+          x,
+          y,
+        };
+      default:
+        return null;
+    }
+  }
+
+  private updateChecklist() {
+    if (!this.fm) return;
+    const c = this.fm.ctl, phase = this.currentFlightPhase;
+    for (const it of this.checklistItems) {
+      if (it.done) continue;
+      switch (it.id) {
+        case 'park_brake':
+          if (!c.parking) it.done = true;
+          break;
+        case 'flaps_takeoff':
+          if (c.flapsIdx >= 1) it.done = true;
+          break;
+        case 'lights_taxi':
+          if (this.lights.beacon) it.done = true;
+          break;
+        case 'throttle_takeoff':
+          if (c.throttle > 0.92) it.done = true;
+          break;
+        case 'rotate_vr':
+          if (!this.fm.wow && phase !== 'taxi') it.done = true;
+          break;
+        case 'gear_retract':
+          if (!c.gearDown && !this.fm.wow) it.done = true;
+          break;
+        case 'flaps_retract':
+          if (c.flapsIdx === 0 && !this.fm.wow) it.done = true;
+          break;
+        case 'autopilot_arm':
+          if (this.ap.on) it.done = true;
+          break;
+        case 'cruise_level':
+          if (phase === 'cruise') it.done = true;
+          break;
+        case 'seatbelt_on':
+          if (this.seatbelt) it.done = true;
+          break;
+        case 'gear_down':
+          if (c.gearDown && (phase === 'final' || phase === 'rollout')) it.done = true;
+          break;
+        case 'flaps_full':
+          if (c.flapsIdx >= this.spec.flapDetents - 1 && phase === 'final') it.done = true;
+          break;
+        case 'reverse_thrust':
+          if (c.reverse && phase === 'rollout') it.done = true;
+          break;
+        case 'wheel_brakes':
+          if (c.brake > 0.25 && phase === 'rollout') it.done = true;
+          break;
+      }
+    }
+  }
+
+  toggleChecklistItem(id: string) {
+    const it = this.checklistItems.find((x) => x.id === id);
+    if (it) {
+      it.done = !it.done;
+      if (it.done) {
+        this.audio.chirp();
+        this.toast(`Checklist: ${it.label} COMPLETED +25`, 'good');
+        this.addScore('Checklist item', 25);
+      }
+    }
+  }
+
+  autoCompletePhaseChecklist(phase?: FlightPhase) {
+    const p = phase || this.currentFlightPhase;
+    const items = this.checklistItems.filter((x) => x.phase === p);
+    let newlyDone = 0;
+    for (const it of items) {
+      if (!it.done) {
+        it.done = true;
+        newlyDone++;
+      }
+    }
+    if (newlyDone > 0) {
+      this.audio.chirp();
+      this.toast(`Checklist: ${p.toUpperCase()} PHASE COMPLETED +${newlyDone * 25}`, 'good');
+      this.addScore(`${p.toUpperCase()} checklist completed`, newlyDone * 25);
+    }
   }
   dispose() {
     cancelAnimationFrame(this.raf); this.disposeScenario(); this.audio.silence();
@@ -749,9 +1233,25 @@ export class Game {
       }
     }
     this.drag = { id: 'look', sx: e.clientX, sy: e.clientY, v: 0, look: true };
+    this.freelookActive = true;
   };
   private onPointerMove = (e: PointerEvent) => {
-    const d = this.drag; if (!d) return;
+    const d = this.drag;
+    if (!d) {
+      if (this.mode === 'play' && this.isInterior() && this.cockpit && this.phase === 'playing') {
+        this.cockpit.camera.updateMatrixWorld();
+        this.raycaster.setFromCamera(this.ndc(e), this.cockpit.camera);
+        const hit = this.cockpit.pick(this.raycaster, true);
+        if (hit) {
+          this.cockpitTooltip = this.resolveCockpitTooltip(hit.id, e.clientX, e.clientY);
+        } else {
+          this.cockpitTooltip = null;
+        }
+      } else {
+        this.cockpitTooltip = null;
+      }
+      return;
+    }
     const c = this.fm?.ctl; const dx = e.clientX - d.sx, dy = e.clientY - d.sy;
     switch (d.id) {
       case 'throttle': c.throttle = clamp(d.v - dy / 170, 0, 1); break;
@@ -759,6 +1259,7 @@ export class Game {
       case 'speedbrake': c.speedbrake = clamp(d.v - dy / 110, 0, 1); break;
       case 'yoke': this.yokeDrag = { pitch: clamp(dy / 80, -1, 1), roll: clamp(dx / 80, -1, 1) }; break;
       case 'look': {
+        this.freelookActive = true;
         const p = this.pointers.get(e.pointerId); const mx = p ? e.clientX - p.x : 0, my = p ? e.clientY - p.y : 0;
         if (p) { p.x = e.clientX; p.y = e.clientY; }
         if (this.isInterior()) { this.lookYaw = clamp(this.lookYaw - mx * 0.0045, -2.6, 2.6); this.lookPitch = clamp(this.lookPitch - my * 0.0045, -1.2, 1.2); }
@@ -766,7 +1267,12 @@ export class Game {
       }
     }
   };
-  private onPointerUp = (e: PointerEvent) => { this.pointers.delete(e.pointerId); this.drag = null; this.yokeDrag = null; };
+  private onPointerUp = (e: PointerEvent) => {
+    this.pointers.delete(e.pointerId);
+    this.drag = null;
+    this.yokeDrag = null;
+    this.freelookActive = false;
+  };
   private onWheel = (e: WheelEvent) => { this.zoom = clamp(this.zoom * (1 + e.deltaY * 0.0012), 0.4, 3); };
   private chatWithPassenger() {
     const m = this.comfort / 100;
@@ -1288,7 +1794,15 @@ export class Game {
     const interior = this.isInterior() && this.mode === 'play';
     if (interior && this.cockpit) this.cockpit.update(dt, this.time, this.panelData(), { pitch: fm.ctl.pitch, roll: fm.ctl.roll, yaw: fm.ctl.yaw, throttle: fm.ctl.throttle, flapsIdx: fm.ctl.flapsIdx, gearDown: fm.ctl.gearDown, speedbrake: fm.ctl.speedbrake }, { lights: this.lights, seatbelt: this.seatbelt, parking: fm.ctl.parking, reverse: fm.ctl.reverse, apOn: this.ap.on, apNav: this.ap.nav, apAppr: this.ap.appr, apHdg: this.ap.hdg, apAlt: this.ap.altFt, apSpd: this.ap.spd, mood: this.comfort / 100, shake: clamp(this.turb * 1.6 + this.shakeImpulse, 0, 1.6) }, true);
     v.setInterior(interior);
-    if (this.phase === 'playing') this.audio.update(this.audioState(false), dt);
+    if (this.phase === 'playing') {
+      this.updateChecklist();
+      if (this.showTaxiRibbon && this.taxiRibbonGroup.visible) {
+        if (!fm.wow || this.currentFlightPhase !== 'taxi') {
+          this.taxiRibbonGroup.visible = false;
+        }
+      }
+      this.audio.update(this.audioState(false), dt);
+    }
     w.sunLight.visible = true;
   }
   private audioState(paused: boolean) {
@@ -1348,6 +1862,16 @@ export class Game {
   private panelData(): PanelData {
     const fm = this.fm, s = this.spec, ils = this.computeIls(), rem = this.distToDest();
     const brg = bearing(this.lat(), this.lon(), this.cfg.to.lat, this.cfg.to.lon);
+    const wp = this.flightPlan[this.activeWpIdx];
+    let activeWp: { name: string; distNm: number; etaMin: number } | null = null;
+    if (wp) {
+      const d = haversine(this.lat(), this.lon(), wp.lat, wp.lon);
+      const wpDistNm = d / M_PER_NM;
+      const etaMin = wpDistNm / Math.max(30, fm.gs * MS_TO_KT) * 60;
+      activeWp = { name: wp.name, distNm: wpDistNm, etaMin };
+    }
+    const relWind = wrap180(this.windFrom - fm.heading);
+    const crosswind = Math.round(this.windKt * Math.sin(relWind * D2R));
     return {
       kias: fm.ias / 0.514444, altFt: fm.pos.y / 0.3048, vsFpm: fm.vs * 196.85, hdg: fm.heading, trk: fm.track, pitch: fm.pitch * R2D, bank: fm.bank, slip: fm.beta, mach: fm.mach, gsKt: fm.gs * MS_TO_KT,
       n1: fm.n.slice(0, s.engines), fuelKg: fm.fuel, fuelFrac: fm.fuelFrac, flapsIdx: fm.ctl.flapsIdx, flapsDet: s.flapDetents, gear: fm.gearPos, throttle: fm.ctl.throttle, parking: fm.ctl.parking, reverse: fm.ctl.reverse, spoilers: fm.sbPos,
@@ -1355,6 +1879,12 @@ export class Game {
       dest: { id: this.cfg.to.icao, name: this.cfg.to.name, brg: wrap180(brg), distNm: rem / M_PER_NM, eteMin: (rem / Math.max(30, fm.gs)) / 60 },
       ils: ils ? { valid: ils.valid, loc: ils.locDots, gs: ils.gsDots, ident: ils.ident, distNm: ils.dist / M_PER_NM } : null,
       warn: this.warnState.map((w) => w.text), aglFt: fm.agl / 0.3048, alphaFrac: fm.alpha / fm.alphaStall, time: this.time, thrustPct: (Math.abs(fm.thrustN) / ((s.thrust || s.power / 60) * (s.kind === 'jet' ? 1 : 1))) * 100, fuelFlowKgH: fm.fuelFlow * 3600,
+      wind: { dir: this.windFrom, kt: this.windKt, cross: crosswind },
+      activeWp,
+      flightPhase: this.currentFlightPhase,
+      vSpeeds: { v1: Math.max(20, Math.round(s.vr - 5)), vr: s.vr, v2: Math.round(s.vr + 10), vapp: s.vapp },
+      qnhInHg: 29.92,
+      oatC: Math.round(15 - (fm.pos.y / 1000) * 6.5),
     };
   }
 
@@ -1545,6 +2075,52 @@ export class Game {
     }, 1500);
   }
 
+  private computeWorldMarkers(): WorldScreenMarker[] {
+    if (!this.world || !this.fm) return [];
+    const markers: WorldScreenMarker[] = [];
+    this.camera.getWorldDirection(tmpV3);
+
+    const projectPos = (pos: THREE.Vector3, id: string, label: string, distNm: number, altFt: number, type: 'waypoint' | 'airport' | 'runway') => {
+      const toPos = tmpV.copy(pos).sub(this.camera.position);
+      const dot = toPos.dot(tmpV3);
+      const inFront = dot > 1.0;
+      const proj = tmpV2.copy(pos).project(this.camera);
+      const rawX = proj.x * 0.5 + 0.5;
+      const rawY = -proj.y * 0.5 + 0.5;
+      const inView = inFront && rawX >= 0.05 && rawX <= 0.95 && rawY >= 0.05 && rawY <= 0.95;
+      let x = rawX;
+      let y = rawY;
+      const angleDeg = Math.round(Math.atan2(rawY - 0.5, rawX - 0.5) * R2D);
+      if (!inFront) {
+        x = rawX > 0.5 ? 0.06 : 0.94;
+        y = 0.92;
+      } else {
+        x = clamp(rawX, 0.06, 0.94);
+        y = clamp(rawY, 0.06, 0.94);
+      }
+      markers.push({ id, label, distNm, altFt, type, x, y, inView, angleDeg });
+    };
+
+    // 1. Active Waypoint
+    if (this.flightPlan.length > 0 && this.activeWpIdx < this.flightPlan.length) {
+      const wp = this.flightPlan[this.activeWpIdx];
+      const wx = this.world.proj.x(wp.lon);
+      const wz = this.world.proj.z(wp.lat);
+      const wy = (this.world.terrain.heightAt(wx, wz) ?? 0) + (wp.altM || 1000);
+      const distNm = haversine(this.lat(), this.lon(), wp.lat, wp.lon) / M_PER_NM;
+      projectPos(new THREE.Vector3(wx, wy, wz), 'wp_' + wp.name, wp.name, distNm, Math.round(wy / 0.3048), 'waypoint');
+    }
+
+    // 2. Destination Runway or Airport
+    const th = this.approachTh();
+    if (th) {
+      const distNm = Math.hypot(this.fm.pos.x - th.x, this.fm.pos.z - th.z) / M_PER_NM;
+      projectPos(new THREE.Vector3(th.x, this.cfg.to.elev + 5, th.z), 'dest_rwy', `RWY ${th.ident} · ${this.cfg.to.icao}`, distNm, Math.round(this.cfg.to.elev / 0.3048), 'runway');
+    }
+
+    return markers;
+  }
+
   hud(): HudState {
     const fm = this.fm, s = this.spec, ils = this.computeIls(), rem = this.distToDest();
     const brg = bearing(this.lat(), this.lon(), this.cfg.to.lat, this.cfg.to.lon);
@@ -1645,6 +2221,18 @@ export class Game {
       atc: latestAtc,
       atcLog: this.atcMessages,
       activeWp,
+      cockpitTooltip: this.cockpitTooltip,
+      freelookActive: this.freelookActive,
+      worldMarkers: this.computeWorldMarkers(),
+      show3dGates: this.show3dGates,
+      showTaxiRibbon: this.showTaxiRibbon,
+      activeChecklist: {
+        items: this.checklistItems,
+        currentPhase: flightPhase,
+        completedCount: this.checklistItems.filter((x) => x.done).length,
+        totalCount: this.checklistItems.length,
+      },
+      fov: Math.round(this.camera.fov),
     };
   }
 }

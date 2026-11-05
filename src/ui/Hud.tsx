@@ -5,6 +5,19 @@ import { MapPanel } from './MapPanel';
 import { Modal, SettingsPanel, ControlsPanel, ScoresPanel } from './Screens';
 import { Airport } from '../data/airports';
 import { wrap180, clamp } from '../sim/geo';
+import {
+  CockpitTooltipOverlay,
+  FreelookReticle,
+  WorldMarkersOverlay,
+  AtcWindow,
+  CameraWindow,
+  ChecklistWindow,
+  WeatherWindow,
+  EfbWindow,
+  CopilotWindow,
+  SystemsWindow,
+  MsfsExternalHud,
+} from './MsfsWindows';
 
 export type { HudMode };
 export type HudLayoutMode = HudMode;
@@ -735,6 +748,24 @@ function MsfsToolbar({
   setHudMode,
   onToggleApConsole,
   apConsoleOpen,
+  atcOpen = false,
+  onToggleAtc,
+  cameraOpen = false,
+  onToggleCamera,
+  checklistOpen = false,
+  onToggleChecklist,
+  weatherOpen = false,
+  onToggleWeather,
+  efbOpen = false,
+  onToggleEfb,
+  copilotOpen = false,
+  onToggleCopilot,
+  systemsOpen = false,
+  onToggleSystems,
+  pinned = true,
+  onTogglePin,
+  hovered = false,
+  onHoverChange,
 }: {
   game: Game;
   settings: Settings;
@@ -745,6 +776,24 @@ function MsfsToolbar({
   setHudMode: (m: HudMode) => void;
   onToggleApConsole?: () => void;
   apConsoleOpen?: boolean;
+  atcOpen?: boolean;
+  onToggleAtc?: () => void;
+  cameraOpen?: boolean;
+  onToggleCamera?: () => void;
+  checklistOpen?: boolean;
+  onToggleChecklist?: () => void;
+  weatherOpen?: boolean;
+  onToggleWeather?: () => void;
+  efbOpen?: boolean;
+  onToggleEfb?: () => void;
+  copilotOpen?: boolean;
+  onToggleCopilot?: () => void;
+  systemsOpen?: boolean;
+  onToggleSystems?: () => void;
+  pinned?: boolean;
+  onTogglePin?: () => void;
+  hovered?: boolean;
+  onHoverChange?: (v: boolean) => void;
 }) {
   const nextModeMap: Record<HudMode, HudMode> = {
     standard: 'minimal',
@@ -760,89 +809,197 @@ function MsfsToolbar({
   };
 
   const hud = game.hud();
+  const isVisible = pinned || hovered;
 
   return (
-    <div className="absolute top-2 sm:top-3 left-1/2 -translate-x-1/2 z-30 pointer-events-auto flex items-center gap-1 sm:gap-1.5 p-1 rounded-2xl bg-slate-950/85 border border-white/20 backdrop-blur-md shadow-2xl max-w-[calc(100vw-16px)] sm:max-w-none">
-      <Btn
-        onClick={() => game.cycleView()}
-        title="Cycle Camera View (C) [Cockpit, Chase, Spotter, Aisle, Window]"
-        className="flex items-center gap-1 sm:gap-1.5 !px-2 sm:!px-3"
-      >
-        <span>📷</span>
-        <span className="uppercase tracking-wider text-[10px] hidden md:inline">{game.viewName()}</span>
-      </Btn>
-
-      <Btn onClick={onMap} on={mapOpen} title="Toggle World Moving Map (M)" className="!px-2 sm:!px-3">
-        <span>🗺️</span>
-        <span className="hidden sm:inline ml-1">Map</span>
-      </Btn>
-
-      <div className="flex items-center gap-0.5">
-        <Btn
-          onClick={() => game.action('ap')}
-          on={hud.ap.on}
-          title="Toggle Master Autopilot (Y)"
-          className="!px-2 sm:!px-3"
+    <>
+      {/* Top Slide-Down Hover Handle Tab */}
+      {!isVisible && (
+        <button
+          onClick={() => {
+            onHoverChange?.(true);
+            onTogglePin?.();
+          }}
+          onMouseEnter={() => onHoverChange?.(true)}
+          className="fixed top-0 left-1/2 -translate-x-1/2 z-30 pointer-events-auto px-3.5 py-1 rounded-b-xl bg-slate-950/90 border-b border-x border-white/20 text-[10px] font-black text-cyan-300 hover:text-white transition shadow-2xl flex items-center gap-1.5 backdrop-blur-md"
+          title="Open Microsoft Flight Simulator Toolbar"
         >
-          <span>🕹️</span>
-          <span className="hidden sm:inline ml-1">{hud.ap.on ? 'AP ON' : 'AP'}</span>
-          <span className="sm:hidden ml-0.5 text-[10px]">{hud.ap.on ? 'ON' : 'AP'}</span>
-        </Btn>
-        {onToggleApConsole && (
-          <button
-            onClick={onToggleApConsole}
-            className={`px-1.5 py-1.5 rounded-xl text-[10px] font-bold border backdrop-blur-md transition ${
-              apConsoleOpen
-                ? 'bg-cyan-400 text-slate-950 border-cyan-300'
-                : 'bg-slate-950/70 text-slate-400 border-white/15 hover:text-white'
-            }`}
-            title="Toggle Autopilot Guidance & Tuning Console"
+          <span>▼</span>
+          <span className="tracking-widest uppercase">MSFS TOOLBAR</span>
+        </button>
+      )}
+
+      {/* Main MSFS Drop-Down Toolbar */}
+      {isVisible && (
+        <div
+          onMouseEnter={() => onHoverChange?.(true)}
+          onMouseLeave={() => onHoverChange?.(false)}
+          className="fixed top-2 sm:top-3 left-1/2 -translate-x-1/2 z-30 pointer-events-auto flex items-center gap-1 sm:gap-1.5 p-1 rounded-2xl bg-slate-950/90 border border-white/25 backdrop-blur-xl shadow-[0_15px_40px_rgba(0,0,0,0.6)] max-w-[calc(100vw-16px)] sm:max-w-none overflow-x-auto no-scrollbar animate-[fadein_.15s_ease-out]"
+        >
+          {/* ATC Radio Communications */}
+          <Btn
+            onClick={onToggleAtc}
+            on={atcOpen}
+            title="Air Traffic Control Communications Window"
+            className="!px-2 sm:!px-2.5"
           >
-            ⚙
+            <span>📻</span>
+            <span className="hidden md:inline ml-1">ATC</span>
+          </Btn>
+
+          {/* Camera & Views */}
+          <Btn
+            onClick={onToggleCamera || (() => game.cycleView())}
+            on={cameraOpen}
+            title="Camera Views & Showcase Window (C)"
+            className="flex items-center gap-1 !px-2 sm:!px-2.5"
+          >
+            <span>🎥</span>
+            <span className="uppercase tracking-wider text-[10px] hidden md:inline">Cam</span>
+          </Btn>
+
+          {/* Checklist & Objectives */}
+          <Btn
+            onClick={onToggleChecklist}
+            on={checklistOpen}
+            title="Phase Checklist & Flight Objectives Window"
+            className="!px-2 sm:!px-2.5"
+          >
+            <span>📋</span>
+            <span className="hidden md:inline ml-1">Checklist</span>
+          </Btn>
+
+          {/* Weather & Time */}
+          <Btn
+            onClick={onToggleWeather}
+            on={weatherOpen}
+            title="Weather Conditions & Time of Day Window"
+            className="!px-2 sm:!px-2.5"
+          >
+            <span>⛅</span>
+            <span className="hidden md:inline ml-1">Weather</span>
+          </Btn>
+
+          {/* EFB / VFR Map */}
+          <Btn
+            onClick={onToggleEfb || onMap}
+            on={efbOpen || mapOpen}
+            title="Electronic Flight Bag & Moving Map Tablet (M)"
+            className="!px-2 sm:!px-2.5"
+          >
+            <span>🗺️</span>
+            <span className="hidden sm:inline ml-1">EFB</span>
+          </Btn>
+
+          {/* AI Copilot & Assistances */}
+          <Btn
+            onClick={onToggleCopilot}
+            on={copilotOpen}
+            title="AI Copilot & Flight Assistance Settings"
+            className="!px-2 sm:!px-2.5"
+          >
+            <span>🤖</span>
+            <span className="hidden lg:inline ml-1">Copilot</span>
+          </Btn>
+
+          {/* Aircraft Systems */}
+          <Btn
+            onClick={onToggleSystems}
+            on={systemsOpen}
+            title="Aircraft Systems, Fuel & Exterior Lighting"
+            className="!px-2 sm:!px-2.5"
+          >
+            <span>⚙️</span>
+            <span className="hidden lg:inline ml-1">Systems</span>
+          </Btn>
+
+          {/* Autopilot Button & Console Config */}
+          <div className="flex items-center gap-0.5">
+            <Btn
+              onClick={() => game.action('ap')}
+              on={hud.ap.on}
+              title="Toggle Master Autopilot (Y)"
+              className="!px-2 sm:!px-2.5"
+            >
+              <span>🕹️</span>
+              <span className="hidden sm:inline ml-1">{hud.ap.on ? 'AP ON' : 'AP'}</span>
+              <span className="sm:hidden ml-0.5 text-[10px]">{hud.ap.on ? 'ON' : 'AP'}</span>
+            </Btn>
+            {onToggleApConsole && (
+              <button
+                onClick={onToggleApConsole}
+                className={`px-1.5 py-1.5 rounded-xl text-[10px] font-bold border backdrop-blur-md transition ${
+                  apConsoleOpen
+                    ? 'bg-cyan-400 text-slate-950 border-cyan-300'
+                    : 'bg-slate-950/70 text-slate-400 border-white/15 hover:text-white'
+                }`}
+                title="Toggle Autopilot Guidance Console"
+              >
+                ⚙
+              </button>
+            )}
+          </div>
+
+          {/* HUD Mode Cycle */}
+          <button
+            onClick={handleCycleMode}
+            className="px-2 sm:px-2.5 py-1.5 rounded-xl text-xs font-bold border border-white/15 bg-white/5 hover:bg-white/15 backdrop-blur text-slate-200 transition flex items-center gap-1"
+            title="Cycle HUD Display Mode (H) [Standard, Minimal, Assisted, Cockpit]"
+          >
+            <span>🖥️</span>
+            <span className="uppercase text-[10px] tracking-wider text-cyan-300 hidden md:inline">
+              {hudMode === 'standard'
+                ? 'Standard'
+                : hudMode === 'minimal'
+                ? 'Minimal'
+                : hudMode === 'assisted'
+                ? 'Assisted'
+                : 'Cockpit'}
+            </span>
           </button>
-        )}
-      </div>
 
-      <button
-        onClick={handleCycleMode}
-        className="px-2 sm:px-2.5 py-1.5 rounded-xl text-xs font-bold border border-white/15 bg-white/5 hover:bg-white/15 backdrop-blur text-slate-200 transition flex items-center gap-1"
-        title="Cycle HUD Display Mode (H) [Standard, Minimal, Assisted, Cockpit]"
-      >
-        <span>🖥️</span>
-        <span className="uppercase text-[10px] tracking-wider text-cyan-300 hidden md:inline">
-          {hudMode === 'standard'
-            ? 'Standard'
-            : hudMode === 'minimal'
-            ? 'Minimal'
-            : hudMode === 'assisted'
-            ? 'Assisted'
-            : 'Cockpit'}
-        </span>
-      </button>
+          {/* Flight Phase Badge */}
+          <div
+            className="px-2.5 py-1 rounded-xl text-[10px] font-black uppercase tracking-wider bg-white/5 border border-white/10 text-emerald-400 font-mono hidden xl:inline-block"
+            title={`Current Flight Phase: ${hud.flightPhase?.toUpperCase() || 'CRUISE'}`}
+          >
+            {hud.flightPhase?.toUpperCase() || 'CRUISE'}
+          </div>
 
-      {/* Flight Phase Badge */}
-      <div
-        className="px-2.5 py-1 rounded-xl text-[10px] font-black uppercase tracking-wider bg-white/5 border border-white/10 text-emerald-400 font-mono hidden lg:inline-block"
-        title={`Current Flight Phase: ${hud.flightPhase?.toUpperCase() || 'CRUISE'}`}
-      >
-        {hud.flightPhase?.toUpperCase() || 'CRUISE'}
-      </div>
+          {/* Toolbar Pin Button */}
+          {onTogglePin && (
+            <button
+              onClick={onTogglePin}
+              title={pinned ? 'Unpin Toolbar (Auto-hide on hover)' : 'Pin Toolbar (Keep visible)'}
+              className={`px-2 py-1.5 rounded-xl text-xs font-bold border transition ${
+                pinned
+                  ? 'bg-cyan-400/20 text-cyan-300 border-cyan-400/40'
+                  : 'bg-white/5 text-slate-400 border-white/15 hover:text-white'
+              }`}
+            >
+              📌
+            </button>
+          )}
 
-      <Btn
-        onClick={() => {
-          game.setMuted(!settings.muted);
-          setSettings({ muted: !settings.muted });
-        }}
-        title="Toggle Master Audio"
-        className="!px-2 sm:!px-3"
-      >
-        {settings.muted ? '🔇' : '🔊'}
-      </Btn>
+          {/* Audio Mute */}
+          <Btn
+            onClick={() => {
+              game.setMuted(!settings.muted);
+              setSettings({ muted: !settings.muted });
+            }}
+            title="Toggle Master Audio"
+            className="!px-2 sm:!px-2.5"
+          >
+            {settings.muted ? '🔇' : '🔊'}
+          </Btn>
 
-      <Btn onClick={() => game.pause()} title="Pause Flight (P / Esc)" className="!px-2 sm:!px-3">
-        ⏸️
-      </Btn>
-    </div>
+          {/* Pause Flight */}
+          <Btn onClick={() => game.pause()} title="Pause Flight (P / Esc)" className="!px-2 sm:!px-2.5">
+            ⏸️
+          </Btn>
+        </div>
+      )}
+    </>
   );
 }
 
@@ -1692,6 +1849,15 @@ export function Hud({
 }) {
   const [apConsoleOpen, setApConsoleOpen] = useState(false);
   const [atcLogOpen, setAtcLogOpen] = useState(false);
+  const [atcOpen, setAtcOpen] = useState(false);
+  const [cameraOpen, setCameraOpen] = useState(false);
+  const [checklistOpen, setChecklistOpen] = useState(false);
+  const [weatherOpen, setWeatherOpen] = useState(false);
+  const [efbOpen, setEfbOpen] = useState(false);
+  const [copilotOpen, setCopilotOpen] = useState(false);
+  const [systemsOpen, setSystemsOpen] = useState(false);
+  const [toolbarPinned, setToolbarPinned] = useState(true);
+  const [toolbarHovered, setToolbarHovered] = useState(false);
 
   const coarse = matchMedia('(pointer: coarse)').matches;
   const metric = settings.units === 'metric';
@@ -1715,13 +1881,15 @@ export function Hud({
 
   // Emergency elevation: in minimal or cockpit mode, critical stall/terrain alerts restore PFD visibility
   const showPfd =
-    ((hudMode === 'standard' || hudMode === 'assisted') && !(hud.view === 'cockpit' && !coarse)) ||
-    (critical && (hudMode === 'minimal' || hudMode === 'cockpit'));
+    critical ||
+    (hudMode === 'assisted' && !(hud.view === 'cockpit' && !coarse)) ||
+    (coarse && hudMode === 'standard');
+
   const showTacticalDock =
-    hudMode !== 'cockpit' &&
-    hudMode !== 'minimal' &&
+    hudMode === 'assisted' &&
     !coarse &&
     !(hud.view === 'cockpit');
+
   const showNavStack = hudMode !== 'cockpit';
 
   // Cruise phase dimming for secondary panels per Section 6.2
@@ -1748,6 +1916,26 @@ export function Hud({
         />
       )}
 
+      {/* Cockpit Interactive Tooltip Overlay */}
+      {hud.view === 'cockpit' && !isOverlayOpen && (
+        <CockpitTooltipOverlay tooltip={hud.cockpitTooltip} />
+      )}
+
+      {/* Freelook Center White Dot Reticle */}
+      {hud.view === 'cockpit' && !isOverlayOpen && (
+        <FreelookReticle active={true} />
+      )}
+
+      {/* 3D Spatial World Navigation Markers */}
+      {!isOverlayOpen && (
+        <WorldMarkersOverlay markers={hud.worldMarkers} />
+      )}
+
+      {/* MSFS External Chase HUD (Corner Clusters) */}
+      {hud.view !== 'cockpit' && hudMode !== 'minimal' && !coarse && !isOverlayOpen && (
+        <MsfsExternalHud hud={hud} metric={metric} />
+      )}
+
       {/* Top MSFS Floating Quick Toolbar */}
       {!isOverlayOpen && (
         <MsfsToolbar
@@ -1760,7 +1948,55 @@ export function Hud({
           setHudMode={setHudMode}
           onToggleApConsole={() => setApConsoleOpen(!apConsoleOpen)}
           apConsoleOpen={apConsoleOpen}
+          atcOpen={atcOpen}
+          onToggleAtc={() => setAtcOpen(!atcOpen)}
+          cameraOpen={cameraOpen}
+          onToggleCamera={() => setCameraOpen(!cameraOpen)}
+          checklistOpen={checklistOpen}
+          onToggleChecklist={() => setChecklistOpen(!checklistOpen)}
+          weatherOpen={weatherOpen}
+          onToggleWeather={() => setWeatherOpen(!weatherOpen)}
+          efbOpen={efbOpen}
+          onToggleEfb={() => setEfbOpen(!efbOpen)}
+          copilotOpen={copilotOpen}
+          onToggleCopilot={() => setCopilotOpen(!copilotOpen)}
+          systemsOpen={systemsOpen}
+          onToggleSystems={() => setSystemsOpen(!systemsOpen)}
+          pinned={toolbarPinned}
+          onTogglePin={() => setToolbarPinned(!toolbarPinned)}
+          hovered={toolbarHovered}
+          onHoverChange={setToolbarHovered}
         />
+      )}
+
+      {/* Draggable MSFS Floating Windows */}
+      {atcOpen && !isOverlayOpen && (
+        <AtcWindow game={game} hud={hud} onClose={() => setAtcOpen(false)} />
+      )}
+      {cameraOpen && !isOverlayOpen && (
+        <CameraWindow game={game} hud={hud} onClose={() => setCameraOpen(false)} />
+      )}
+      {checklistOpen && !isOverlayOpen && (
+        <ChecklistWindow game={game} hud={hud} onClose={() => setChecklistOpen(false)} />
+      )}
+      {weatherOpen && !isOverlayOpen && (
+        <WeatherWindow game={game} hud={hud} onClose={() => setWeatherOpen(false)} />
+      )}
+      {efbOpen && !isOverlayOpen && (
+        <EfbWindow
+          game={game}
+          hud={hud}
+          from={from}
+          to={to}
+          settings={settings}
+          onClose={() => setEfbOpen(false)}
+        />
+      )}
+      {copilotOpen && !isOverlayOpen && (
+        <CopilotWindow game={game} hud={hud} onClose={() => setCopilotOpen(false)} />
+      )}
+      {systemsOpen && !isOverlayOpen && (
+        <SystemsWindow game={game} hud={hud} onClose={() => setSystemsOpen(false)} />
       )}
 
       {/* Flight Warnings & GPWS Callout Banner (Top Center) */}
