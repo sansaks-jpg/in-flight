@@ -3,6 +3,7 @@ import type { Game, HudState, Result } from '../sim/game';
 import type { Settings, HudMode } from '../sim/storage';
 import { Modal, SettingsPanel, ControlsPanel, ScoresPanel } from './Screens';
 import type { Airport } from '../data/airports';
+import { FlightIcon } from './FlightIcon';
 
 export { Hud } from './FlightHud';
 export { FullMap } from './FlightMap';
@@ -26,24 +27,25 @@ export function LoadingScreen({
 }) {
   const p = hud ? hud.loadProgress : 0;
   return (
-    <div className="absolute inset-0 z-30 grid place-items-center bg-slate-950/85 backdrop-blur-md text-white text-center p-6 select-none font-sans">
-      <div className="w-full max-w-md bg-slate-900/80 border border-white/15 p-8 rounded-3xl shadow-2xl">
-        <div className="text-[11px] tracking-[0.4em] text-cyan-300 font-black">PREPARING FLIGHT DISPATCH</div>
-        <div className="text-4xl font-black mt-3 font-mono">
-          <span className="text-emerald-400">{from.icao}</span> <span className="text-slate-500">→</span>{' '}
+    <div className="absolute inset-0 z-30 grid place-items-center bg-[#060a12]/90 backdrop-blur-md text-white text-center p-6 select-none font-sans">
+      <div className="w-full max-w-md bg-[#0c1424]/95 border border-white/15 p-8 rounded-sm shadow-2xl">
+        <div className="text-[11px] tracking-[0.35em] text-[#5ea2ff] font-black uppercase">PREPARING FLIGHT DISPATCH</div>
+        <div className="text-4xl font-black mt-3 font-mono flex items-center justify-center gap-3">
+          <span className="text-emerald-400">{from.icao}</span>
+          <FlightIcon name="arrowRight" className="w-5 h-5 text-slate-500" />
           <span className="text-amber-400">{to.icao}</span>
         </div>
         <div className="text-slate-300 text-sm mt-1.5 font-semibold">
           {aircraft} · {from.name}
         </div>
-        <div className="mt-7 h-2.5 rounded-full bg-white/10 overflow-hidden">
+        <div className="mt-7 h-2 rounded-sm bg-white/10 overflow-hidden">
           <div
-            className="h-full bg-gradient-to-r from-cyan-400 via-emerald-400 to-amber-300 transition-all duration-150"
+            className="h-full bg-gradient-to-r from-[#1d5bd6] via-[#38bdf8] to-[#facc15] transition-all duration-150"
             style={{ width: `${Math.max(8, p * 100)}%` }}
           />
         </div>
         <div className="text-xs text-slate-400 mt-3 font-mono">
-          Streaming AWS DEM terrain elevation tiles &amp; high-res satellite imagery around {from.city || from.name}…
+          Streaming AWS Terrarium DEM elevation tiles &amp; Esri World Imagery around {from.city || from.name}...
         </div>
       </div>
     </div>
@@ -65,23 +67,24 @@ export function ReadyScreen({
 }) {
   return (
     <div
-      className="absolute inset-0 z-40 grid place-items-end sm:place-items-center bg-gradient-to-t from-slate-950/90 via-slate-950/30 to-transparent text-white p-4 sm:p-8 select-none font-sans pointer-events-auto"
+      className="absolute inset-0 z-40 grid place-items-end sm:place-items-center bg-gradient-to-t from-[#05080f]/90 via-[#05080f]/35 to-transparent text-white p-4 sm:p-8 select-none font-sans pointer-events-auto"
     >
-      <div className="text-center max-w-xl pb-10 sm:pb-0 bg-slate-950/70 border border-white/15 p-6 sm:p-8 rounded-3xl backdrop-blur-md shadow-2xl">
-        <div className="text-[10px] tracking-[0.4em] text-cyan-300 font-black uppercase">
+      <div className="text-center max-w-xl pb-10 sm:pb-0 bg-[#0b1322]/90 border border-white/20 p-6 sm:p-8 rounded-sm backdrop-blur-md shadow-2xl">
+        <div className="text-[10px] tracking-[0.35em] text-[#5ea2ff] font-black uppercase">
           {aircraft} · {hud.onGround ? 'READY FOR DEPARTURE' : 'READY TO FLY'}
         </div>
-        <div className="text-4xl sm:text-5xl font-black mt-2 font-mono tracking-tight drop-shadow-lg">
-          <span className="text-emerald-400">{from.icao}</span> <span className="text-slate-500">→</span>{' '}
+        <div className="text-4xl sm:text-5xl font-black mt-2 font-mono tracking-tight drop-shadow-lg flex items-center justify-center gap-3">
+          <span className="text-emerald-400">{from.icao}</span>
+          <FlightIcon name="arrowRight" className="w-6 h-6 text-slate-500" />
           <span className="text-amber-400">{to.icao}</span>
         </div>
         <div className="text-slate-300 mt-2 text-sm sm:text-base font-medium">
-          {Math.round(hud.distNm)} nm · wind {String(hud.wind.dir).padStart(3, '0')}° / {hud.wind.kt} kt
+          {Math.round(hud.distNm)} nm · wind {String(hud.wind.dir).padStart(3, '0')} deg / {hud.wind.kt} kt
           {hud.depRwy && ` · Runway ${hud.depRwy}`}
         </div>
         <button
           onClick={onGo}
-          className="mt-6 px-10 py-4 rounded-2xl font-black tracking-[0.25em] text-slate-950 bg-gradient-to-r from-cyan-300 via-emerald-300 to-amber-200 shadow-[0_0_50px_rgba(34,211,238,.6)] hover:brightness-110 active:scale-95 transition"
+          className="mt-6 px-10 py-3.5 rounded-sm font-black tracking-[0.22em] text-slate-950 bg-[#eab308] hover:bg-[#facc15] shadow-[0_0_40px_rgba(234,179,8,0.45)] active:scale-95 transition cursor-pointer"
         >
           BEGIN FLIGHT
         </button>
@@ -111,17 +114,21 @@ export function PauseMenu({
 
   return (
     <div
-      className="absolute inset-0 z-40 grid place-items-center bg-slate-950/80 backdrop-blur-md text-white p-4 select-none font-sans"
+      className="absolute inset-0 z-40 grid place-items-center bg-[#05080f]/85 backdrop-blur-md text-white p-4 select-none font-sans"
       onPointerDown={(e) => e.stopPropagation()}
     >
-      <div className="w-full max-w-md rounded-3xl border border-white/20 bg-slate-900/95 p-6 sm:p-8 text-center shadow-2xl">
-        <div className="text-[11px] tracking-[0.4em] text-cyan-300 font-black">SIMULATION PAUSED</div>
+      <div className="w-full max-w-md rounded-sm border border-white/20 bg-[#0d1626]/95 p-6 sm:p-8 text-center shadow-2xl">
+        <div className="text-[11px] tracking-[0.35em] text-[#5ea2ff] font-black uppercase">SIMULATION PAUSED</div>
 
         {/* Flight Snapshot Card */}
-        <div className="mt-4 p-3.5 rounded-2xl bg-white/5 border border-white/10 text-left grid grid-cols-2 gap-3 text-xs">
+        <div className="mt-4 p-3.5 rounded-sm bg-white/5 border border-white/10 text-left grid grid-cols-2 gap-3 text-xs">
           <div>
             <span className="text-[10px] text-slate-400 uppercase tracking-wider block">Route</span>
-            <span className="font-mono font-bold text-white text-sm">{hud.fromId} → {hud.destId}</span>
+            <span className="font-mono font-bold text-white text-sm inline-flex items-center gap-1.5">
+              {hud.fromId}
+              <FlightIcon name="arrowRight" className="w-3 h-3 text-slate-400" />
+              {hud.destId}
+            </span>
           </div>
           <div>
             <span className="text-[10px] text-slate-400 uppercase tracking-wider block">Airspeed / Alt</span>
@@ -137,40 +144,44 @@ export function PauseMenu({
           </div>
         </div>
 
-        <div className="mt-5 grid gap-2.5">
+        <div className="mt-5 grid gap-2">
           <button
             onClick={onResume}
-            className="py-3.5 rounded-2xl font-black tracking-widest bg-gradient-to-r from-cyan-300 via-emerald-300 to-amber-200 text-slate-950 hover:brightness-110 active:scale-95 transition shadow-[0_0_25px_rgba(34,211,238,0.35)]"
+            className="py-3.5 rounded-sm font-black tracking-widest bg-[#eab308] hover:bg-[#facc15] text-slate-950 active:scale-95 transition shadow-[0_0_25px_rgba(234,179,8,0.35)] cursor-pointer"
           >
             RESUME FLIGHT
           </button>
           <button
             onClick={() => game.restart()}
-            className="py-3 rounded-xl font-bold bg-white/10 hover:bg-white/20 border border-white/15 transition"
+            className="py-2.5 rounded-sm font-bold bg-white/10 hover:bg-white/20 border border-white/15 transition flex items-center justify-center gap-2 cursor-pointer"
           >
-            ↻ Restart Flight (R)
+            <FlightIcon name="plane" className="w-3.5 h-3.5 text-cyan-300" />
+            <span>Restart Flight (R)</span>
           </button>
           <button
             onClick={() => setSub('settings')}
-            className="py-3 rounded-xl font-bold bg-white/10 hover:bg-white/20 border border-white/15 transition"
+            className="py-2.5 rounded-sm font-bold bg-white/10 hover:bg-white/20 border border-white/15 transition flex items-center justify-center gap-2 cursor-pointer"
           >
-            ⚙ Settings
+            <FlightIcon name="settings" className="w-3.5 h-3.5 text-slate-300" />
+            <span>Settings</span>
           </button>
           <button
             onClick={() => setSub('controls')}
-            className="py-3 rounded-xl font-bold bg-white/10 hover:bg-white/20 border border-white/15 transition"
+            className="py-2.5 rounded-sm font-bold bg-white/10 hover:bg-white/20 border border-white/15 transition flex items-center justify-center gap-2 cursor-pointer"
           >
-            ⌨ Flight Controls
+            <FlightIcon name="keyboard" className="w-3.5 h-3.5 text-slate-300" />
+            <span>Flight Controls</span>
           </button>
           <button
             onClick={() => setSub('scores')}
-            className="py-3 rounded-xl font-bold bg-white/10 hover:bg-white/20 border border-white/15 transition"
+            className="py-2.5 rounded-sm font-bold bg-white/10 hover:bg-white/20 border border-white/15 transition flex items-center justify-center gap-2 cursor-pointer"
           >
-            🏆 High Scores
+            <FlightIcon name="trophy" className="w-3.5 h-3.5 text-amber-300" />
+            <span>High Scores</span>
           </button>
           <button
             onClick={onMenu}
-            className="py-3 rounded-xl font-bold bg-rose-500/20 hover:bg-rose-500/35 border border-rose-300/30 text-rose-200 transition"
+            className="py-2.5 rounded-sm font-bold bg-rose-500/20 hover:bg-rose-500/35 border border-rose-300/30 text-rose-200 transition cursor-pointer"
           >
             Abort to World Map
           </button>
@@ -225,22 +236,22 @@ export function ResultScreen({
   const landingRate = r.landing ? Math.abs(Math.round(r.landing.vsFpm)) : 0;
   const butterRating =
     landingRate < 120
-      ? { text: '🧈 BUTTER LANDING - ULTRA SMOOTH', stars: '⭐⭐⭐⭐⭐', color: 'text-emerald-300' }
+      ? { text: 'BUTTER LANDING - ULTRA SMOOTH', starCount: 5, color: 'text-emerald-300' }
       : landingRate < 240
-      ? { text: 'SAFE COMMERCIAL TOUCHDOWN', stars: '⭐⭐⭐⭐', color: 'text-cyan-300' }
+      ? { text: 'SAFE COMMERCIAL TOUCHDOWN', starCount: 4, color: 'text-cyan-300' }
       : landingRate < 420
-      ? { text: 'FIRM TOUCHDOWN (CARRIER STYLE)', stars: '⭐⭐⭐', color: 'text-amber-300' }
-      : { text: 'HARD BOUNCE LANDING', stars: '⭐⭐', color: 'text-rose-400' };
+      ? { text: 'FIRM TOUCHDOWN (CARRIER STYLE)', starCount: 3, color: 'text-amber-300' }
+      : { text: 'HARD BOUNCE LANDING', starCount: 2, color: 'text-rose-400' };
 
   return (
     <div
-      className="absolute inset-0 z-40 grid place-items-center bg-slate-950/80 backdrop-blur-md text-white p-3 overflow-y-auto select-none font-sans"
+      className="absolute inset-0 z-40 grid place-items-center bg-[#05080f]/85 backdrop-blur-md text-white p-3 overflow-y-auto select-none font-sans"
       onPointerDown={(e) => e.stopPropagation()}
     >
-      <div className="w-full max-w-xl rounded-3xl border border-white/20 bg-slate-900/95 p-6 sm:p-8 shadow-2xl my-auto">
+      <div className="w-full max-w-xl rounded-sm border border-white/20 bg-[#0d1626]/95 p-6 sm:p-8 shadow-2xl my-auto">
         <div
-          className={`text-[11px] tracking-[0.4em] font-black uppercase ${
-            crashed ? 'text-rose-400' : 'text-cyan-300'
+          className={`text-[11px] tracking-[0.35em] font-black uppercase ${
+            crashed ? 'text-rose-400' : 'text-[#5ea2ff]'
           }`}
         >
           {crashed ? 'CRITICAL INCIDENT · FLIGHT TERMINATED' : r.outcome === 'diverted' ? 'DIVERTED LANDING' : 'PILOT LOGBOOK · FLIGHT COMPLETE'}
@@ -249,14 +260,15 @@ export function ResultScreen({
         <div className="flex items-end justify-between mt-3">
           <div>
             <div className="text-5xl sm:text-6xl font-black font-mono tracking-tight">{r.score.toLocaleString()}</div>
-            <div className="text-xs text-slate-400 mt-1">
-              points
+            <div className="text-xs text-slate-400 mt-1 flex items-center gap-2">
+              <span>points</span>
               {r.newBest ? (
-                <span className="ml-2 px-2 py-0.5 rounded bg-amber-400/20 text-amber-300 font-bold border border-amber-400/30">
-                  ★ NEW PERSONAL RECORD
+                <span className="px-2 py-0.5 rounded-sm bg-amber-400/20 text-amber-300 font-bold border border-amber-400/30 inline-flex items-center gap-1">
+                  <FlightIcon name="trophy" className="w-3 h-3 text-amber-300" />
+                  <span>NEW PERSONAL RECORD</span>
                 </span>
               ) : r.rank > 0 && r.rank <= 20 ? (
-                <span className="ml-2 font-mono">· rank #{r.rank}</span>
+                <span className="font-mono">· rank #{r.rank}</span>
               ) : null}
             </div>
           </div>
@@ -265,10 +277,14 @@ export function ResultScreen({
 
         {/* Landing Performance Card */}
         {r.landing && !crashed && (
-          <div className="mt-4 p-3.5 rounded-2xl bg-white/5 border border-white/10 space-y-1">
+          <div className="mt-4 p-3.5 rounded-sm bg-white/5 border border-white/10 space-y-1">
             <div className="flex items-center justify-between text-xs">
               <span className={`font-black ${butterRating.color}`}>{butterRating.text}</span>
-              <span>{butterRating.stars}</span>
+              <span className="inline-flex items-center gap-0.5 text-amber-300">
+                {Array.from({ length: butterRating.starCount }).map((_, idx) => (
+                  <FlightIcon key={idx} name="star" className="w-3.5 h-3.5" />
+                ))}
+              </span>
             </div>
             <div className="grid grid-cols-3 gap-2 pt-2 text-center text-xs font-mono">
               <div>
@@ -288,7 +304,7 @@ export function ResultScreen({
         )}
 
         {crashed && (
-          <div className="mt-4 text-sm text-rose-200 bg-rose-500/10 border border-rose-400/30 rounded-2xl px-4 py-3">
+          <div className="mt-4 text-sm text-rose-200 bg-rose-500/10 border border-rose-400/30 rounded-sm px-4 py-3">
             {r.reason}
           </div>
         )}
@@ -296,7 +312,7 @@ export function ResultScreen({
         {/* Score Breakdown Table */}
         <div className="mt-4 max-h-[28vh] overflow-y-auto pr-1 space-y-1">
           {r.items.map((it, i) => (
-            <div key={i} className="flex justify-between text-xs py-1.5 px-2 rounded bg-white/5">
+            <div key={i} className="flex justify-between text-xs py-1.5 px-2 rounded-sm bg-white/5">
               <span className="text-slate-300 font-medium">{it.label}</span>
               <span className={`font-mono font-bold ${it.pts < 0 ? 'text-rose-400' : 'text-emerald-400'}`}>
                 {it.pts > 0 ? '+' : ''}
@@ -308,17 +324,17 @@ export function ResultScreen({
 
         {/* Flight Metrics Summary */}
         <div className="grid grid-cols-3 gap-2 mt-4 text-center text-xs">
-          <div className="rounded-xl bg-white/5 py-2.5">
+          <div className="rounded-sm bg-white/5 py-2.5">
             <div className="font-black text-lg font-mono">{Math.round(r.distanceKm)}</div>
             <div className="text-slate-400 text-[10px] uppercase font-bold tracking-wider">km flown</div>
           </div>
-          <div className="rounded-xl bg-white/5 py-2.5">
+          <div className="rounded-sm bg-white/5 py-2.5">
             <div className="font-black text-lg font-mono">
               {Math.floor(r.flightTime / 60)}:{String(Math.floor(r.flightTime % 60)).padStart(2, '0')}
             </div>
             <div className="text-slate-400 text-[10px] uppercase font-bold tracking-wider">flight time</div>
           </div>
-          <div className="rounded-xl bg-white/5 py-2.5">
+          <div className="rounded-sm bg-white/5 py-2.5">
             <div className="font-black text-lg font-mono">{Math.round(r.comfort)}%</div>
             <div className="text-slate-400 text-[10px] uppercase font-bold tracking-wider">comfort</div>
           </div>
@@ -327,19 +343,19 @@ export function ResultScreen({
         <div className="grid grid-cols-3 gap-2.5 mt-5">
           <button
             onClick={onRetry}
-            className="py-3.5 rounded-2xl font-black tracking-wider text-xs bg-gradient-to-r from-cyan-300 to-emerald-300 text-slate-950 hover:brightness-110 active:scale-95 transition"
+            className="py-3.5 rounded-sm font-black tracking-wider text-xs bg-[#eab308] hover:bg-[#facc15] text-slate-950 active:scale-95 transition cursor-pointer"
           >
-            ↻ RETRY (R)
+            RETRY (R)
           </button>
           <button
             onClick={onNew}
-            className="py-3.5 rounded-2xl font-bold text-xs bg-white/10 hover:bg-white/20 border border-white/15 transition"
+            className="py-3.5 rounded-sm font-bold text-xs bg-white/10 hover:bg-white/20 border border-white/15 transition cursor-pointer"
           >
             New Route
           </button>
           <button
             onClick={onMenu}
-            className="py-3.5 rounded-2xl font-bold text-xs bg-white/10 hover:bg-white/20 border border-white/15 transition"
+            className="py-3.5 rounded-sm font-bold text-xs bg-white/10 hover:bg-white/20 border border-white/15 transition cursor-pointer"
           >
             World Map
           </button>
@@ -348,3 +364,4 @@ export function ResultScreen({
     </div>
   );
 }
+

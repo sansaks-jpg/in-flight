@@ -25,7 +25,7 @@ export class CanvasMap {
   readonly stats = { frames: 0, backgroundBuilds: 0 };
   onViewChange: ((kind: 'pan' | 'zoom') => void) | null = null; onTap: ((x: number, y: number, e: PointerEvent) => void) | null = null; onHover: ((x: number, y: number) => void) | null = null;
   interactive = true; showScale = true; showRoads = false; roadOpacity = 0.62; showLabels = true; showHillshade = true;
-  showGrid = false; scaleUnits: 'metric' | 'nm' = 'metric';
+  showGrid = false; scaleUnits: 'metric' | 'nm' = 'metric'; planetaryMode = false;
   private dirty = true; private raf = 0; private pointers = new Map<number, { x: number; y: number }>(); private lastPinch = 0; private moved = 0; private dragging = false;
   minZoom = 2; maxZoom = 17;
   private requested = new Set<string>();
@@ -107,9 +107,47 @@ export class CanvasMap {
     const ax = (lonToTileXf(this.anchorLon, 0) - lonToTileXf(this.lon, 0)) * scale;
     const ay = (latToTileYf(this.anchorLat, 0) - latToTileYf(this.lat, 0)) * scale;
     const c = Math.cos(this.rot), sn = Math.sin(this.rot);
-    g.save(); g.translate(W / 2 + ax * c - ay * sn, H / 2 + ax * sn + ay * c);
+    const showGlobeMask = this.planetaryMode && this.zoom < 4.6;
+    const globeR = showGlobeMask ? Math.min(W, H) * (0.41 + Math.max(0, this.zoom - 2) * 0.16) : 0;
+    if (showGlobeMask) {
+      g.fillStyle = '#03060c';
+      g.fillRect(0, 0, W, H);
+      // Outer atmospheric blue glow in deep space
+      const outerGlow = g.createRadialGradient(W / 2, H / 2, globeR * 0.88, W / 2, H / 2, globeR * 1.14);
+      outerGlow.addColorStop(0, 'rgba(37, 114, 235, 0)');
+      outerGlow.addColorStop(0.55, 'rgba(56, 152, 255, 0.38)');
+      outerGlow.addColorStop(0.8, 'rgba(96, 185, 255, 0.55)');
+      outerGlow.addColorStop(1, 'rgba(2, 6, 14, 0)');
+      g.fillStyle = outerGlow;
+      g.beginPath();
+      g.arc(W / 2, H / 2, globeR * 1.14, 0, Math.PI * 2);
+      g.fill();
+    }
+    g.save();
+    if (showGlobeMask) {
+      g.beginPath();
+      g.arc(W / 2, H / 2, globeR, 0, Math.PI * 2);
+      g.clip();
+    }
+    g.translate(W / 2 + ax * c - ay * sn, H / 2 + ax * sn + ay * c);
     g.rotate(this.rot - this.anchorRot);
-    g.drawImage(this.background, -this.cacheW / 2, -this.cacheH / 2, this.cacheW, this.cacheH); g.restore();
+    g.drawImage(this.background, -this.cacheW / 2, -this.cacheH / 2, this.cacheW, this.cacheH);
+    g.restore();
+    if (showGlobeMask) {
+      // Inner spherical limb shading for 3D Earth curvature
+      const innerRim = g.createRadialGradient(W / 2 - globeR * 0.18, H / 2 - globeR * 0.18, globeR * 0.25, W / 2, H / 2, globeR);
+      innerRim.addColorStop(0, 'rgba(255, 255, 255, 0.04)');
+      innerRim.addColorStop(0.7, 'rgba(14, 45, 95, 0.12)');
+      innerRim.addColorStop(0.92, 'rgba(28, 108, 230, 0.42)');
+      innerRim.addColorStop(1, 'rgba(90, 180, 255, 0.72)');
+      g.fillStyle = innerRim;
+      g.beginPath();
+      g.arc(W / 2, H / 2, globeR, 0, Math.PI * 2);
+      g.fill();
+      g.strokeStyle = 'rgba(135, 206, 255, 0.65)';
+      g.lineWidth = 1.8;
+      g.stroke();
+    }
     this.overlay?.(g, this); this.drawScaleBar(); this.stats.frames++;
   }
 
@@ -128,7 +166,8 @@ export class CanvasMap {
     const g = this.background.getContext('2d')!, st = styleById(this.styleId);
     this.g = g; this.W = this.H = side;
     g.setTransform(pixels / side, 0, 0, pixels / side, 0, 0);
-    g.fillStyle = st.dark ? '#141a1c' : '#dfe6ea'; g.fillRect(0, 0, side, side);
+    g.fillStyle = st.dark ? '#09182e' : '#dfe6ea'; g.fillRect(0, 0, side, side);
+    if (st.dark) this.drawProceduralEarthBase();
     const zi = clamp(Math.floor(this.zoom + 0.35), 0, st.maxZoom);
     g.save(); g.translate(this.W / 2, this.H / 2); g.rotate(this.rot);
     this.drawLayer(st.url, zi, 1);
@@ -149,10 +188,57 @@ export class CanvasMap {
     const labelTpl = st.labelUrl ?? (st.satellite ? LABEL_OVERLAY_URL : '');
     if (this.showLabels && labelTpl) this.drawLayer(labelTpl, Math.min(zi, st.overlayMaxZoom ?? (st.satellite ? LABEL_MAX_ZOOM : st.maxZoom)), 0.95, 2.5);
     g.restore();
-    if (this.showGrid) this.drawNavigationGrid();
+    if (this.showGrid || this.planetaryMode) this.drawNavigationGrid();
     this.backgroundOverlay?.(g, this);
     this.g = context; this.W = W; this.H = H;
     this.backgroundDirty = false; this.stats.backgroundBuilds++;
+  }
+
+  /** Satellite-toned ocean & continental landmass base so the map is immediately legible while tiles stream. */
+  private drawProceduralEarthBase() {
+    const g = this.g;
+    const polys: [number, number][][] = [
+      // Sumatra
+      [[5.8, 95.3], [3.6, 98.7], [1.0, 102.2], [-2.8, 105.8], [-5.9, 105.8], [-5.4, 104.2], [-1.5, 100.2], [2.2, 97.2]],
+      // Java & Bali & Nusa Tenggara
+      [[-6.0, 105.9], [-6.2, 108.5], [-6.8, 111.5], [-7.6, 114.4], [-8.4, 115.7], [-8.8, 119.8], [-8.6, 124.5], [-9.2, 124.2], [-8.8, 115.2], [-7.8, 110.2], [-6.9, 106.2]],
+      // Kalimantan / Borneo
+      [[7.0, 116.8], [4.2, 117.9], [1.2, 118.8], [-3.4, 116.2], [-3.5, 111.8], [-1.2, 109.2], [1.9, 109.6], [4.8, 114.2]],
+      // Sulawesi
+      [[1.5, 125.0], [0.5, 124.0], [0.6, 120.2], [-1.8, 119.3], [-5.5, 119.5], [-5.4, 120.5], [-2.2, 121.5], [-4.8, 122.8], [-3.5, 123.2], [-1.2, 122.8], [0.2, 123.8]],
+      // Papua / New Guinea
+      [[-0.8, 131.2], [-2.2, 136.0], [-2.6, 140.8], [-6.2, 147.5], [-10.2, 150.5], [-9.2, 143.2], [-8.4, 138.8], [-5.2, 134.8], [-2.6, 131.8]],
+      // Malay Peninsula & Mainland SE Asia & Eurasia
+      [[1.3, 103.8], [7.2, 100.2], [13.5, 100.5], [10.2, 106.8], [21.5, 108.2], [23.2, 116.8], [31.2, 121.8], [38.8, 121.2], [45.0, 136.0], [55.0, 138.0], [66.0, 170.0], [70.0, 140.0], [71.0, 75.0], [69.0, 32.0], [60.0, 5.0], [48.0, -4.5], [36.0, -6.0], [38.0, 24.0], [41.0, 29.0], [32.0, 35.0], [12.8, 45.0], [25.0, 55.0], [24.8, 67.0], [8.1, 77.5], [21.8, 88.8], [16.5, 96.2], [6.5, 99.8]],
+      // Philippines
+      [[18.4, 120.6], [16.0, 122.0], [13.0, 124.0], [7.0, 126.4], [6.0, 124.2], [9.8, 122.4], [14.6, 120.2]],
+      // Japan
+      [[31.2, 130.6], [34.6, 135.5], [35.6, 140.8], [41.4, 141.2], [45.2, 141.9], [43.2, 145.5], [39.8, 139.9], [35.5, 133.2]],
+      // Australia
+      [[-12.4, 130.8], [-12.2, 136.8], [-16.8, 139.2], [-11.2, 142.5], [-19.2, 146.8], [-27.5, 153.2], [-33.9, 151.2], [-38.4, 145.0], [-35.2, 137.8], [-32.0, 128.0], [-34.2, 115.0], [-22.0, 114.0], [-16.5, 122.8]],
+      // Africa
+      [[35.8, -5.5], [37.0, 10.5], [31.5, 32.2], [11.8, 51.2], [-2.0, 41.2], [-15.0, 40.5], [-26.0, 32.8], [-34.4, 18.5], [-18.0, 12.0], [-5.0, 12.0], [4.5, 9.2], [5.2, -4.0], [14.7, -17.4], [28.0, -13.0]],
+      // North America
+      [[70.0, -160.0], [71.0, -95.0], [60.0, -64.0], [45.0, -61.0], [40.7, -74.0], [25.8, -80.2], [29.5, -95.0], [19.2, -96.1], [8.9, -79.5], [16.8, -99.9], [23.0, -110.0], [34.0, -118.4], [47.6, -122.4], [61.2, -149.9]],
+      // South America
+      [[10.5, -75.5], [10.6, -66.9], [5.0, -52.0], [-5.8, -35.2], [-22.9, -43.2], [-34.6, -58.4], [-54.8, -68.3], [-41.5, -73.0], [-18.5, -70.3], [-12.0, -77.1], [-0.2, -80.0]],
+    ];
+    g.save();
+    for (const poly of polys) {
+      g.beginPath();
+      for (let i = 0; i < poly.length; i++) {
+        const [x, y] = this.project(poly[i][0], poly[i][1]);
+        if (i === 0) g.moveTo(x, y);
+        else g.lineTo(x, y);
+      }
+      g.closePath();
+      g.fillStyle = '#244735';
+      g.fill();
+      g.strokeStyle = 'rgba(134, 189, 142, 0.35)';
+      g.lineWidth = 1.2;
+      g.stroke();
+    }
+    g.restore();
   }
 
   /** Geographic reference remains available when the imagery provider is offline. */
@@ -187,7 +273,9 @@ export class CanvasMap {
     const px = Math.max(20, nice * unit / mPerPx);
     const label = this.scaleUnits === 'nm' ? `${+nice.toFixed(2)} nm` : nice >= 1000 ? `${+(nice / 1000).toFixed(nice >= 10000 ? 0 : 1)} km` : `${Math.round(nice)} m`;
     const dark = !!styleById(this.styleId).dark;
-    const g = this.g, x = this.W - 14 - px, y = this.H - 24;
+    const g = this.g;
+    const x = this.planetaryMode ? Math.max(16, this.W - 148 - px) : this.W - 14 - px;
+    const y = this.planetaryMode ? this.H - 118 : this.H - 24;
     g.save();
     g.lineCap = 'butt';
     g.beginPath(); g.moveTo(x, y); g.lineTo(x + px, y);

@@ -1,6 +1,9 @@
 import { ReactNode, useState } from 'react';
 import { Settings, ScoreRecord, loadScores, clearScores } from '../sim/storage';
 import { QUALITY, QUALITY_ORDER } from '../sim/quality';
+import { FlightIcon } from './FlightIcon';
+import { AircraftArtworkSvg, InteractiveEarthGlobe, MsfsTopRightBar } from './PreGameVisuals';
+import { REPO_FACTS } from './flightDispatch';
 
 export function Modal({
   title,
@@ -15,47 +18,50 @@ export function Modal({
 }) {
   return (
     <div
-      className="absolute inset-0 z-50 grid place-items-center bg-slate-950/75 backdrop-blur-md p-3 select-none"
+      className="fixed inset-0 z-50 grid place-items-center bg-slate-950/80 backdrop-blur-md p-3 select-none font-sans"
       onPointerDown={(e) => e.stopPropagation()}
     >
       <div
         className={`w-full ${
           wide ? 'max-w-4xl' : 'max-w-xl'
-        } max-h-[92vh] flex flex-col rounded-3xl border border-white/20 bg-slate-900/95 text-white shadow-2xl overflow-hidden`}
+        } max-h-[90vh] flex flex-col border border-white/20 bg-[#141b26] text-white shadow-2xl overflow-hidden`}
       >
-        <div className="flex items-center justify-between px-6 py-4 border-b border-white/10 bg-slate-950/60">
-          <div className="flex items-center gap-2">
-            <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse shadow-[0_0_8px_#38bdf8]" />
-            <h2 className="font-black tracking-[0.25em] text-xs uppercase text-cyan-300">{title}</h2>
-          </div>
+        <div className="flex items-center justify-between px-5 py-3.5 border-b border-white/15 bg-[#0d131c]">
+          <h2 className="font-extrabold tracking-[0.18em] text-xs uppercase text-sky-300">{title}</h2>
           <button
+            type="button"
             onClick={onClose}
-            className="w-8 h-8 rounded-full bg-white/10 hover:bg-white/20 transition grid place-items-center text-sm"
+            aria-label="Close modal"
+            className="w-7 h-7 bg-white/10 hover:bg-[#2572eb] transition grid place-items-center text-white"
           >
-            ✕
+            <FlightIcon name="close" size={14} />
           </button>
         </div>
-        <div className="p-6 overflow-y-auto">{children}</div>
+        <div className="p-5 overflow-y-auto">{children}</div>
       </div>
     </div>
   );
 }
 
 const Row = ({ label, children }: { label: string; children: ReactNode }) => (
-  <div className="flex items-center justify-between gap-4 py-2.5 border-b border-white/5">
-    <div className="text-sm font-medium text-slate-200">{label}</div>
+  <div className="flex items-center justify-between gap-4 py-2.5 border-b border-white/10">
+    <div className="text-xs sm:text-sm font-medium text-slate-200">{label}</div>
     <div>{children}</div>
   </div>
 );
 
-const Toggle = ({ v, on }: { v: boolean; on: (v: boolean) => void }) => (
+const Toggle = ({ v, on, label }: { v: boolean; on: (v: boolean) => void; label?: string }) => (
   <button
+    type="button"
+    aria-label={label}
     onClick={() => on(!v)}
-    className={`w-12 h-6 rounded-full relative transition ${v ? 'bg-cyan-400' : 'bg-slate-700'}`}
+    className={`w-11 h-6 relative transition border ${
+      v ? 'bg-[#2572eb] border-sky-300' : 'bg-[#0d131c] border-white/20'
+    }`}
   >
     <span
-      className={`absolute top-0.5 w-5 h-5 rounded-full bg-white transition-all shadow-md ${
-        v ? 'left-6' : 'left-0.5'
+      className={`absolute top-0.5 w-4 h-4 bg-white transition-all ${
+        v ? 'left-5' : 'left-0.5'
       }`}
     />
   </button>
@@ -65,60 +71,69 @@ export function SettingsPanel({ s, set }: { s: Settings; set: (p: Partial<Settin
   return (
     <div className="space-y-4">
       <div>
-        <h4 className="text-[10px] uppercase tracking-widest font-black text-cyan-300 mb-2">Audio &amp; Voice Systems</h4>
+        <h4 className="text-[10px] uppercase tracking-widest font-extrabold text-sky-300 mb-2">
+          Audio &amp; Voice Systems
+        </h4>
         <Row label="Master audio volume">
           <input
             type="range"
+            aria-label="Master audio volume"
             min={0}
             max={1}
             step={0.05}
             value={s.volume}
             onChange={(e) => set({ volume: +e.target.value })}
-            className="w-40 accent-cyan-400"
+            className="w-40 accent-sky-400"
           />
         </Row>
         <Row label="Mute all audio">
-          <Toggle v={s.muted} on={(v) => set({ muted: v })} />
+          <Toggle label="Mute all audio" v={s.muted} on={(v) => set({ muted: v })} />
         </Row>
         <Row label="Voice callouts & GPWS warnings (speech)">
-          <Toggle v={s.voice} on={(v) => set({ voice: v })} />
+          <Toggle label="Voice callouts" v={s.voice} on={(v) => set({ voice: v })} />
         </Row>
       </div>
 
       <div>
-        <h4 className="text-[10px] uppercase tracking-widest font-black text-cyan-300 mb-2">Flight Dynamics &amp; Controls</h4>
+        <h4 className="text-[10px] uppercase tracking-widest font-extrabold text-sky-300 mb-2">
+          Flight Dynamics &amp; Controls
+        </h4>
         <Row label="Flight assist (stability & envelope protection)">
-          <Toggle v={s.assist} on={(v) => set({ assist: v })} />
+          <Toggle label="Flight assist" v={s.assist} on={(v) => set({ assist: v })} />
         </Row>
-        <Row label="Invert pitch control (↑ = pull up)">
-          <Toggle v={s.invertPitch} on={(v) => set({ invertPitch: v })} />
+        <Row label="Invert pitch control (Up = pull up)">
+          <Toggle label="Invert pitch control" v={s.invertPitch} on={(v) => set({ invertPitch: v })} />
         </Row>
         <Row label="Control stick sensitivity">
           <input
             type="range"
+            aria-label="Control stick sensitivity"
             min={0.5}
             max={1.8}
             step={0.1}
             value={s.sens}
             onChange={(e) => set({ sens: +e.target.value })}
-            className="w-40 accent-cyan-400"
+            className="w-40 accent-sky-400"
           />
         </Row>
         <Row label="Dynamic cockpit camera shake">
-          <Toggle v={s.shake} on={(v) => set({ shake: v })} />
+          <Toggle label="Dynamic cockpit camera shake" v={s.shake} on={(v) => set({ shake: v })} />
         </Row>
         <Row label="Flight instructor coaching hints & HUD">
-          <Toggle v={s.hud} on={(v) => set({ hud: v })} />
+          <Toggle label="Flight instructor coaching hints" v={s.hud} on={(v) => set({ hud: v })} />
         </Row>
       </div>
 
       <div>
-        <h4 className="text-[10px] uppercase tracking-widest font-black text-cyan-300 mb-2">Display &amp; Units</h4>
+        <h4 className="text-[10px] uppercase tracking-widest font-extrabold text-sky-300 mb-2">
+          Display &amp; Units
+        </h4>
         <Row label="HUD display mode">
           <select
+            aria-label="HUD display mode"
             value={s.hudMode}
             onChange={(e) => set({ hudMode: e.target.value as Settings['hudMode'] })}
-            className="bg-slate-800 rounded-xl px-3 py-1.5 text-xs border border-white/10 text-white outline-none"
+            className="bg-[#0d131c] px-3 py-1.5 text-xs border border-white/15 text-white outline-none"
           >
             <option value="minimal">Minimal (High immersion, unobstructed view)</option>
             <option value="standard">Standard (PFD Glass Cockpit & Telemetry)</option>
@@ -128,9 +143,10 @@ export function SettingsPanel({ s, set }: { s: Settings; set: (p: Partial<Settin
         </Row>
         <Row label="In-flight text size">
           <select
+            aria-label="In-flight text size"
             value={s.uiScale}
             onChange={(e) => set({ uiScale: +e.target.value })}
-            className="bg-slate-800 rounded-xl px-3 py-1.5 text-xs border border-white/10 text-white outline-none"
+            className="bg-[#0d131c] px-3 py-1.5 text-xs border border-white/15 text-white outline-none"
           >
             <option value={0.75}>Compact</option>
             <option value={1.0}>Default</option>
@@ -139,13 +155,14 @@ export function SettingsPanel({ s, set }: { s: Settings; set: (p: Partial<Settin
           </select>
         </Row>
         <Row label="Colorblind high-contrast mode">
-          <Toggle v={s.colorblind} on={(v) => set({ colorblind: v })} />
+          <Toggle label="Colorblind high-contrast mode" v={s.colorblind} on={(v) => set({ colorblind: v })} />
         </Row>
         <Row label="Instrumentation units">
           <select
+            aria-label="Instrumentation units"
             value={s.units}
             onChange={(e) => set({ units: e.target.value as Settings['units'] })}
-            className="bg-slate-800 rounded-xl px-3 py-1.5 text-xs border border-white/10 text-white outline-none"
+            className="bg-[#0d131c] px-3 py-1.5 text-xs border border-white/15 text-white outline-none"
           >
             <option value="aviation">Aviation Standard (knots / feet / fpm)</option>
             <option value="metric">Metric Standard (km/h / meters / m/s)</option>
@@ -153,22 +170,27 @@ export function SettingsPanel({ s, set }: { s: Settings; set: (p: Partial<Settin
         </Row>
         <Row label="3D world detail &amp; performance">
           <select
+            aria-label="3D world detail and performance"
             value={s.quality}
             onChange={(e) => set({ quality: e.target.value as Settings['quality'] })}
-            className="bg-slate-800 rounded-xl px-3 py-1.5 text-xs border border-white/10 text-white outline-none max-w-[19rem]"
+            className="bg-[#0d131c] px-3 py-1.5 text-xs border border-white/15 text-white outline-none max-w-[19rem]"
           >
             {QUALITY_ORDER.map((q) => (
-              <option key={q} value={q}>{QUALITY[q].menu}</option>
+              <option key={q} value={q}>
+                {QUALITY[q].menu}
+              </option>
             ))}
             <option value="auto">Auto — Best preset for this device</option>
           </select>
         </Row>
-        <div className="mt-2 mb-3 rounded-xl border border-cyan-400/15 bg-cyan-400/[0.06] px-3 py-2.5">
+        <div className="mt-2 mb-3 border border-sky-400/20 bg-sky-400/[0.06] px-3 py-2.5">
           <div className="flex items-center justify-between gap-2 mb-1.5">
-            <span className="text-[10px] font-black uppercase tracking-widest text-cyan-200">
+            <span className="text-[10px] font-black uppercase tracking-widest text-sky-200">
               {s.quality === 'auto' ? 'Auto quality' : `${QUALITY[s.quality].label} detail`}
             </span>
-            <span className="text-[9px] font-bold uppercase tracking-wider text-emerald-300/90">60 FPS target</span>
+            <span className="text-[9px] font-bold uppercase tracking-wider text-emerald-300/90">
+              60 FPS target
+            </span>
           </div>
           {s.quality === 'auto' ? (
             <p className="text-[11px] leading-relaxed text-slate-300">
@@ -177,7 +199,7 @@ export function SettingsPanel({ s, set }: { s: Settings; set: (p: Partial<Settin
           ) : (
             <>
               <p className="text-[11px] leading-relaxed text-slate-300">{QUALITY[s.quality].summary}</p>
-              <div className="flex flex-wrap gap-1 mt-2">
+              <div className="flex flex-wrap gap-1.5 mt-2">
                 {[
                   ['Buildings', QUALITY[s.quality].buildings !== 'none'],
                   ['Houses', QUALITY[s.quality].buildings === 'all'],
@@ -188,9 +210,9 @@ export function SettingsPanel({ s, set }: { s: Settings; set: (p: Partial<Settin
                 ].map(([label, on]) => (
                   <span
                     key={String(label)}
-                    className={`px-1.5 py-0.5 rounded-md text-[9px] font-bold uppercase tracking-wide border ${
+                    className={`px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide border ${
                       on
-                        ? 'border-emerald-400/25 bg-emerald-400/10 text-emerald-200'
+                        ? 'border-emerald-400/30 bg-emerald-400/10 text-emerald-200'
                         : 'border-white/10 bg-white/[0.03] text-slate-500 line-through'
                     }`}
                   >
@@ -203,31 +225,28 @@ export function SettingsPanel({ s, set }: { s: Settings; set: (p: Partial<Settin
         </div>
         <Row label="Pilot logbook callsign">
           <input
+            aria-label="Pilot logbook callsign"
             value={s.name}
             maxLength={14}
             onChange={(e) => set({ name: e.target.value })}
-            className="bg-slate-800 rounded-xl px-3 py-1.5 text-xs border border-white/10 w-40 text-white font-mono outline-none"
+            className="bg-[#0d131c] px-3 py-1.5 text-xs border border-white/15 w-40 text-white font-mono outline-none"
           />
         </Row>
       </div>
-
-      <p className="text-[11px] text-slate-400 mt-3 bg-white/5 p-3 rounded-xl border border-white/5">
-        Quality changes rebuild the nearby 3D tiles immediately. Resolution auto-scales per preset with a 60 FPS target; Low removes all 3D city objects, Medium keeps trees only, High keeps buildings but skips landed houses, and Ultra renders everything.
-      </p>
     </div>
   );
 }
 
 const K = ({ children }: { children: ReactNode }) => (
-  <kbd className="px-2 py-0.5 rounded-lg bg-slate-800 border border-white/20 text-[11px] font-mono text-cyan-200 shadow-sm">
+  <kbd className="px-2 py-0.5 bg-[#0d131c] border border-white/20 text-[11px] font-mono text-sky-200">
     {children}
   </kbd>
 );
 
 export function ControlsPanel() {
   const rows: [ReactNode, string][] = [
-    [<><K>W</K> <K>S</K> / <K>↑</K> <K>↓</K></>, 'Pitch down / Pitch up'],
-    [<><K>A</K> <K>D</K> / <K>←</K> <K>→</K></>, 'Aileron roll left / right'],
+    [<><K>W</K> <K>S</K> / <K>Up</K> <K>Down</K></>, 'Pitch down / Pitch up'],
+    [<><K>A</K> <K>D</K> / <K>Left</K> <K>Right</K></>, 'Aileron roll left / right'],
     [<><K>Q</K> <K>E</K></>, 'Rudder & nose-wheel taxi steering'],
     [<><K>Shift</K> <K>Ctrl</K> / <K>PgUp</K> <K>PgDn</K></>, 'Throttle increase / decrease'],
     [<><K>1</K>–<K>4</K></>, 'Radio replies when Radio is open · otherwise throttle 10–40%'],
@@ -257,12 +276,12 @@ export function ControlsPanel() {
   return (
     <div className="grid sm:grid-cols-2 gap-x-8 gap-y-1">
       {rows.map(([k, d], i) => (
-        <div key={i} className="flex items-center justify-between gap-3 py-2 border-b border-white/5 text-sm">
+        <div key={i} className="flex items-center justify-between gap-3 py-2 border-b border-white/10 text-sm">
           <span className="whitespace-nowrap">{k}</span>
           <span className="text-slate-300 text-right text-xs font-medium">{d}</span>
         </div>
       ))}
-      <div className="sm:col-span-2 text-xs text-slate-400 mt-4 leading-relaxed bg-white/5 p-3 rounded-2xl border border-white/5">
+      <div className="sm:col-span-2 text-xs text-slate-300 mt-4 leading-relaxed bg-[#0d131c] p-3 border border-white/10">
         <b>Gamepad Controller:</b> Left stick = Pitch &amp; Roll, Right stick X = Rudder, Triggers = Throttle, A = Gear, B = Parking brake, Bumpers = Flaps, D-Pad = ATC 1–4, Back/Select = Cycle HUD mode, Start = Pause.
       </div>
     </div>
@@ -274,12 +293,14 @@ export function ScoresPanel() {
   return (
     <div>
       {list.length === 0 ? (
-        <p className="text-slate-400 text-sm">No flight logs recorded yet. Complete a flight to register your first record in the pilot logbook!</p>
+        <p className="text-slate-300 text-sm">
+          No flight logs recorded yet. Complete a flight to register your first record in the pilot logbook.
+        </p>
       ) : (
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
-              <tr className="text-[10px] uppercase tracking-widest text-slate-400 border-b border-white/10">
+              <tr className="text-[10px] uppercase tracking-widest text-slate-400 border-b border-white/15">
                 <th className="text-left py-2">#</th>
                 <th className="text-left">Pilot</th>
                 <th className="text-left">Route</th>
@@ -291,16 +312,22 @@ export function ScoresPanel() {
             <tbody>
               {list.map((r, i) => (
                 <tr key={i} className="border-b border-white/5">
-                  <td className="py-2.5 text-slate-400 font-mono">{i + 1}</td>
+                  <td className="py-2.5 text-slate-400 font-mono tabular-nums">{i + 1}</td>
                   <td className="font-bold text-white">{r.name}</td>
-                  <td className="font-mono text-cyan-300">
-                    {r.from}→{r.to}
-                    {r.outcome === 'crashed' && <span className="text-rose-400"> ✖</span>}
-                    {r.outcome === 'diverted' && <span className="text-amber-300"> ↪</span>}
+                  <td className="font-mono text-sky-300">
+                    {r.from} to {r.to}
+                    {r.outcome === 'crashed' && (
+                      <span className="ml-1.5 text-[10px] text-rose-400 font-bold uppercase">[CRASHED]</span>
+                    )}
+                    {r.outcome === 'diverted' && (
+                      <span className="ml-1.5 text-[10px] text-amber-300 font-bold uppercase">[DIVERTED]</span>
+                    )}
                   </td>
                   <td className="hidden sm:table-cell text-slate-400">{r.aircraft}</td>
-                  <td className="text-center font-black text-cyan-300 font-mono">{r.grade}</td>
-                  <td className="text-right font-mono font-black text-white">{r.score.toLocaleString()}</td>
+                  <td className="text-center font-black text-sky-300 font-mono">{r.grade}</td>
+                  <td className="text-right font-mono font-black text-white tabular-nums">
+                    {r.score.toLocaleString()}
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -309,6 +336,7 @@ export function ScoresPanel() {
       )}
       {list.length > 0 && (
         <button
+          type="button"
           onClick={() => {
             clearScores();
             setList([]);
@@ -321,6 +349,10 @@ export function ScoresPanel() {
     </div>
   );
 }
+
+/* =========================================================================
+   MSFS 2024 MAIN MENU HUB (Matches Reference Image 1: image_d1816216.png)
+   ========================================================================= */
 
 export function StartScreen({
   onStart,
@@ -338,76 +370,324 @@ export function StartScreen({
   ready: boolean;
 }) {
   const [modal, setModal] = useState<null | 'scores' | 'settings' | 'controls' | 'credits'>(null);
+  const [bgMode, setBgMode] = useState<'globe' | 'airport'>('globe');
+  const scoresCount = loadScores().length;
 
   return (
     <div
-      className="absolute inset-0 text-white select-none overflow-hidden"
+      className="fixed inset-0 text-white select-none overflow-hidden font-sans"
       style={{
         background:
-          'radial-gradient(ellipse at 20% 100%, rgba(2,10,22,.88), transparent 60%), linear-gradient(90deg, rgba(2,8,18,.85) 0%, rgba(2,8,18,.45) 55%, rgba(2,8,18,.15) 100%)',
+          bgMode === 'globe'
+            ? 'radial-gradient(circle at 68% 52%, #0a1936 0%, #040812 58%, #020409 100%)'
+            : 'linear-gradient(90deg, rgba(3,7,15,0.92) 0%, rgba(3,7,15,0.72) 44%, rgba(3,7,15,0.18) 100%)',
       }}
     >
-      <div className="absolute inset-0 flex flex-col justify-between p-6 sm:p-12">
-        <div className="flex items-center gap-3 text-xs tracking-[0.35em] text-cyan-200 font-bold">
-          <span className="inline-block w-8 h-px bg-cyan-400" />
-          <span>MICROSOFT FLIGHT SIMULATOR EXPERIENCE</span>
-        </div>
+      {/* Interactive 3D Earth Globe on the Right Side (Matches Image 1) */}
+      {bgMode === 'globe' && (
+        <InteractiveEarthGlobe className="absolute inset-0 w-full h-full z-0" />
+      )}
 
-        <div className="max-w-3xl">
-          <h1
-            className="font-black leading-[0.85] tracking-tight text-[clamp(60px,13vw,160px)]"
-            style={{ textShadow: '0 8px 45px rgba(0,0,0,.6)' }}
+      {/* Left contrast vignette so the MSFS Bento Grid always has crisp contrast */}
+      <div
+        className="absolute inset-y-0 left-0 w-full sm:w-[680px] pointer-events-none z-10"
+        style={{
+          background:
+            'linear-gradient(90deg, rgba(2,5,11,0.94) 0%, rgba(2,5,11,0.82) 68%, rgba(2,5,11,0) 100%)',
+        }}
+      />
+
+      {/* Top-Right Pilot Banner & Utility Bar (Matches Image 1) */}
+      <div className="absolute top-0 right-0 z-30 flex items-center gap-3">
+        <div className="hidden md:flex items-center gap-2 text-xs font-mono text-slate-300 bg-[#0b111b]/90 border-b border-l border-white/10 px-3 h-9">
+          <span className="font-extrabold tracking-widest text-white">IN-FLIGHT</span>
+          <span className="text-slate-600">|</span>
+          <span className="text-sky-300">{REPO_FACTS.totalAirports.toLocaleString()} AIRPORTS</span>
+          <span className="text-slate-600">|</span>
+          <span className="text-emerald-300">{REPO_FACTS.indonesiaAirports} INDONESIA</span>
+        </div>
+        <MsfsTopRightBar pilotName={settings.name} onOpenModal={(m) => setModal(m)} />
+      </div>
+
+      {/* Main Layout Container: Left Bento Grid + Bottom Bar */}
+      <div className="relative z-20 h-full flex flex-col justify-between px-5 sm:px-12 pt-11 pb-5 pointer-events-none">
+        {/* Left Asymmetric MSFS 2024 Bento Tile Grid (Matches Image 1) */}
+        <div className="w-full max-w-[540px] flex-1 flex flex-col justify-center gap-2.5 pointer-events-auto max-h-[82vh]">
+          {/* TILE 1 (Full-Width Top Banner): World Photographer / World Discovery */}
+          <button
+            type="button"
+            onClick={onStart}
+            className="w-full h-24 sm:h-28 relative overflow-hidden border border-white/15 hover:border-white/60 text-left group transition shadow-2xl"
+            style={{
+              background:
+                'linear-gradient(135deg, #0ea5e9 0%, #38bdf8 35%, #f59e0b 78%, #b45309 100%)',
+            }}
           >
-            SKY<span className="text-transparent bg-clip-text bg-gradient-to-r from-cyan-300 via-emerald-300 to-amber-200">LINE</span>
-          </h1>
-
-          <p className="mt-5 text-base sm:text-xl text-slate-200 max-w-xl leading-relaxed">
-            Fly any of <b>{(6613).toLocaleString()}</b> real-world airports — with <b>155 in Indonesia</b> — on satellite-scanned 3D terrain with authentic buildings, oceans, and mountain relief. Experience glass cockpits, PFD avionics, true aerodynamics, and passenger simulation.
-          </p>
-
-          <div className="mt-8 flex flex-wrap gap-4">
-            <button
-              onClick={onStart}
-              className="px-8 py-4 rounded-2xl font-black tracking-widest text-slate-950 bg-gradient-to-r from-cyan-300 via-emerald-300 to-amber-200 hover:brightness-110 active:scale-[.98] transition shadow-[0_0_45px_rgba(34,211,238,.45)] flex items-center gap-2"
+            {/* Atmospheric Savannah / Archipelago Horizon SVG Art */}
+            <svg
+              viewBox="0 0 600 140"
+              preserveAspectRatio="none"
+              className="absolute inset-0 w-full h-full"
+              aria-hidden="true"
             >
-              <span>🌍 WORLD FLIGHT PLANNER</span>
-            </button>
-            <button
-              onClick={onQuick}
-              disabled={!ready}
-              className="px-7 py-4 rounded-2xl font-bold tracking-wider bg-white/10 border border-white/20 hover:bg-white/20 backdrop-blur-md disabled:opacity-50 active:scale-[.98] transition shadow-lg"
-            >
-              ⚡ QUICK FLIGHT
-            </button>
+              {/* Distant Mountain Volcano Silhouette */}
+              <path d="M220 110 L320 45 L365 45 L460 110 Z" fill="rgba(30,41,59,0.35)" />
+              <path d="M312 50 L368 50 L380 62 L300 62 Z" fill="rgba(255,255,255,0.45)" />
+              {/* Golden Terrain Foreground */}
+              <path d="M0 105 Q150 92 320 104 T600 98 L600 140 L0 140 Z" fill="rgba(120,53,15,0.75)" />
+              <path d="M0 118 Q220 108 450 118 T600 115 L600 140 L0 140 Z" fill="rgba(20,83,45,0.85)" />
+              {/* Canopy Tree Silhouette on Left */}
+              <path d="M48 122 L52 86 M32 88 L50 96 M68 90 L50 98" stroke="#1e293b" strokeWidth="3.5" />
+              <ellipse cx="52" cy="82" rx="34" ry="8" fill="#14532d" />
+              <ellipse cx="32" cy="88" rx="18" ry="5" fill="#166534" />
+            </svg>
+            <div className="absolute inset-0 bg-gradient-to-r from-slate-950/65 via-slate-950/20 to-transparent" />
+            <div className="relative z-10 p-3 flex flex-col justify-between h-full">
+              <div>
+                <div className="font-bold text-base sm:text-lg text-white drop-shadow">
+                  World Explorer
+                </div>
+                <div className="text-[11px] text-amber-100 font-medium drop-shadow">
+                  {REPO_FACTS.totalAirports.toLocaleString()} Real Airports · {REPO_FACTS.indonesiaAirports} in Indonesia · Satellite &amp; DEM Relief
+                </div>
+              </div>
+              <div className="text-[10px] font-mono font-bold uppercase tracking-wider text-white/90">
+                OpenStreetMap MVT · Esri World Imagery
+              </div>
+            </div>
+          </button>
+
+          {/* MIDDLE 2-COLUMN ASYMMETRIC BENTO GRID (Matches Image 1: Challenge League + Activities on left, Career + Free Flight on right) */}
+          <div className="grid grid-cols-2 gap-2.5">
+            {/* Left Column: Challenge League (short) + Activities (tall) */}
+            <div className="flex flex-col gap-2.5">
+              {/* Challenge League Tile */}
+              <button
+                type="button"
+                onClick={() => {
+                  set({ startMode: 'final' });
+                  onQuick();
+                }}
+                className="h-24 sm:h-28 relative overflow-hidden border border-white/15 hover:border-white/60 text-left group transition shadow-xl"
+                style={{
+                  background:
+                    'linear-gradient(145deg, #334155 0%, #475569 48%, #78350f 100%)',
+                }}
+              >
+                <div className="absolute -right-4 top-3 w-36 h-24 opacity-90 group-hover:scale-105 transition-transform">
+                  <AircraftArtworkSvg aircraftId="sky" accentColor="#f97316" bellyColor="#0f172a" />
+                </div>
+                <div className="absolute inset-0 bg-gradient-to-t from-slate-950/80 via-slate-950/25 to-transparent" />
+                <div className="relative z-10 p-3 flex flex-col justify-between h-full">
+                  <div className="font-bold text-sm sm:text-base text-white drop-shadow">
+                    Challenge League
+                  </div>
+                  <div className="text-[10px] font-mono text-amber-200 font-semibold">
+                    14 km ILS Final Approach
+                  </div>
+                </div>
+              </button>
+
+              {/* Activities Tile */}
+              <button
+                type="button"
+                onClick={onStart}
+                className="h-40 sm:h-44 relative overflow-hidden border border-white/15 hover:border-white/60 text-left group transition shadow-xl"
+                style={{
+                  background:
+                    'linear-gradient(165deg, #1d4ed8 0%, #0284c7 52%, #0f172a 100%)',
+                }}
+              >
+                {/* Pylon & Coastal Bay Vector Backdrop */}
+                <svg
+                  viewBox="0 0 260 190"
+                  className="absolute inset-0 w-full h-full"
+                  aria-hidden="true"
+                >
+                  <path d="M110 150 Q155 85 190 150 Z" fill="rgba(15,23,42,0.45)" />
+                  <rect x="0" y="148" width="260" height="42" fill="rgba(3,105,161,0.75)" />
+                  {/* Air Race / Approach Pylon */}
+                  <path d="M202 155 L212 42 L222 42 L232 155 Z" fill="#f8fafc" />
+                  <path d="M208 65 L225 65 L227 88 L206 88 Z" fill="#ef4444" />
+                  <path d="M210 42 L222 42 L224 55 L209 55 Z" fill="#ef4444" />
+                </svg>
+                <div className="absolute inset-x-2 top-8 h-24 group-hover:-translate-y-1 transition-transform">
+                  <AircraftArtworkSvg aircraftId="swift" accentColor="#facc15" bellyColor="#1e3a8a" />
+                </div>
+                <div className="absolute inset-0 bg-gradient-to-t from-slate-950/90 via-transparent to-slate-950/30" />
+                <div className="relative z-10 p-3 flex flex-col justify-between h-full">
+                  <div className="font-bold text-sm sm:text-base text-white drop-shadow">
+                    Activities
+                  </div>
+                  <div>
+                    <div className="text-xs font-extrabold tracking-wider uppercase text-amber-300">
+                      ARCHIPELAGO &amp; ALPS TOURS
+                    </div>
+                    <div className="text-[10px] text-slate-200 mt-0.5">
+                      21 Curated Indonesia &amp; World Routes
+                    </div>
+                  </div>
+                </div>
+              </button>
+            </div>
+
+            {/* Right Column: Career (tall) + Free Flight (primary hero tile) */}
+            <div className="flex flex-col gap-2.5">
+              {/* Career & Pilot Logbook Tile */}
+              <button
+                type="button"
+                onClick={() => setModal('scores')}
+                className="h-40 sm:h-44 relative overflow-hidden border border-white/15 hover:border-white/60 text-left group transition shadow-xl"
+                style={{
+                  background:
+                    'linear-gradient(155deg, #334155 0%, #1e293b 55%, #0f172a 100%)',
+                }}
+              >
+                <div className="absolute inset-x-0 bottom-5 h-28 opacity-90 group-hover:scale-105 transition-transform">
+                  <AircraftArtworkSvg aircraftId="trek" accentColor="#ea580c" bellyColor="#0f172a" />
+                </div>
+                {/* Captain Shoulder Epaulette Bars Graphic */}
+                <div className="absolute bottom-3 right-3 w-9 h-12 bg-[#0f172a] border border-amber-400/40 p-1.5 flex flex-col justify-center gap-1">
+                  <span className="h-1 w-full bg-amber-400" />
+                  <span className="h-1 w-full bg-amber-400" />
+                  <span className="h-1 w-full bg-amber-400" />
+                  <span className="h-1 w-full bg-amber-400" />
+                </div>
+                <div className="absolute inset-0 bg-gradient-to-t from-slate-950/85 via-transparent to-slate-950/35" />
+                <div className="relative z-10 p-3 flex flex-col justify-between h-full">
+                  <div className="font-bold text-sm sm:text-base text-white drop-shadow">
+                    Career
+                  </div>
+                  <div>
+                    <div className="text-xs font-bold text-white">
+                      Pilot Logbook · {scoresCount} Flights
+                    </div>
+                    <div className="text-[11px] font-mono text-amber-300 font-bold">
+                      Best Score: {bestScore.toLocaleString()} pts
+                    </div>
+                  </div>
+                </div>
+              </button>
+
+              {/* Free Flight Tile (Matches Image 1 primary selected tile) */}
+              <button
+                type="button"
+                data-start="true"
+                onClick={onStart}
+                className="h-24 sm:h-28 relative overflow-hidden border-2 border-white hover:border-sky-300 text-left group transition shadow-[0_0_25px_rgba(255,255,255,0.2)]"
+                style={{
+                  background:
+                    'linear-gradient(145deg, #93c5fd 0%, #60a5fa 48%, #1d4ed8 100%)',
+                }}
+              >
+                <div className="absolute -right-2 top-2 w-48 h-24 group-hover:scale-105 transition-transform">
+                  <AircraftArtworkSvg aircraftId="sky" accentColor="#0284c7" bellyColor="#1e3a8a" />
+                </div>
+                <div className="relative z-10 p-3 flex flex-col justify-between h-full">
+                  <div className="font-extrabold text-sm sm:text-base text-slate-950 drop-shadow-sm">
+                    Free Flight
+                  </div>
+                  <div className="inline-flex items-center gap-1 px-2 py-0.5 bg-slate-950/80 text-white text-[10px] font-bold uppercase tracking-wider w-fit">
+                    <span>World Map &amp; Dispatch</span>
+                    <FlightIcon name="chevron" size={11} />
+                  </div>
+                </div>
+              </button>
+            </div>
           </div>
 
-          <div className="mt-6 flex flex-wrap gap-2 text-xs">
-            {(
-              [
-                ['scores', '🏆 Pilot Logbook'],
-                ['settings', '⚙ Settings'],
-                ['controls', '⌨ Flight Controls'],
-                ['credits', 'ⓘ Aeronautical Data'],
-              ] as const
-            ).map(([id, l]) => (
-              <button
-                key={id}
-                onClick={() => setModal(id)}
-                className="px-4 py-2 rounded-full bg-slate-950/60 border border-white/15 hover:bg-white/15 backdrop-blur-md transition"
-              >
-                {l}
-              </button>
-            ))}
-            {bestScore > 0 && (
-              <span className="px-4 py-2 rounded-full bg-amber-400/20 border border-amber-300/40 text-amber-200 font-bold font-mono">
-                Logbook Best: {bestScore.toLocaleString()}
-              </span>
-            )}
+          {/* TILE 6 (Full-Width Bottom Showcase Tile with Caption Footer, matching Marketplace in Image 1) */}
+          <div className="w-full border border-white/15 overflow-hidden bg-[#0b1018]/95 shadow-2xl">
+            <button
+              type="button"
+              onClick={onStart}
+              className="w-full h-24 sm:h-28 relative overflow-hidden text-left block group"
+              style={{
+                background:
+                  'linear-gradient(135deg, #1e293b 0%, #475569 45%, #b45309 85%, #78350f 100%)',
+              }}
+            >
+              {/* Green MSFS Chevron Accents on Left */}
+              <div
+                className="absolute inset-y-0 left-0 w-36 opacity-35"
+                style={{
+                  background:
+                    'linear-gradient(115deg, #16a34a 0%, #22c55e 45%, transparent 45%)',
+                }}
+              />
+              <div className="absolute left-28 right-4 top-2 bottom-1 flex items-center justify-center group-hover:scale-105 transition-transform">
+                <AircraftArtworkSvg aircraftId="sky" accentColor="#eab308" bellyColor="#1e3a8a" />
+              </div>
+              <div className="absolute top-2.5 left-3.5 z-10">
+                <div className="font-bold text-sm sm:text-base text-white drop-shadow">
+                  Aircraft Hangar &amp; World Scenery
+                </div>
+                <div className="text-[10px] font-semibold text-emerald-300 uppercase tracking-wider mt-0.5">
+                  3 Aircraft · 7 Liveries
+                </div>
+              </div>
+            </button>
+            <div className="px-3.5 py-2 bg-[#080c12] text-[11px] text-slate-300 leading-snug border-t border-white/10">
+              Fly 3 detailed aircraft (<b>Aero Swift RG</b>, <b>Aero Trek T2</b>, <b>Skyliner 320</b>) with glass PFD avionics, CAT-III ILS autoland, and procedural 3D cities across {REPO_FACTS.totalAirports.toLocaleString()} airports.
+            </div>
           </div>
         </div>
 
-        <div className="text-[11px] text-slate-400/90 max-w-3xl leading-relaxed">
-          Aeronautical Database © OurAirports · Terrain Elevation: AWS DEM Tiles · Satellite Base: Esri World Imagery · Vectors &amp; Buildings: OpenStreetMap &amp; OpenFreeMap · Three.js 3D Engine
+        {/* Bottom Action Bar (Matches Image 1 bottom-left action links + preserves QUICK FLIGHT for automated tests) */}
+        <div className="pt-3 flex flex-wrap items-center justify-between gap-3 pointer-events-auto">
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={onQuick}
+              className="px-4 py-2 bg-[#eab308] hover:bg-[#facc15] text-slate-950 font-extrabold text-xs tracking-wide transition flex items-center gap-1.5 shadow-lg"
+            >
+              <FlightIcon name="bolt" size={14} />
+              <span>QUICK FLIGHT</span>
+              {!ready && <span className="text-[10px] font-mono opacity-75">(Ready)</span>}
+            </button>
+
+            <button
+              type="button"
+              onClick={onStart}
+              className="px-4 py-2 bg-[#1d6ae5] hover:bg-[#2572eb] text-white font-bold text-xs transition flex items-center gap-1.5 shadow-lg"
+            >
+              <FlightIcon name="globe" size={14} />
+              <span>World Flight Planner</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setModal('controls')}
+              className="px-3.5 py-2 bg-white/5 hover:bg-white/15 border border-white/15 text-xs font-bold text-slate-200 hover:text-white transition"
+            >
+              Flight Controls
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setModal('settings')}
+              className="px-3.5 py-2 bg-white/5 hover:bg-white/15 border border-white/15 text-xs font-bold text-slate-200 hover:text-white transition"
+            >
+              Settings
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setModal('credits')}
+              className="px-3.5 py-2 bg-white/5 hover:bg-white/15 border border-white/15 text-xs font-bold text-slate-200 hover:text-white transition"
+            >
+              Release notes
+            </button>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => setBgMode((m) => (m === 'globe' ? 'airport' : 'globe'))}
+            className="px-3.5 py-2 bg-[#0d131c]/90 hover:bg-white/15 border border-white/20 text-xs font-bold text-sky-300 flex items-center gap-1.5 transition"
+          >
+            <FlightIcon name={bgMode === 'globe' ? 'camera' : 'globe'} size={14} />
+            <span>{bgMode === 'globe' ? 'Live 3D Airport Preview' : '3D Earth Globe View'}</span>
+          </button>
         </div>
       </div>
 
@@ -427,19 +707,19 @@ export function StartScreen({
         </Modal>
       )}
       {modal === 'credits' && (
-        <Modal title="Aeronautical Data & Attribution" onClose={() => setModal(null)}>
+        <Modal title="Release Notes & Repository Specifications" onClose={() => setModal(null)}>
           <ul className="text-sm text-slate-300 space-y-2.5 list-disc pl-5">
             <li>
-              <b>Esri World Imagery</b> — high-resolution global satellite photography base for 3D terrain and moving maps. © Esri, Maxar, Earthstar Geographics.
+              <b>Esri World Imagery</b> — high-resolution global satellite photography base for 3D terrain and moving maps.
             </li>
             <li>
-              <b>AWS Open Data Terrain Tiles (Terrarium)</b> — global DEM elevation, derived from SRTM, ETOPO1, GMTED and national elevation datasets.
+              <b>AWS Open Data Terrain Tiles (Terrarium)</b> — global DEM elevation heightmaps derived from SRTM, ETOPO1, and GMTED datasets.
             </li>
             <li>
-              <b>OurAirports Worldwide Runway Database</b> — 6,613 airports with authentic runway coordinates, magnetic headings, thresholds, and dimensions.
+              <b>OurAirports Worldwide Runway Database</b> — {REPO_FACTS.totalAirports.toLocaleString()} airports ({REPO_FACTS.indonesiaAirports} in Indonesia) with authentic runway coordinates, magnetic headings, thresholds, and dimensions.
             </li>
             <li>
-              <b>OpenStreetMap &amp; OpenFreeMap vector footprints</b> — real airport terminals, control towers, hangars, highways, and coastlines rendered dynamically in 3D.
+              <b>OpenStreetMap &amp; OpenFreeMap MVT</b> — real airport terminals, control towers, hangars, highways, and coastlines rendered dynamically in 3D.
             </li>
             <li>
               <b>Aviation Glass Cockpit Avionics</b> — Garmin G1000 &amp; MSFS style PFD with attitude director indicator, airspeed tape, altimeter tape, horizontal situation indicator, and flight mode annunciator.

@@ -8,7 +8,8 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test scripts/navigation-test.ts scripts/runtime-test.ts",
+    "lint": "tsc --noEmit",
+    "test": "tsx --test scripts/navigation-test.ts scripts/runtime-test.ts scripts/dispatch-test.ts",
     "test:ui": "tsx scripts/ui-collision-test.ts",
     "test:live": "tsx scripts/live-navigation-test.ts"
   },

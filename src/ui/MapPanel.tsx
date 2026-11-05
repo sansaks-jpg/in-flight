@@ -9,10 +9,21 @@ import { FlightIcon } from './FlightIcon';
 
 type NavMode = 'explore' | 'route' | 'north' | 'track' | 'free';
 export interface NavigationMapView { lat: number; lon: number; zoom: number; rot: number; nav: NavMode; focusRequest?: number }
+export interface PlannerMapControlRef {
+  zoomBy: (dz: number) => void;
+  fitRoute: () => void;
+  globeView: () => void;
+  focusAirport: (a: Airport, zoom?: number) => void;
+  toggleLayers: () => void;
+}
 interface Props {
   mode: 'planner' | 'flight'; from: Airport | null; to: Airport | null; picking?: 'from' | 'to'; onPick?: (a: Airport) => void;
   styleId: string; onStyle: (id: string) => void; game?: Game | null; compact?: boolean; onExpand?: () => void; className?: string; routeKey?: string;
   rangeKm?: number; onSetAirport?: (a: Airport, role: 'from' | 'to') => void;
+  onFlyNow?: (a: Airport) => void;
+  onInspectAirport?: (a: Airport) => void;
+  plannerControlRef?: RefObject<PlannerMapControlRef | null>;
+  hideDefaultPlannerChrome?: boolean;
   viewStateRef?: RefObject<NavigationMapView | null>; layers?: MapLayers;
   navigation?: boolean; focusTarget?: { lat: number; lon: number; request: number; label?: string };
 }
@@ -20,26 +31,58 @@ interface Props {
 const RANGES_NM = [5, 10, 20, 40], TRACK_DASH = [4, 3], GUIDANCE_DASH = [3, 5], NO_DASH: number[] = [];
 const COMPASS_TICKS = Array.from({ length: 36 }, (_, i) => i * 10);
 
-const COL = { from: '#3ddc84', to: '#ffb02e', route: '#ff4fd8', dot: '#7fd0ff', trail: '#35e0ff' };
+const COL = { from: '#3ddc84', to: '#ffb02e', route: '#38bdf8', dot: '#ffffff', trail: '#35e0ff' };
 
-export function MapPanel({ mode, from, to, picking, onPick, styleId, onStyle, game, compact, onExpand, className, routeKey, rangeKm, onSetAirport, navigation = false, focusTarget, viewStateRef, layers: controlledLayers }: Props) {
+export function MapPanel({
+  mode,
+  from,
+  to,
+  picking,
+  onPick,
+  styleId,
+  onStyle,
+  game,
+  compact,
+  onExpand,
+  className,
+  routeKey,
+  rangeKm,
+  onSetAirport,
+  onFlyNow,
+  onInspectAirport,
+  plannerControlRef,
+  hideDefaultPlannerChrome = false,
+  navigation = false,
+  focusTarget,
+  viewStateRef,
+  layers: controlledLayers,
+}: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null), wrapRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<CanvasMap | null>(null);
   const lastFocusRequest = useRef(viewStateRef?.current?.focusRequest);
   const hit = useRef<{ a: Airport; x: number; y: number }[]>([]);
-  const props = useRef({ from, to, picking, onPick, mode, game, compact, rangeKm, onSetAirport, navigation, focusTarget });
-  props.current = { from, to, picking, onPick, mode, game, compact, rangeKm, onSetAirport, navigation, focusTarget };
+  const props = useRef({
+    from, to, picking, onPick, mode, game, compact, rangeKm, onSetAirport, onFlyNow, onInspectAirport, navigation, focusTarget,
+  });
+  props.current = {
+    from, to, picking, onPick, mode, game, compact, rangeKm, onSetAirport, onFlyNow, onInspectAirport, navigation, focusTarget,
+  };
   const [nav, setNav] = useState<NavMode>(viewStateRef?.current?.nav ?? (mode === 'flight' ? (compact || navigation ? 'track' : 'free') : 'route'));
   const navRef = useRef(nav); navRef.current = nav;
   const [tip, setTip] = useState<{ x: number; y: number; a: Airport } | null>(null);
-  const [selectedAirport, setSelectedAirport] = useState<Airport | null>(null);
+  const [selectedAirport, setSelectedAirport] = useState<{ a: Airport; x: number; y: number } | null>(null);
   const [layers, setLayers] = useState<MapLayers>(loadMapLayers);
   const layersRef = useRef(controlledLayers ?? layers); layersRef.current = controlledLayers ?? layers;
   const [layersOpen, setLayersOpen] = useState(false);
 
-  const nearestAt = useCallback((x: number, y: number, r = 14) => {
+  const nearestAt = useCallback((x: number, y: number, r = 16) => {
     let best: Airport | null = null, bd = r * r;
-    for (const h of hit.current) { const point = mapRef.current?.project(h.a.lat, h.a.lon); if (!point) continue; const d = (point[0] - x) ** 2 + (point[1] - y) ** 2; if (d < bd) { bd = d; best = h.a; } }
+    for (const h of hit.current) {
+      const point = mapRef.current?.project(h.a.lat, h.a.lon);
+      if (!point) continue;
+      const d = (point[0] - x) ** 2 + (point[1] - y) ** 2;
+      if (d < bd) { bd = d; best = h.a; }
+    }
     return best;
   }, []);
 
@@ -48,6 +91,7 @@ export function MapPanel({ mode, from, to, picking, onPick, styleId, onStyle, ga
     m.showScale = !props.current.compact;
     m.showGrid = !!props.current.navigation && !props.current.compact;
     m.scaleUnits = props.current.navigation ? 'nm' : 'metric';
+    m.planetaryMode = props.current.mode === 'planner' && !props.current.compact;
     m.showRoads = layersRef.current.roads;
     m.showLabels = layersRef.current.labels;
     m.showHillshade = layersRef.current.terrain;
@@ -83,8 +127,6 @@ export function MapPanel({ mode, from, to, picking, onPick, styleId, onStyle, ga
       const dark = styleById(map.styleId).dark;
       const gs = flightState;
       const labelRects: number[][] = [];
-      // Runways: true-scale footprints when zoomed in, otherwise a small orientation
-      // marker for the departure/arrival airports so the runway direction is never lost.
       const drawRunways = (a: Airport, emphasized = false) => {
         if (!a.runways.length) return;
         const trueScale = z >= 9.4;
@@ -104,12 +146,27 @@ export function MapPanel({ mode, from, to, picking, onPick, styleId, onStyle, ga
             continue;
           }
 
-          // Only runway endpoints/widths are in the simulator database. Do not invent
-          // parallel taxiways or aprons; real surface detail comes from imagery/road tiles.
-          const w = Math.min(18, Math.max(1, r.width * ppm));
+          const w = Math.min(18, Math.max(1.5, r.width * ppm));
           g.beginPath(); g.moveTo(x1, y1); g.lineTo(x2, y2);
-          g.strokeStyle = dark ? 'rgba(4,10,16,.9)' : 'rgba(10,28,40,.55)'; g.lineWidth = w + 1.8; g.stroke();
-          g.strokeStyle = p.to && a.id === p.to.id ? '#ffd27a' : dark ? '#c3cfd6' : '#7e8b93'; g.lineWidth = w; g.stroke();
+          g.strokeStyle = dark ? 'rgba(4,10,16,.92)' : 'rgba(10,28,40,.65)'; g.lineWidth = w + 2.2; g.stroke();
+          g.strokeStyle = p.to && a.id === p.to.id ? '#ffd27a' : dark ? '#cbd5e1' : '#64748b'; g.lineWidth = w; g.stroke();
+
+          // When zoomed into an airport in Planner mode (like MSFS Images 4 & 8), draw threshold dots & gate/ramp nodes
+          if (p.mode === 'planner' && z >= 12.2) {
+            g.fillStyle = '#ffffff';
+            g.strokeStyle = '#0f172a';
+            g.lineWidth = 1.5;
+            g.beginPath(); g.arc(x1, y1, 4.5, 0, Math.PI * 2); g.fill(); g.stroke();
+            g.beginPath(); g.arc(x2, y2, 4.5, 0, Math.PI * 2); g.fill(); g.stroke();
+            // Gate/Ramp apron spots offset parallel to runway
+            const ang = Math.atan2(y2 - y1, x2 - x1);
+            const nx = -Math.sin(ang), ny = Math.cos(ang);
+            for (let step = 0.25; step <= 0.75; step += 0.125) {
+              const gx = x1 + (x2 - x1) * step + nx * (w + 14);
+              const gy = y1 + (y2 - y1) * step + ny * (w + 14);
+              g.beginPath(); g.arc(gx, gy, 3.8, 0, Math.PI * 2); g.fill(); g.stroke();
+            }
+          }
         }
       };
       const compactMap = !!p.compact || (!!p.navigation && map.viewportW < 480);
@@ -120,33 +177,51 @@ export function MapPanel({ mode, from, to, picking, onPick, styleId, onStyle, ga
         drawRunways(a);
         if (a === p.from || a === p.to) continue;
         list.push({ a, x, y });
-        const r = a.size === 0 ? (z < 4 ? 2.4 : 4) : a.size === 1 ? 3 : 2.2;
-        g.beginPath(); g.arc(x, y, r, 0, 7); g.fillStyle = a.size === 0 ? COL.dot : a.size === 1 ? '#bfe9ff' : '#d6dde3'; g.globalAlpha = 0.95; g.fill();
-        g.lineWidth = 1.2; g.strokeStyle = dark ? '#06121c' : '#0b3a57'; g.stroke(); g.globalAlpha = 1;
+        if (p.mode === 'planner') {
+          // MSFS 2024 style circular airport badge with inner diamond & gold star for major hubs
+          const rad = a.size === 0 ? (z < 4 ? 5.2 : 6.8) : a.size === 1 ? 5.0 : 3.6;
+          g.beginPath(); g.arc(x, y, rad, 0, Math.PI * 2);
+          g.fillStyle = '#ffffff'; g.fill();
+          g.lineWidth = 1.4; g.strokeStyle = '#0f172a'; g.stroke();
+          if (rad >= 4.8) {
+            g.fillStyle = '#1e293b';
+            g.beginPath();
+            g.moveTo(x, y - rad * 0.48);
+            g.lineTo(x + rad * 0.48, y);
+            g.lineTo(x, y + rad * 0.48);
+            g.lineTo(x - rad * 0.48, y);
+            g.closePath();
+            g.fill();
+          }
+          if (a.size === 0 && z >= 3.8) {
+            const sx = x + rad * 0.75, sy = y + rad * 0.75;
+            g.beginPath(); g.arc(sx, sy, 3.6, 0, Math.PI * 2);
+            g.fillStyle = '#eab308'; g.fill();
+            g.strokeStyle = '#0f172a'; g.lineWidth = 1; g.stroke();
+          }
+        } else {
+          const r = a.size === 0 ? (z < 4 ? 2.4 : 4) : a.size === 1 ? 3 : 2.2;
+          g.beginPath(); g.arc(x, y, r, 0, 7); g.fillStyle = a.size === 0 ? '#7fd0ff' : a.size === 1 ? '#bfe9ff' : '#d6dde3'; g.globalAlpha = 0.95; g.fill();
+          g.lineWidth = 1.2; g.strokeStyle = dark ? '#06121c' : '#0b3a57'; g.stroke(); g.globalAlpha = 1;
+        }
         const wantLabel = !compactMap && ((a.size === 0 && z >= 5.2) || (a.size === 1 && z >= 7.4) || z >= 9);
         if (wantLabel) {
-          const txt = a.iata || a.icao; const w = txt.length * 6.8 + 4; const rect = [x + 6, y - 7, x + 6 + w, y + 7];
+          const txt = a.icao; const w = txt.length * 6.8 + 4; const rect = [x + 8, y - 7, x + 8 + w, y + 7];
           if (!labelRects.some((q) => rect[0] < q[2] && rect[2] > q[0] && rect[1] < q[3] && rect[3] > q[1])) {
-            labelRects.push(rect); g.font = '600 11px ui-sans-serif, system-ui'; g.textBaseline = 'middle'; g.lineWidth = 3; g.strokeStyle = dark ? 'rgba(0,0,0,.85)' : 'rgba(255,255,255,.9)'; g.strokeText(txt, x + 7, y); g.fillStyle = dark ? '#e6f3ff' : '#0d2b3f'; g.fillText(txt, x + 7, y);
+            labelRects.push(rect); g.font = '700 10px ui-sans-serif, system-ui'; g.textBaseline = 'middle'; g.lineWidth = 3; g.strokeStyle = dark ? 'rgba(0,0,0,.85)' : 'rgba(255,255,255,.9)'; g.strokeText(txt, x + 9, y); g.fillStyle = dark ? '#f1f5f9' : '#0d2b3f'; g.fillText(txt, x + 9, y);
           }
         }
       }
-      // The navigation map is deliberately flat 2D: raster chart, runways and the simulator's route/trail only.
-      // Extruding building footprints on every redraw is what made opening it feel heavy.
-      // route / navigation: multi-waypoint flight plan or great circle
       if (L.route && p.from && p.to && p.from !== p.to) {
         const fp = gs?.flightPlan;
         if (gs && fp && fp.length > 0) {
           const pts = fp.map((wp) => map.project(wp.lat, wp.lon));
           g.save(); g.lineJoin = 'round'; g.lineCap = 'round';
-          // Outer glow/shadow
           g.beginPath(); pts.forEach(([x, y], i) => (i ? g.lineTo(x, y) : g.moveTo(x, y)));
           g.strokeStyle = 'rgba(0,0,0,0.55)'; g.lineWidth = compactMap ? 5 : 7; g.stroke();
-          // Route dashed line
           g.setLineDash(compactMap ? [] : [10, 8]); g.strokeStyle = p.navigation ? 'rgba(186,170,205,.5)' : COL.route; g.lineWidth = compactMap ? 2 : 3.5; g.stroke();
           g.restore();
 
-          // Emphasize the active leg; the rest of the plan stays readable but subordinate.
           if (p.navigation) {
             const active = fp[Math.min(gs.activeWpIdx, fp.length - 1)];
             const previous = fp[Math.max(0, gs.activeWpIdx - 1)];
@@ -154,10 +229,8 @@ export function MapPanel({ mode, from, to, picking, onPick, styleId, onStyle, ga
             const [bx, by] = map.project(active.lat, active.lon);
             g.beginPath(); g.moveTo(ax, ay); g.lineTo(bx, by);
             g.strokeStyle = '#e7a0eb'; g.lineWidth = 3; g.stroke();
-
           }
 
-          // Waypoint symbols and labels. Keep the active fix visible even in the small map.
           if (z >= 4.8) {
             fp.forEach((wp, idx) => {
               const [wx, wy] = pts[idx];
@@ -208,7 +281,6 @@ export function MapPanel({ mode, from, to, picking, onPick, styleId, onStyle, ga
             });
           }
         } else {
-          // Standard great-circle / navPath fallback
           const end = gs?.appr ?? p.to;
           const nav = gs?.navPath ?? [];
           let ptsLL: [number, number][];
@@ -220,8 +292,8 @@ export function MapPanel({ mode, from, to, picking, onPick, styleId, onStyle, ga
           }
           const pts = ptsLL.map(([la, lo]) => map.project(la, lo));
           g.save(); g.lineJoin = 'round'; g.lineCap = 'round';
-          g.beginPath(); pts.forEach(([x, y], i) => (i ? g.lineTo(x, y) : g.moveTo(x, y))); g.strokeStyle = 'rgba(0,0,0,.45)'; g.lineWidth = compactMap ? 5 : 7; g.stroke();
-          g.setLineDash(compactMap ? [] : [10, 8]); g.strokeStyle = COL.route; g.lineWidth = compactMap ? 3 : 3.5; g.stroke(); g.restore();
+          g.beginPath(); pts.forEach(([x, y], i) => (i ? g.lineTo(x, y) : g.moveTo(x, y))); g.strokeStyle = 'rgba(0,0,0,.55)'; g.lineWidth = compactMap ? 5 : 6.5; g.stroke();
+          g.setLineDash(compactMap ? [] : [10, 7]); g.strokeStyle = '#38bdf8'; g.lineWidth = compactMap ? 2.5 : 3; g.stroke(); g.restore();
           if (gs && nav.length > 1 && !compactMap) {
             const gate = nav[0]; const [gx, gy] = map.project(gate[0], gate[1]);
             g.beginPath(); g.arc(gx, gy, 4, 0, 7); g.fillStyle = '#ffd27a'; g.fill(); g.strokeStyle = '#06121c'; g.lineWidth = 2; g.stroke();
@@ -229,21 +301,20 @@ export function MapPanel({ mode, from, to, picking, onPick, styleId, onStyle, ga
           }
           if (!gs && !compactMap) {
             const mid = pts[Math.floor(pts.length / 2)]; const d = haversine(p.from.lat, p.from.lon, p.to.lat, p.to.lon);
-            const txt = `${Math.round(d / 1000).toLocaleString()} km · ${Math.round(d / M_PER_NM).toLocaleString()} nm`;
-            g.font = '700 12px ui-sans-serif, system-ui'; const w = g.measureText(txt).width + 16; g.fillStyle = 'rgba(8,14,22,.88)'; g.beginPath(); g.roundRect(mid[0] - w / 2, mid[1] - 26, w, 22, 11); g.fill(); g.fillStyle = '#ffd9f6'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText(txt, mid[0], mid[1] - 15); g.textAlign = 'left';
+            const txt = `${Math.round(d / M_PER_NM).toLocaleString()} NM · ${Math.round(d / 1000).toLocaleString()} KM`;
+            g.font = '700 11px ui-sans-serif, system-ui'; const w = g.measureText(txt).width + 16; g.fillStyle = 'rgba(13,20,30,.92)'; g.beginPath(); g.roundRect(mid[0] - w / 2, mid[1] - 26, w, 21, 3); g.fill(); g.strokeStyle = 'rgba(56,189,248,.45)'; g.lineWidth = 1; g.stroke(); g.fillStyle = '#e0f2fe'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText(txt, mid[0], mid[1] - 15.5); g.textAlign = 'left';
           }
         }
       }
       if (L.route && gs && gs.trail.length > 1) { g.beginPath(); gs.trail.forEach(([la, lo], i) => { const [x, y] = map.project(la, lo); i ? g.lineTo(x, y) : g.moveTo(x, y); }); g.strokeStyle = COL.trail; g.lineWidth = 3; g.globalAlpha = 0.85; g.stroke(); g.globalAlpha = 1; }
       const pin = (a: Airport | null, col: string, label: string) => {
         if (!a) return; const [x, y] = map.project(a.lat, a.lon); list.push({ a, x, y }); drawRunways(a, true);
-        g.beginPath(); g.arc(x, y, compactMap ? 6 : 9, 0, 7); g.fillStyle = col; g.fill(); g.lineWidth = 3; g.strokeStyle = '#06121c'; g.stroke();
-        g.beginPath(); g.arc(x, y, compactMap ? 11 : 16, 0, 7); g.lineWidth = 2; g.strokeStyle = col; g.globalAlpha = 0.6; g.stroke(); g.globalAlpha = 1;
+        g.beginPath(); g.arc(x, y, compactMap ? 6 : 8.5, 0, 7); g.fillStyle = col; g.fill(); g.lineWidth = 2.5; g.strokeStyle = '#06121c'; g.stroke();
+        g.beginPath(); g.arc(x, y, compactMap ? 11 : 15, 0, 7); g.lineWidth = 2; g.strokeStyle = col; g.globalAlpha = 0.65; g.stroke(); g.globalAlpha = 1;
         if (compactMap) { drawMapCompass(g, map); return; }
-        g.font = '800 11px ui-sans-serif, system-ui'; const t = `${label} ${a.icao}`; const w = g.measureText(t).width + 14; g.fillStyle = col; g.beginPath(); g.roundRect(x + 14, y - 28, w, 20, 10); g.fill(); g.fillStyle = '#06121c'; g.textBaseline = 'middle'; g.fillText(t, x + 21, y - 18);
+        g.font = '800 11px ui-sans-serif, system-ui'; const t = `${label} ${a.icao}`; const w = g.measureText(t).width + 14; g.fillStyle = col; g.beginPath(); g.roundRect(x + 13, y - 26, w, 19, 3); g.fill(); g.fillStyle = '#06121c'; g.textBaseline = 'middle'; g.fillText(t, x + 20, y - 16.5);
       };
       pin(p.from, COL.from, 'DEP');
-      // Arrival marker sits on the threshold of the chosen runway in flight, not the mid-field ARP.
       const arrPin = p.to && gs?.appr ? { ...p.to, lat: gs.appr.lat, lon: gs.appr.lon } : p.to;
       pin(arrPin, COL.to, 'ARR');
 
@@ -260,40 +331,34 @@ export function MapPanel({ mode, from, to, picking, onPick, styleId, onStyle, ga
           g.lineWidth = 1.5;
           g.setLineDash([6, 6]);
           g.stroke();
-          g.fillStyle = 'rgba(56, 189, 248, 0.035)';
+          g.fillStyle = 'rgba(56, 189, 248, 0.03)';
           g.fill();
-          g.fillStyle = 'rgba(56, 189, 248, 0.85)';
+          g.fillStyle = 'rgba(125, 211, 252, 0.9)';
           g.font = '700 10px ui-sans-serif, system-ui';
-          g.fillText(`AIRCRAFT MAX RANGE (${Math.round(p.rangeKm).toLocaleString()} km)`, fx + rPx * 0.707 + 6, fy - rPx * 0.707);
+          g.fillText(`MAX RANGE (${Math.round(p.rangeKm).toLocaleString()} KM)`, fx + rPx * 0.707 + 6, fy - rPx * 0.707);
           g.restore();
         }
       }
-      // Enhanced ILS Feather (Extended Centerline Cone with angle markings)
+      // Enhanced ILS Feather
       if (L.route && gs && gs.appr && z >= 4.8) {
         const ap = gs.appr;
         const [tx, ty] = map.project(ap.lat, ap.lon);
         const [blat, blon] = destination(ap.lat, ap.lon, ap.hdg + 180, 28000);
         const [bx, by] = map.project(blat, blon);
-        
-        // Localizer coverage wedge (+- 4.5 deg)
         const [coneL_lat, coneL_lon] = destination(ap.lat, ap.lon, ap.hdg + 180 - 4.5, 26000);
         const [coneR_lat, coneR_lon] = destination(ap.lat, ap.lon, ap.hdg + 180 + 4.5, 26000);
         const [cx1, cy1] = map.project(coneL_lat, coneL_lon);
         const [cx2, cy2] = map.project(coneR_lat, coneR_lon);
 
         g.save();
-        // Feather cone
         g.beginPath();
         g.moveTo(tx, ty); g.lineTo(cx1, cy1); g.lineTo(cx2, cy2); g.closePath();
         g.fillStyle = 'rgba(255, 210, 122, 0.08)'; g.fill();
         g.strokeStyle = 'rgba(255, 210, 122, 0.28)'; g.lineWidth = 1; g.stroke();
-
-        // Extended centerline
         g.setLineDash([8, 8]); g.lineWidth = 2; g.strokeStyle = 'rgba(255,210,122,.7)';
         g.beginPath(); g.moveTo(bx, by); g.lineTo(tx, ty); g.stroke();
         g.restore();
 
-        // Distance tick marks along ILS (4nm, 8nm, 12nm)
         for (const nm of [4, 8, 12]) {
           const [tkLat, tkLon] = destination(ap.lat, ap.lon, ap.hdg + 180, nm * M_PER_NM);
           const [tkX, tkY] = map.project(tkLat, tkLon);
@@ -308,11 +373,9 @@ export function MapPanel({ mode, from, to, picking, onPick, styleId, onStyle, ga
           }
         }
 
-        // Threshold bar & Runway label
         const ang = ap.hdg * D2R + map.rot, fx = Math.sin(ang), fy = -Math.cos(ang);
         g.beginPath(); g.moveTo(tx - fy * 10, ty + fx * 10); g.lineTo(tx + fy * 10, ty - fx * 10);
         g.strokeStyle = '#ffd27a'; g.lineWidth = 3; g.stroke();
-
         g.beginPath(); g.arc(tx, ty, 3.5, 0, Math.PI * 2); g.fillStyle = '#ffd27a'; g.fill();
 
         if (!compactMap && z >= 6.0) {
@@ -322,7 +385,6 @@ export function MapPanel({ mode, from, to, picking, onPick, styleId, onStyle, ga
           g.fillStyle = '#ffd9a6'; g.fillText(txt, tx + 12, ty + 14);
         }
       }
-      // Inspecting a flight-log fix is distinct from changing the active navigation leg.
       if (p.navigation && p.focusTarget) {
         const [x, y] = map.project(p.focusTarget.lat, p.focusTarget.lon);
         if (x > 0 && y > 0 && x < map.W && y < map.H) {
@@ -342,7 +404,6 @@ export function MapPanel({ mode, from, to, picking, onPick, styleId, onStyle, ga
     m.overlay = (g, map) => {
       const p = props.current, L = layersRef.current, gs = flightState;
       const compactMap = !!p.compact, z = map.zoom;
-      // The direct-to cue starts at the current physics position, never at a cached breadcrumb.
       if (gs && L.route && p.navigation && gs.flightPlan[gs.activeWpIdx]) {
         const active = gs.flightPlan[gs.activeWpIdx];
         map.projectInto(gs.lat, gs.lon, ownshipPoint); map.projectInto(active.lat, active.lon, targetPoint);
@@ -361,7 +422,6 @@ export function MapPanel({ mode, from, to, picking, onPick, styleId, onStyle, ga
         g.shadowColor = 'rgba(0,0,0,.6)'; g.shadowBlur = 6; g.fillStyle = '#fff'; g.strokeStyle = '#0a1a28'; g.lineWidth = 2;
         g.beginPath(); g.moveTo(0, -14); g.lineTo(3.5, -4); g.lineTo(14, 3); g.lineTo(14, 6.5); g.lineTo(3.2, 3.5); g.lineTo(2.6, 11); g.lineTo(6, 13.5); g.lineTo(6, 15.5); g.lineTo(0, 14); g.lineTo(-6, 15.5); g.lineTo(-6, 13.5); g.lineTo(-2.6, 11); g.lineTo(-3.2, 3.5); g.lineTo(-14, 6.5); g.lineTo(-14, 3); g.lineTo(-3.5, -4); g.closePath(); g.fill(); g.stroke(); g.restore();
       }
-      // Destination pointer when it is outside the visible map area (threshold when an approach is active).
       const dest = p.to;
       if (L.route && dest) {
         const appr = gs?.appr ?? null;
@@ -386,22 +446,23 @@ export function MapPanel({ mode, from, to, picking, onPick, styleId, onStyle, ga
           g.fillStyle = '#ffd9a0'; g.fillText(txt, lx, ly);
         }
       }
-      // north indicator when rotated
       if (Math.abs(map.rot) > 0.01 && !compactMap) { g.save(); g.translate(map.W - 34, 40); g.rotate(map.rot); g.fillStyle = '#ff5050'; g.beginPath(); g.moveTo(0, -14); g.lineTo(6, 4); g.lineTo(-6, 4); g.fill(); g.fillStyle = '#fff'; g.font = '700 11px ui-sans-serif'; g.textAlign = 'center'; g.fillText('N', 0, 17); g.restore(); }
       if (compactMap && p.navigation) drawMapCompass(g, map);
     };
     m.onTap = (x, y) => {
-      const a = nearestAt(x, y, 16);
+      const a = nearestAt(x, y, 18);
       if (a) {
-        setSelectedAirport(a);
-        props.current.onPick?.(a);
+        setSelectedAirport({ a, x, y });
+        props.current.onInspectAirport?.(a);
+        if (props.current.mode !== 'planner') {
+          props.current.onPick?.(a);
+        }
       } else {
         setSelectedAirport(null);
       }
     };
-    m.onHover = (x, y) => { if (props.current.navigation) return; const a = nearestAt(x, y, 10); setTip((t) => (a ? { x, y, a } : t ? null : t)); };
+    m.onHover = (x, y) => { if (props.current.navigation) return; const a = nearestAt(x, y, 12); setTip((t) => (a ? { x, y, a } : t ? null : t)); };
     m.onViewChange = (kind) => {
-      // Zooming does not unlock aircraft-follow. Only a deliberate pan does.
       if (kind === 'pan' && props.current.mode === 'flight') { navRef.current = 'free'; setNav('free'); }
       else if (props.current.mode === 'planner' && navRef.current === 'route') { navRef.current = 'explore'; setNav('explore'); }
     };
@@ -417,13 +478,11 @@ export function MapPanel({ mode, from, to, picking, onPick, styleId, onStyle, ga
       }
       else m.setView(from?.lat ?? -2.2, from?.lon ?? 118, 6);
     }
-    else if (from && to) m.fitBounds([[from.lat, from.lon], [to.lat, to.lon]]);
+    else if (from && to) m.fitBounds([[from.lat, from.lon], [to.lat, to.lon]], 140);
     else if (from) m.setView(from.lat, from.lon, 6);
-    else m.setView(-2.2, 118, 4.8); // featured region: Indonesia
+    else m.setView(-2.2, 118, 4.2);
     const savedView = viewStateRef?.current;
     if (savedView) {
-      // The previous chart saves during unmount, after this component's initial render.
-      // Restore its latest mode as well as its geometry when exchanging mini / full charts.
       navRef.current = savedView.nav; setNav(savedView.nav); lastFocusRequest.current = savedView.focusRequest;
       m.setView(savedView.lat, savedView.lon, savedView.zoom); m.rot = savedView.rot;
     }
@@ -443,25 +502,48 @@ export function MapPanel({ mode, from, to, picking, onPick, styleId, onStyle, ga
   }, [layers, controlledLayers]);
   useEffect(() => {
     const m = mapRef.current; if (!m) return; m.invalidate();
-    if (mode === 'planner' && navRef.current === 'route' && from && to) m.fitBounds([[from.lat, from.lon], [to.lat, to.lon]]);
+    if (mode === 'planner' && navRef.current === 'route' && from && to) m.fitBounds([[from.lat, from.lon], [to.lat, to.lon]], 140);
     else if (mode === 'planner' && from && !to && navRef.current === 'route') m.setView(from.lat, from.lon, Math.max(m.zoom, 7));
   }, [from, to, routeKey, mode]);
   useEffect(() => { mapRef.current?.invalidate(); }, [picking]);
 
-  // Aircraft follow is native RAF in CanvasMap.beforeFrame, not a 120 ms React/timer tick.
-
-  const setMode = (n: NavMode) => {
+  const setMode = useCallback((n: NavMode) => {
     navRef.current = n; setNav(n); const m = mapRef.current; if (!m) return;
     if (n === 'route' && from && to) {
       if (mode === 'flight' && game) {
         const s = game.getMapState();
         m.fitBounds([[s.lat, s.lon], ...s.flightPlan.slice(s.activeWpIdx).map((wp): [number, number] => [wp.lat, wp.lon])], 48);
-      } else m.fitBounds([[from.lat, from.lon], [to.lat, to.lon]]);
+      } else m.fitBounds([[from.lat, from.lon], [to.lat, to.lon]], 140);
     }
     if (n === 'north') { m.rot = 0; if (game) { const s = game.getMapState(); m.lat = s.lat; m.lon = s.lon; } }
     if (n === 'track' && game) { const s = game.getMapState(); m.rot = -s.track * D2R; m.lat = s.lat; m.lon = s.lon; }
     m.invalidate();
-  };
+  }, [from, to, mode, game]);
+
+  useEffect(() => {
+    if (!plannerControlRef) return;
+    plannerControlRef.current = {
+      zoomBy: (dz) => mapRef.current?.zoomBy(dz),
+      fitRoute: () => setMode('route'),
+      globeView: () => {
+        if (!mapRef.current) return;
+        navRef.current = 'explore';
+        setNav('explore');
+        mapRef.current.setView(from?.lat ?? -2.2, from?.lon ?? 118, 2.7);
+      },
+      focusAirport: (a, zoom = 13.2) => {
+        if (!mapRef.current) return;
+        navRef.current = 'explore';
+        setNav('explore');
+        mapRef.current.setView(a.lat, a.lon, zoom);
+        const pt = mapRef.current.project(a.lat, a.lon);
+        setSelectedAirport({ a, x: pt[0], y: pt[1] });
+        props.current.onInspectAirport?.(a);
+      },
+      toggleLayers: () => setLayersOpen((o) => !o),
+    };
+  }, [plannerControlRef, setMode, from]);
+
   useEffect(() => {
     if (!focusTarget || !mapRef.current || focusTarget.request === lastFocusRequest.current) return;
     lastFocusRequest.current = focusTarget.request;
@@ -472,60 +554,80 @@ export function MapPanel({ mode, from, to, picking, onPick, styleId, onStyle, ga
   const st = styleById(styleId);
   const btn = 'px-2.5 py-1.5 text-[11px] font-semibold rounded-md transition border backdrop-blur ';
   return (
-    <div ref={wrapRef} className={`overflow-hidden bg-slate-900 ${navigation ? 'flight-map-canvas' : ''} ${className || "relative"}`}>
+    <div ref={wrapRef} className={`overflow-hidden bg-[#05080f] ${navigation ? 'flight-map-canvas' : ''} ${className || "relative"}`}>
       <canvas ref={canvasRef} aria-label={navigation ? 'Live navigation map. Drag to pan, scroll to zoom.' : 'Airport map'} className="absolute inset-0 w-full h-full cursor-grab active:cursor-grabbing" />
-      {!compact && !navigation && (
+      {!compact && !navigation && !hideDefaultPlannerChrome && (
         <>
           <div className="absolute top-3 left-3 z-30 flex flex-wrap items-center gap-1.5 max-w-[calc(100%-140px)] sm:max-w-none">
-            <button onClick={() => setLayersOpen((o) => !o)} className={btn + 'bg-slate-900/85 text-white border-white/20 shadow-lg'}>▤ Layers{layers.roads ? ' · roads' : ''}</button>
+            <button onClick={() => setLayersOpen((o) => !o)} className={btn + 'bg-slate-900/85 text-white border-white/20 shadow-lg flex items-center gap-1.5'}>
+              <FlightIcon name="layers" size={13} />
+              <span>Layers{layers.roads ? ' · roads' : ''}</span>
+            </button>
             {mode === 'flight' && game && (
               <button
                 onClick={() => game.cycleRunway()}
-                className={btn + 'bg-slate-900/85 text-amber-300 border-amber-400/30 shadow-lg hover:border-amber-400'}
+                className={btn + 'bg-slate-900/85 text-amber-300 border-amber-400/30 shadow-lg hover:border-amber-400 flex items-center gap-1.5'}
                 title="Click to cycle approach runway"
               >
-                ✈ ARR RWY: {game.apprKey || 'AUTO'}
+                <FlightIcon name="plane" size={13} />
+                <span>ARR RWY: {game.apprKey || 'AUTO'}</span>
               </button>
-            )}
-            {layersOpen && (
-              <div className="mt-1.5 w-[268px] max-w-[calc(100vw-2rem)] max-h-[70vh] overflow-y-auto rounded-xl border border-white/20 bg-slate-950/95 backdrop-blur p-2.5 shadow-2xl">
-                <div className="flex items-center justify-between">
-                  <span className="text-[10px] tracking-[0.2em] font-black text-cyan-300">BASE MAP</span>
-                  <button onClick={() => setLayersOpen(false)} className="w-6 h-6 rounded-full bg-white/10 hover:bg-white/20 text-xs" aria-label="Close layers">✕</button>
-                </div>
-                <div className="mt-1.5 grid grid-cols-2 gap-1">
-                  {TILE_STYLES.filter((s) => s.id !== 'sat').map((s) => (
-                    <button key={s.id} onClick={() => onStyle(s.id)} className={`px-2 py-1.5 rounded-md text-[11px] font-semibold border text-left ${s.id === styleId ? 'bg-cyan-400 text-slate-900 border-cyan-300' : 'bg-white/5 text-slate-200 border-white/10 hover:bg-white/10'}`}>{s.name}</button>
-                  ))}
-                </div>
-                <div className="mt-2.5 text-[10px] tracking-[0.2em] font-black text-cyan-300">OVERLAYS</div>
-                <div className="mt-1 grid grid-cols-2 gap-x-2 gap-y-0.5">
-                  {([['roads', 'Roads & rail'], ['labels', 'Place labels'], ['terrain', 'Terrain relief'], ['airports', 'Airports'], ['route', 'Route & trail']] as const).map(([key, label]) => (
-                    <label key={key} className="flex items-center gap-1.5 py-0.5 text-[11px] text-slate-200 cursor-pointer">
-                      <input type="checkbox" checked={layers[key]} onChange={(e) => setLayers((l) => ({ ...l, [key]: e.target.checked }))} className="accent-cyan-400" />
-                      {label}
-                    </label>
-                  ))}
-                </div>
-                <div className="mt-2 flex gap-1">
-                  <button onClick={() => setLayers({ roads: false, labels: false, airports: false, route: true, terrain: false })} className="flex-1 px-2 py-1 rounded-md text-[10px] font-bold bg-white/5 hover:bg-white/15 border border-white/10">Minimal</button>
-                  <button onClick={() => setLayers({ roads: true, labels: true, airports: true, route: true, terrain: true })} className="flex-1 px-2 py-1 rounded-md text-[10px] font-bold bg-white/5 hover:bg-white/15 border border-white/10">All layers</button>
-                </div>
-                <div className="mt-1.5 text-[10px] leading-snug text-slate-500">Roads are the real street network. Live traffic isn't available in the sim; enable surface detail only when needed.</div>
-              </div>
             )}
           </div>
           <div className="absolute bottom-8 left-3 flex gap-1.5">
             {(mode === 'planner' ? [['route', 'Route'], ['explore', 'Explore']] : [['north', 'North-up'], ['track', 'Track-up'], ['free', 'Free']]).map(([id, label]) => (
-              <button key={id} onClick={() => setMode(id as NavMode)} className={btn + (nav === id ? 'bg-fuchsia-400 text-slate-900 border-fuchsia-300' : 'bg-slate-900/70 text-slate-100 border-white/15 hover:bg-slate-800')}>{label}</button>
+              <button key={id} onClick={() => setMode(id as NavMode)} className={btn + (nav === id ? 'bg-sky-400 text-slate-950 border-sky-300' : 'bg-slate-900/70 text-slate-100 border-white/15 hover:bg-slate-800')}>{label}</button>
             ))}
           </div>
           <div className="absolute top-3 right-3 flex flex-col gap-1.5">
-            <button className={btn + 'bg-slate-900/80 text-white border-white/20 w-8 !text-base !py-1'} onClick={() => mapRef.current?.zoomBy(1)}>+</button>
-            <button className={btn + 'bg-slate-900/80 text-white border-white/20 w-8 !text-base !py-1'} onClick={() => mapRef.current?.zoomBy(-1)}>−</button>
+            <button className={btn + 'bg-slate-900/80 text-white border-white/20 w-8 grid place-items-center !py-1.5'} onClick={() => mapRef.current?.zoomBy(1)} aria-label="Zoom in"><FlightIcon name="plus" size={14} /></button>
+            <button className={btn + 'bg-slate-900/80 text-white border-white/20 w-8 grid place-items-center !py-1.5'} onClick={() => mapRef.current?.zoomBy(-1)} aria-label="Zoom out"><FlightIcon name="minus" size={14} /></button>
           </div>
         </>
       )}
+
+      {/* Layers Popover (Shared between Default & MSFS Bottom-Right Toolbar) */}
+      {!compact && !navigation && layersOpen && (
+        <div
+          className={`absolute z-40 ${
+            hideDefaultPlannerChrome ? 'bottom-28 right-4' : 'top-12 left-3'
+          } w-[280px] max-w-[calc(100vw-2rem)] max-h-[70vh] overflow-y-auto border border-white/20 bg-[#101722]/96 backdrop-blur-md p-3 shadow-2xl text-white`}
+        >
+          <div className="flex items-center justify-between border-b border-white/10 pb-2">
+            <span className="text-[10px] tracking-[0.2em] font-black text-sky-300">WORLD MAP LAYERS</span>
+            <button onClick={() => setLayersOpen(false)} className="w-6 h-6 bg-white/10 hover:bg-white/20 grid place-items-center" aria-label="Close layers">
+              <FlightIcon name="close" size={12} />
+            </button>
+          </div>
+          <div className="mt-2 grid grid-cols-2 gap-1.5">
+            {TILE_STYLES.filter((s) => s.id !== 'sat').map((s) => (
+              <button
+                key={s.id}
+                onClick={() => onStyle(s.id)}
+                className={`px-2.5 py-1.5 text-[11px] font-bold border text-left transition ${
+                  s.id === styleId ? 'bg-[#2572eb] text-white border-sky-300' : 'bg-white/5 text-slate-200 border-white/10 hover:bg-white/10'
+                }`}
+              >
+                {s.name}
+              </button>
+            ))}
+          </div>
+          <div className="mt-3 text-[10px] tracking-[0.2em] font-black text-sky-300">MAP OVERLAYS</div>
+          <div className="mt-1.5 grid grid-cols-2 gap-x-2 gap-y-1">
+            {([['roads', 'Roads & rail'], ['labels', 'Place labels'], ['terrain', 'Terrain relief'], ['airports', 'Airports'], ['route', 'Route & trail']] as const).map(([key, label]) => (
+              <label key={key} className="flex items-center gap-1.5 py-0.5 text-[11px] text-slate-200 cursor-pointer">
+                <input type="checkbox" checked={layers[key]} onChange={(e) => setLayers((l) => ({ ...l, [key]: e.target.checked }))} className="accent-sky-400" />
+                {label}
+              </label>
+            ))}
+          </div>
+          <div className="mt-2.5 flex gap-1.5">
+            <button onClick={() => setLayers({ roads: false, labels: false, airports: false, route: true, terrain: false })} className="flex-1 px-2 py-1 text-[10px] font-bold bg-white/5 hover:bg-white/15 border border-white/10">Minimal</button>
+            <button onClick={() => setLayers({ roads: true, labels: true, airports: true, route: true, terrain: true })} className="flex-1 px-2 py-1 text-[10px] font-bold bg-white/5 hover:bg-white/15 border border-white/10">All layers</button>
+          </div>
+        </div>
+      )}
+
       {navigation && !compact && (
         <>
           <div className="flight-map-top-controls">
@@ -552,69 +654,111 @@ export function MapPanel({ mode, from, to, picking, onPick, styleId, onStyle, ga
       {compact && (
         <button onClick={onExpand} className="flight-mini-expand absolute inset-0 w-full h-full" aria-label="Expand map" aria-keyshortcuts="M"><span className="flight-mini-expand-hint" aria-hidden="true"><FlightIcon name="expand" size={13} />Full screen <kbd>M</kbd></span></button>
       )}
-      {picking && !compact && <div className="absolute top-14 left-3 text-[11px] font-bold px-2.5 py-1 rounded-full" style={{ background: picking === 'from' ? COL.from : COL.to, color: '#06121c' }}>Click an airport to set {picking === 'from' ? 'DEPARTURE' : 'DESTINATION'}</div>}
-      {tip && !compact && !navigation && (
-        <div className="pointer-events-none absolute z-10 px-2.5 py-1.5 rounded-lg bg-slate-950/90 text-white text-xs border border-white/15 shadow-xl" style={{ left: Math.min(tip.x + 14, (wrapRef.current?.clientWidth || 400) - 220), top: tip.y + 12 }}>
-          <div className="font-bold">{tip.a.name} <span className="text-cyan-300">{tip.a.icao}{tip.a.iata ? ` / ${tip.a.iata}` : ''}</span></div>
-          <div className="text-slate-300">{tip.a.city}, {tip.a.country} · {Math.round(tip.a.elev / 0.3048).toLocaleString()} ft · {tip.a.runways.length} rwy · longest {Math.max(...tip.a.runways.map((r) => r.length)).toLocaleString()} m</div>
+      {tip && !compact && !navigation && !selectedAirport && (
+        <div
+          className="pointer-events-none absolute z-20 shadow-2xl border border-white/20 overflow-hidden"
+          style={{
+            left: Math.max(12, Math.min(tip.x + 14, (wrapRef.current?.clientWidth || 800) - 250)),
+            top: Math.max(12, Math.min(tip.y - 24, (wrapRef.current?.clientHeight || 600) - 90)),
+          }}
+        >
+          <div className="bg-white text-slate-950 px-2.5 py-1 text-xs font-extrabold tracking-tight">
+            {tip.a.icao} - {tip.a.name}
+          </div>
+          <div className="bg-[#1b222c]/95 text-slate-200 px-2.5 py-1.5 text-[11px] font-mono flex items-center gap-3">
+            <span>{Math.round(tip.a.elev / 0.3048).toLocaleString()} ft</span>
+            <span>{tip.a.runways.length} rwy</span>
+            <span>{Math.max(...tip.a.runways.map((r) => Math.round(r.length))).toLocaleString()} m</span>
+          </div>
         </div>
       )}
+
+      {/* MSFS 2024 Floating Airport Context Popup on Map (Matches Images 4 & 8) */}
       {selectedAirport && !compact && mode === 'planner' && (
-        <div className="absolute top-20 right-3 z-30 w-72 rounded-xl border border-white/20 bg-slate-950/95 backdrop-blur p-3.5 shadow-2xl text-white animate-[fadein_.2s_ease-out]">
-          <div className="flex items-start justify-between gap-2">
-            <div>
-              <div className="flex items-center gap-1.5">
-                <span className="font-mono text-base font-black text-cyan-300">{selectedAirport.icao}</span>
-                {selectedAirport.iata && <span className="text-xs px-1.5 py-0.5 rounded bg-white/10 font-bold text-slate-300">{selectedAirport.iata}</span>}
-              </div>
-              <div className="font-bold text-sm leading-snug mt-0.5">{selectedAirport.name}</div>
-              <div className="text-xs text-slate-400">{selectedAirport.city}, {selectedAirport.country}</div>
+        <div
+          className="absolute z-30 w-64 shadow-2xl select-none animate-[fadein_.15s_ease-out]"
+          style={{
+            left: Math.max(16, Math.min(selectedAirport.x - 30, (wrapRef.current?.clientWidth || 900) - 280)),
+            top: Math.max(96, Math.min(selectedAirport.y - 40, (wrapRef.current?.clientHeight || 700) - 210)),
+          }}
+          onPointerDown={(e) => e.stopPropagation()}
+        >
+          {/* White Header Bar with Airport ICAO & Name (Image 8 style) */}
+          <div className="bg-white text-slate-950 px-3 py-1.5 flex items-center justify-between gap-2 border border-white">
+            <div className="font-extrabold text-xs truncate">
+              {selectedAirport.a.icao} - {selectedAirport.a.name}
             </div>
-            <button onClick={() => setSelectedAirport(null)} className="w-6 h-6 rounded-full bg-white/10 hover:bg-white/20 text-xs grid place-items-center">✕</button>
-          </div>
-          <div className="mt-2.5 pt-2 border-t border-white/10 grid grid-cols-2 gap-2 text-xs">
-            <div>
-              <span className="text-slate-400 block text-[10px] uppercase tracking-wider">Field Elevation</span>
-              <span className="font-mono font-bold">{Math.round(selectedAirport.elev / 0.3048).toLocaleString()} ft</span>
-            </div>
-            <div>
-              <span className="text-slate-400 block text-[10px] uppercase tracking-wider">Runways</span>
-              <span className="font-mono font-bold">{selectedAirport.runways.length} active</span>
-            </div>
-          </div>
-          <div className="mt-2 max-h-24 overflow-y-auto space-y-1 pr-1 text-[11px] font-mono">
-            {selectedAirport.runways.map((r, i) => (
-              <div key={i} className="flex justify-between px-2 py-1 rounded bg-white/5 text-slate-300">
-                <span>RWY {r.le}/{r.he}</span>
-                <span>{Math.round(r.length)}m × {Math.round(r.width)}m</span>
-              </div>
-            ))}
-          </div>
-          <div className="mt-3 grid grid-cols-2 gap-2">
             <button
+              type="button"
+              onClick={() => setSelectedAirport(null)}
+              className="text-slate-600 hover:text-slate-950 shrink-0"
+              aria-label="Close airport menu"
+            >
+              <FlightIcon name="close" size={13} />
+            </button>
+          </div>
+
+          {/* Dark Telemetry Strip (Elevation, Wind/Runway Info) */}
+          <div className="bg-[#232b35]/95 text-slate-200 px-3 py-2 text-[11px] border-x border-b border-white/15 space-y-0.5 font-mono">
+            <div className="flex items-center justify-between">
+              <span className="text-emerald-400 font-bold">{selectedAirport.a.city || selectedAirport.a.country}</span>
+              <span>ELEV {Math.round(selectedAirport.a.elev / 0.3048).toLocaleString()} ft</span>
+            </div>
+            <div className="flex items-center justify-between text-slate-300">
+              <span>{selectedAirport.a.runways.length} Runways</span>
+              <span>
+                Max {Math.max(...selectedAirport.a.runways.map((r) => Math.round(r.length))).toLocaleString()} m
+              </span>
+            </div>
+          </div>
+
+          {/* 3 Stacked MSFS Action Buttons (Image 4 style: White / Blue / Yellow) */}
+          <div className="mt-1 border border-slate-900/80 shadow-xl flex flex-col text-xs font-bold">
+            <button
+              type="button"
               onClick={() => {
-                if (props.current.onSetAirport) props.current.onSetAirport(selectedAirport, 'from');
-                else if (props.current.onPick) props.current.onPick(selectedAirport);
+                if (props.current.onSetAirport) props.current.onSetAirport(selectedAirport.a, 'from');
+                else props.current.onPick?.(selectedAirport.a);
                 setSelectedAirport(null);
               }}
-              className="py-1.5 rounded-lg text-xs font-bold bg-emerald-500/80 hover:bg-emerald-400 text-slate-950 transition"
+              className="w-full px-3 py-1.5 text-left bg-white hover:bg-slate-100 text-slate-950 transition flex items-center justify-between"
             >
-              Set DEP
+              <span>Set as departure</span>
+              <span className="text-[10px] font-mono text-slate-600">DEP</span>
             </button>
             <button
+              type="button"
               onClick={() => {
-                if (props.current.onSetAirport) props.current.onSetAirport(selectedAirport, 'to');
-                else if (props.current.onPick) props.current.onPick(selectedAirport);
+                if (props.current.onSetAirport) props.current.onSetAirport(selectedAirport.a, 'to');
+                else props.current.onPick?.(selectedAirport.a);
                 setSelectedAirport(null);
               }}
-              className="py-1.5 rounded-lg text-xs font-bold bg-amber-500/80 hover:bg-amber-400 text-slate-950 transition"
+              className="w-full px-3 py-1.5 text-left bg-[#1d6ae5] hover:bg-[#2572eb] text-white transition flex items-center justify-between"
             >
-              Set ARR
+              <span>Set as arrival</span>
+              <span className="text-[10px] font-mono text-sky-200">ARR</span>
             </button>
+            {onFlyNow && (
+              <button
+                type="button"
+                onClick={() => {
+                  onFlyNow(selectedAirport.a);
+                  setSelectedAirport(null);
+                }}
+                className="w-full px-3 py-1.5 text-left bg-[#eab308] hover:bg-[#facc15] text-slate-950 font-extrabold transition flex items-center justify-between"
+              >
+                <span>Fly Now</span>
+                <FlightIcon name="plane" size={13} />
+              </button>
+            )}
           </div>
         </div>
       )}
-      {!compact && <div className={navigation ? 'flight-map-attribution' : 'absolute bottom-1 right-2 text-[10px] text-white/80 bg-black/45 px-1.5 rounded'}>{st.attribution}</div>}
+      {!compact && !hideDefaultPlannerChrome && (
+        <div className={navigation ? 'flight-map-attribution' : 'absolute bottom-1 right-2 text-[10px] text-white/80 bg-black/45 px-1.5 rounded'}>
+          {st.attribution}
+        </div>
+      )}
     </div>
   );
 }
