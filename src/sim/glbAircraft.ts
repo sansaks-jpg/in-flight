@@ -9,9 +9,9 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { AircraftSpec } from './specs';
 import { AircraftVisual, buildAircraftModel } from './aircraftModel';
 import { FlightModel } from './physics';
-import c172Url from '../assets/models/c172.glb?url';
-import atr72Url from '../assets/models/atr72.glb?url';
-import a320Url from '../assets/models/a320.glb?url';
+const c172Url = '/src/assets/models/c172.glb';
+const atr72Url = '/src/assets/models/atr72.glb';
+const a320Url = '/src/assets/models/a320.glb';
 
 type V3 = [number, number, number];
 interface Lights { wing: V3; tail: V3; beacon: V3; landing: V3 }
