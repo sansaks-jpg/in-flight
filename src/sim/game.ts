@@ -1562,6 +1562,9 @@ export class Game {
         }
       }
     }
+    // Init is async: until the flight model and visual exist (e.g. while a failed/hot-reloading
+    // init is still pending) the phase branches below cannot run — render the frame and wait.
+    if (!this.fm || !this.visual) { this.render(); return; }
     if (this.phase === 'loading') {
       const t = this.world.terrain, waited = (now - this.loadStart) / 1000;
       this.world.update(this.camera, this.fm.pos, 1, this.time);

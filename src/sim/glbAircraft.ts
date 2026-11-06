@@ -135,15 +135,16 @@ export async function loadAircraftVisual(spec: AircraftSpec): Promise<AircraftVi
 
   // Sketchfab display-stand leftovers (thin pole + tripod feet) dip far below the gear line once the model is
   // registered: hide any visible mesh whose geometry reaches more than 25 cm under the wheels' ground plane.
+  // Compared in the file's own coordinate frame — root is not yet in the rendered scene here, so ancestor
+  // matrices are identity and Box3 yields file-frame bounds; rotY is about Y, keeping the ground axis-aligned.
   const contactY = Math.min(...spec.gear.map((g) => g.pos[1]));
-  const groundO = contactY - cfg.offset[1];
-  const invO = new THREE.Matrix4().copy(offsetG.matrixWorld).invert();
+  const hideBelow = (contactY - 0.25 - cfg.offset[1]) / cfg.scale[1];
   const buried = new THREE.Box3();
   scene.traverse((o) => {
     const m = o as THREE.Mesh;
     if (!m.isMesh || !m.visible) return;
-    buried.setFromObject(m).applyMatrix4(invO);
-    if (buried.min.y < groundO - 0.25) m.visible = false;
+    buried.setFromObject(m);
+    if (buried.min.y < hideBelow) m.visible = false;
   });
 
   if (spec.id === 'swift') {
