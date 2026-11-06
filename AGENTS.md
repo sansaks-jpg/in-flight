@@ -70,6 +70,10 @@ To prevent garbage collection (GC) micro-stutters:
 | `src/sim/game.ts` | Simulation orchestrator: manages the game loop, input handling, camera systems, ATC, and high-level flight states. |
 | `src/sim/physics.ts` | Rigid-body flight dynamics, aerodynamic force vectors, lift/drag polars, ground effect, and landing gear physics. |
 | `src/sim/autopilot.ts` | Autopilot PID controllers for HDG, ALT, VS, LNAV waypoint sequencing, and ILS glideslope / localizer tracking. |
+| `src/sim/lnav.ts` | LNAV maths: leg guidance, speed-scaled intercept, fly-by turn anticipation and geometric waypoint sequencing (never targets a fix behind the aircraft). |
+| `src/ui/globeTiles.ts` | Planner-globe satellite LOD quadtree: cross-fading tiles, parent fallback, 404-aware (Esri `blankTile=false`), prioritised/cancellable loading, LRU. |
+| `src/ui/globeCamera.ts` | Google-Earth-style camera helpers: eased fly-to with pull-back arc, drag inertia, normalised wheel zoom. |
+| `src/ui/globeRunways.ts` | True-scale (metres) runway markings for the globe overlay with a metres-per-pixel fade gate. |
 | `src/sim/cockpit.ts` | 3D interactive cockpit models, analog gauges, interactive throttle/stick, PFD and MFD displays. |
 | `src/sim/clock.ts` | Single real-world (UTC) time source, NOAA solar position, twilight phases and clock formatting. Never use a separate game clock for time of day. |
 | `src/data/runwayRefine.ts` | Live OpenStreetMap runway survey upgrade (cached) for airports with approximate runways. |

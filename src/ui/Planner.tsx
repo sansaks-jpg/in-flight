@@ -184,11 +184,11 @@ export function Planner({
   const setSelectedArrRwy = (v: string) => setRwySel((r) => ({ ...r, arr: v }));
   // Choosing a runway re-centres the map on that runway (not the airport centre).
   useEffect(() => {
-    if (selectedDep && rwySel.dep) globeControlRef?.current?.focusRunway(selectedDep, rwySel.dep);
+    if (selectedDep && rwySel.dep) globeControlRef?.current?.focusRunway(selectedDep, rwySel.dep, 'dep', selectedArr);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rwySel.dep, selectedDep?.id]);
   useEffect(() => {
-    if (selectedArr && rwySel.arr) globeControlRef?.current?.focusRunway(selectedArr, rwySel.arr);
+    if (selectedArr && rwySel.arr) globeControlRef?.current?.focusRunway(selectedArr, rwySel.arr, 'arr', selectedDep);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rwySel.arr, selectedArr?.id]);
   const [modal, setModal] = useState<null | 'scores' | 'settings' | 'controls' | 'credits'>(null);
@@ -365,7 +365,7 @@ export function Planner({
                 type="button"
                 onClick={() => {
                   if (selectedDep) {
-                    globeControlRef?.current?.focusLocation(selectedDep.lat, selectedDep.lon);
+                    globeControlRef?.current?.focusRunway(selectedDep, rwySel.dep, 'dep', selectedArr);
                   }
                 }}
                 className="font-mono hover:text-sky-300 transition"
@@ -376,7 +376,7 @@ export function Planner({
                 type="button"
                 onClick={() => {
                   if (selectedArr) {
-                    globeControlRef?.current?.focusLocation(selectedArr.lat, selectedArr.lon);
+                    globeControlRef?.current?.focusRunway(selectedArr, rwySel.arr, 'arr', selectedDep);
                   }
                 }}
                 className="font-mono hover:text-sky-300 transition"
@@ -676,7 +676,7 @@ export function Planner({
                         onMouseDown={(e) => {
                           e.preventDefault();
                           setCustomInspectedAirport(airport);
-                          globeControlRef?.current?.focusLocation(airport.lat, airport.lon);
+                          globeControlRef?.current?.focusAirport(airport);
                           setLocationQuery(item.label);
                           setLocationOpen(false);
                         }}
@@ -701,7 +701,7 @@ export function Planner({
                     onMouseDown={(e) => {
                       e.preventDefault();
                       setCustomInspectedAirport(a);
-                      globeControlRef?.current?.focusLocation(a.lat, a.lon);
+                      globeControlRef?.current?.focusAirport(a);
                       setLocationQuery(`${a.icao} - ${a.city || a.name}`);
                       setLocationOpen(false);
                     }}
