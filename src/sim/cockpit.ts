@@ -6,7 +6,7 @@ import { drawSteam, drawPFD, drawND, drawEICAS, PanelData } from './instruments'
 import { QualityPreset } from './storage';
 
 export interface CockpitInputs { pitch: number; roll: number; yaw: number; throttle: number; flapsIdx: number; gearDown: boolean; speedbrake: number; }
-export interface CockpitUi { lights: { nav: boolean; strobe: boolean; land: boolean; beacon: boolean }; seatbelt: boolean; parking: boolean; reverse: boolean; apOn: boolean; apNav: boolean; apAppr: boolean; apHdg: number; apAlt: number; apSpd: number; mood: number; shake: number; }
+export interface CockpitUi { battery?: boolean; lights: { nav: boolean; strobe: boolean; land: boolean; beacon: boolean }; seatbelt: boolean; parking: boolean; reverse: boolean; apOn: boolean; apNav: boolean; apAppr: boolean; apHdg: number; apAlt: number; apSpd: number; mood: number; shake: number; }
 export interface View { pos: THREE.Vector3; yaw: number; pitch: number; }
 
 class TouchPanel {
@@ -257,8 +257,8 @@ export class Cockpit {
       this.acc = 0;
       for (const p of this.panels) { const g = p.c.getContext('2d')!; p.draw(g, p.W, p.H, data); p.t.needsUpdate = true; }
     }
-    const L = ui.lights;
-    const lit = (id: string) => ({ bcn: L.beacon, strb: L.strobe, nav: L.nav, land: L.land, belt: ui.seatbelt, park: ui.parking, rev: ui.reverse, sb: inp.speedbrake > 0.1, ap: ui.apOn, apnav: ui.apNav, appr: ui.apAppr, pa: false } as Record<string, boolean>)[id] || false;
+    const L = ui.lights, bat = ui.battery !== false;
+    const lit = (id: string) => bat && ({ bcn: L.beacon, strb: L.strobe, nav: L.nav, land: L.land, belt: ui.seatbelt, park: ui.parking, rev: ui.reverse, sb: inp.speedbrake > 0.1, ap: ui.apOn, apnav: ui.apNav, appr: ui.apAppr, pa: false } as Record<string, boolean>)[id] || false;
     const info = (id: string) => id === '_hdg' ? `HDG\n${String(Math.round(ui.apHdg)).padStart(3, '0')}` : id === '_alt' ? `ALT\n${Math.round(ui.apAlt)}` : id === '_spd' ? `SPD\n${Math.round(ui.apSpd)}` : undefined;
     for (const t of this.touch) t.draw(lit, info);
     // levers & controls
