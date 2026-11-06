@@ -2,6 +2,7 @@
 import { AircraftSpec } from './specs';
 
 export interface PanelData {
+  battery?: boolean;
   kias: number; altFt: number; vsFpm: number; hdg: number; trk: number; pitch: number; bank: number; slip: number; mach: number; gsKt: number;
   n1: number[]; fuelKg: number; fuelFrac: number; flapsIdx: number; flapsDet: number; gear: number; throttle: number; parking: boolean; reverse: boolean; spoilers: number;
   apOn: boolean; apHdg: number; apAlt: number; apSpd: number; apNav: boolean; apAppr: boolean; apVsMode: boolean;
@@ -124,7 +125,7 @@ export function drawSteam(g: C, W: number, H: number, d: PanelData, s: AircraftS
   drawASI(g, 170, 150, r, d, s); drawAI(g, 420, 150, r, d); drawALT(g, 670, 150, r, d);
   drawDG(g, 170, 372, r, d); drawVSI(g, 420, 372, r, d); drawEngineDial(g, 670, 372, r, d, s);
   // annunciators
-  const ann = (x: number, y: number, label: string, on: boolean, col: string) => { g.fillStyle = on ? col : '#2a1d1d'; g.fillRect(x, y, 100, 34); text(g, label, x + 50, y + 17, 17, on ? '#111' : '#554'); };
+  const ann = (x: number, y: number, label: string, on: boolean, col: string) => { const lit = on && d.battery !== false; g.fillStyle = lit ? col : '#2a1d1d'; g.fillRect(x, y, 100, 34); text(g, label, x + 50, y + 17, 17, lit ? '#111' : '#554'); };
   ann(850, 28, 'STALL', d.warn.includes('STALL'), '#ff3b3b'); ann(850, 72, 'GEAR UNSAFE', d.gear > 0.02 && d.gear < 0.98, '#ffb020'); ann(850, 116, 'OVERSPEED', d.warn.includes('OVERSPEED'), '#ff3b3b');
   ann(850, 160, 'PARK BRK', d.parking, '#ffb020'); ann(850, 204, 'LOW FUEL', d.fuelFrac < 0.15, '#ffb020'); ann(850, 248, d.apOn ? 'AP ENGD' : 'AP OFF', d.apOn, '#38e07a');
   text(g, `FLAPS ${d.flapsIdx}/${d.flapsDet}`, 900, 306, 22, '#fff'); text(g, d.gear > 0.98 ? 'GEAR DOWN' : d.gear < 0.02 ? 'GEAR UP' : 'GEAR ...', 900, 336, 22, d.gear > 0.98 ? '#38e07a' : '#ffd23a');
@@ -135,6 +136,7 @@ export function drawSteam(g: C, W: number, H: number, d: PanelData, s: AircraftS
 // ----------------------------- glass cockpit -----------------------------
 export function drawPFD(g: C, W: number, H: number, d: PanelData, s: AircraftSpec) {
   g.fillStyle = '#000'; g.fillRect(0, 0, W, H);
+  if (d.battery === false) return;
   const cx = W / 2, cy = H * 0.5;
   g.save(); g.beginPath(); g.rect(60, 50, W - 120, H - 110); g.clip(); g.translate(cx, cy); g.rotate(-d.bank);
   const ppd = 7.2, py = d.pitch * ppd;
@@ -245,6 +247,7 @@ export function drawPFD(g: C, W: number, H: number, d: PanelData, s: AircraftSpe
 }
 export function drawND(g: C, W: number, H: number, d: PanelData, _s: AircraftSpec) {
   g.fillStyle = '#04070a'; g.fillRect(0, 0, W, H);
+  if (d.battery === false) return;
   const cx = W / 2, cy = H * 0.84, R = 330, range = d.dest ? Math.max(20, Math.min(320, Math.ceil(d.dest.distNm * 1.1 / 20) * 20)) : 40;
   g.save(); g.translate(cx, cy);
   g.strokeStyle = '#1b4a5a'; g.lineWidth = 2;
@@ -265,6 +268,7 @@ export function drawND(g: C, W: number, H: number, d: PanelData, _s: AircraftSpe
 }
 export function drawEICAS(g: C, W: number, H: number, d: PanelData, _s: AircraftSpec) {
   g.fillStyle = '#05080b'; g.fillRect(0, 0, W, H);
+  if (d.battery === false) return;
   const bar = (x: number, label: string, v: number, col: string) => { text(g, label, x, 30, 20, '#9ad'); g.strokeStyle = '#334'; g.lineWidth = 3; g.strokeRect(x - 28, 50, 56, 190); g.fillStyle = col; g.fillRect(x - 24, 238 - 186 * v, 48, 186 * v); text(g, (v * 100).toFixed(0), x, 262, 24, '#fff'); };
   const n = d.n1.length ? d.n1 : [0, 0]; bar(90, 'N1 L', n[0], n[0] > 0.97 ? '#ff4040' : '#37ff7a'); bar(180, 'N1 R', n[1] ?? n[0], (n[1] ?? n[0]) > 0.97 ? '#ff4040' : '#37ff7a');
   text(g, 'FUEL', 330, 30, 20, '#9ad'); text(g, `${Math.round(d.fuelKg)} kg`, 330, 70, 28, d.fuelFrac < 0.12 ? '#ff5555' : '#fff'); text(g, `FF ${Math.round(d.fuelFlowKgH)} kg/h`, 330, 106, 18, '#8cf');

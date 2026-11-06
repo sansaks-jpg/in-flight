@@ -190,7 +190,8 @@ export function buildAircraftModel(spec: AircraftSpec): AircraftVisual {
         wheelSpin += 0; for (const w of gg.wheels) w.rotation.x = wheelSpin;
       }
       wheelSpin += (fm.wow ? fm.gs : 0) * dt / wr;
-      spin += dt * (10 + fm.n[0] * 90);
+      const nSpool = fm.n[0] ?? 0;
+      spin += dt * nSpool * 100;
       for (const p of props) {
         const ud = p.userData as any; ud.bl.rotation.z = spin; const fast = fm.n[0] > 0.45;
         ud.bl.visible = !fast; (ud.disc.material as THREE.MeshBasicMaterial).opacity = fast ? 0.35 : 0; ud.disc.visible = fast;

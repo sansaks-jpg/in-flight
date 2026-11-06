@@ -1986,7 +1986,7 @@ export class Game {
     if (this.precip) { this.relAir.copy(fm.wind).add(fm.gust).sub(fm.vel); this.precip.update(this.phase === 'paused' ? 0 : dt, this.camera.position, this.relAir, w.wx.baseMsl, clamp((w.sunElevation + 8) / 20, 0.12, 1)); }
     // sim → cockpit instruments
     const interior = this.isInterior() && this.mode === 'play';
-    if (interior && this.cockpit) this.cockpit.update(dt, this.time, this.panelData(), { pitch: fm.ctl.pitch, roll: fm.ctl.roll, yaw: fm.ctl.yaw, throttle: fm.ctl.throttle, flapsIdx: fm.ctl.flapsIdx, gearDown: fm.ctl.gearDown, speedbrake: fm.ctl.speedbrake }, { lights: this.lights, seatbelt: this.seatbelt, parking: fm.ctl.parking, reverse: fm.ctl.reverse, apOn: this.ap.on, apNav: this.ap.nav, apAppr: this.ap.appr, apHdg: this.magHdg(this.ap.hdg), apAlt: this.ap.altFt, apSpd: this.ap.spd, mood: this.comfort / 100, shake: clamp(this.turb * 1.6 + this.shakeImpulse, 0, 1.6) }, true);
+    if (interior && this.cockpit) this.cockpit.update(dt, this.time, this.panelData(), { pitch: fm.ctl.pitch, roll: fm.ctl.roll, yaw: fm.ctl.yaw, throttle: fm.ctl.throttle, flapsIdx: fm.ctl.flapsIdx, gearDown: fm.ctl.gearDown, speedbrake: fm.ctl.speedbrake }, { battery: fm.ctl.battery, lights: this.lights, seatbelt: this.seatbelt, parking: fm.ctl.parking, reverse: fm.ctl.reverse, apOn: this.ap.on, apNav: this.ap.nav, apAppr: this.ap.appr, apHdg: this.magHdg(this.ap.hdg), apAlt: this.ap.altFt, apSpd: this.ap.spd, mood: this.comfort / 100, shake: clamp(this.turb * 1.6 + this.shakeImpulse, 0, 1.6) }, true);
     v.setInterior(interior);
     if (this.phase === 'playing') {
       this.updateChecklist();
@@ -2067,6 +2067,7 @@ export class Game {
     const relWind = wrap180(this.windFrom - fm.heading);
     const crosswind = Math.round(this.windKt * Math.sin(relWind * D2R));
     return {
+      battery: fm.ctl.battery,
       kias: fm.ias / 0.514444, altFt: fm.pos.y / 0.3048, vsFpm: fm.vs * 196.85, hdg: this.magHdg(fm.heading), trk: this.magHdg(fm.track), pitch: fm.pitch * R2D, bank: fm.bank, slip: fm.beta, mach: fm.mach, gsKt: fm.gs * MS_TO_KT,
       n1: fm.n.slice(0, s.engines), fuelKg: fm.fuel, fuelFrac: fm.fuelFrac, flapsIdx: fm.ctl.flapsIdx, flapsDet: s.flapDetents, gear: fm.gearPos, throttle: fm.ctl.throttle, parking: fm.ctl.parking, reverse: fm.ctl.reverse, spoilers: fm.sbPos,
       apOn: this.ap.on, apHdg: this.magHdg(this.ap.hdg), apAlt: this.ap.altFt, apSpd: this.ap.spd, apNav: this.ap.nav, apAppr: this.ap.appr, apVsMode: false,

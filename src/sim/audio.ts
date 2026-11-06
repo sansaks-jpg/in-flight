@@ -69,18 +69,20 @@ export class AudioEngine {
     const inside = s.view === 'inside', mul = s.paused ? 0 : 1;
     const e = this.eng;
     const n = isFinite(s.n) ? Math.max(0, Math.min(1.5, s.n)) : 0;
+    // Engine sound fades in smoothly as spool rises above 0 (silent when cold & dark or shut down)
+    const runVol = Math.min(1, Math.max(0, n / 0.15));
     if (s.kind === 'piston') {
       const f = 28 + n * 55; e.o1.frequency.setTargetAtTime(f, T, tc); e.o2.frequency.setTargetAtTime(f * 0.5 + (Math.random() - 0.5) * 0.8, T, tc);
-      e.g1.gain.setTargetAtTime((0.16 + 0.12 * n) * mul, T, tc); e.g2.gain.setTargetAtTime(0.11 * mul, T, tc); e.whg.gain.setTargetAtTime(0, T, tc);
-      e.lp.frequency.setTargetAtTime((inside ? 700 : 1400) + n * 900, T, tc); e.ng.gain.setTargetAtTime(0.08 * n * mul, T, tc); e.nf.frequency.setTargetAtTime(600 + n * 900, T, tc);
+      e.g1.gain.setTargetAtTime((0.16 + 0.12 * n) * runVol * mul, T, tc); e.g2.gain.setTargetAtTime(0.11 * runVol * mul, T, tc); e.whg.gain.setTargetAtTime(0, T, tc);
+      e.lp.frequency.setTargetAtTime((inside ? 700 : 1400) + n * 900, T, tc); e.ng.gain.setTargetAtTime(0.08 * n * runVol * mul, T, tc); e.nf.frequency.setTargetAtTime(600 + n * 900, T, tc);
     } else if (s.kind === 'turboprop') {
       const f = 55 + n * 40; e.o1.frequency.setTargetAtTime(f, T, tc); e.o2.frequency.setTargetAtTime(f * 2.01, T, tc);
-      e.g1.gain.setTargetAtTime(0.1 * mul, T, tc); e.g2.gain.setTargetAtTime(0.05 * mul, T, tc); e.wh.frequency.setTargetAtTime(700 + n * 1800, T, tc); e.whg.gain.setTargetAtTime(0.025 * n * mul, T, tc);
-      e.lp.frequency.setTargetAtTime((inside ? 900 : 2200) + n * 1200, T, tc); e.ng.gain.setTargetAtTime((0.12 * n + 0.04) * mul, T, tc); e.nf.frequency.setTargetAtTime(500 + n * 1500, T, tc);
+      e.g1.gain.setTargetAtTime(0.1 * runVol * mul, T, tc); e.g2.gain.setTargetAtTime(0.05 * runVol * mul, T, tc); e.wh.frequency.setTargetAtTime(700 + n * 1800, T, tc); e.whg.gain.setTargetAtTime(0.025 * n * runVol * mul, T, tc);
+      e.lp.frequency.setTargetAtTime((inside ? 900 : 2200) + n * 1200, T, tc); e.ng.gain.setTargetAtTime((0.12 * n + 0.04) * runVol * mul, T, tc); e.nf.frequency.setTargetAtTime(500 + n * 1500, T, tc);
     } else {
-      e.o1.frequency.setTargetAtTime(60 + n * 30, T, tc); e.g1.gain.setTargetAtTime(0.04 * n * mul, T, tc); e.g2.gain.setTargetAtTime(0, T, tc);
-      e.wh.frequency.setTargetAtTime(900 + n * 3600, T, tc); e.whg.gain.setTargetAtTime((inside ? 0.01 : 0.05) * n * mul, T, tc);
-      e.lp.frequency.setTargetAtTime((inside ? 800 : 3200) + n * 2500, T, tc); e.ng.gain.setTargetAtTime((0.05 + 0.34 * Math.pow(n, 1.6)) * (inside ? 0.45 : 1) * mul, T, tc); e.nf.frequency.setTargetAtTime(300 + n * 1800, T, tc);
+      e.o1.frequency.setTargetAtTime(60 + n * 30, T, tc); e.g1.gain.setTargetAtTime(0.04 * n * runVol * mul, T, tc); e.g2.gain.setTargetAtTime(0, T, tc);
+      e.wh.frequency.setTargetAtTime(900 + n * 3600, T, tc); e.whg.gain.setTargetAtTime((inside ? 0.01 : 0.05) * n * runVol * mul, T, tc);
+      e.lp.frequency.setTargetAtTime((inside ? 800 : 3200) + n * 2500, T, tc); e.ng.gain.setTargetAtTime((0.05 + 0.34 * Math.pow(n, 1.6)) * (inside ? 0.45 : 1) * runVol * mul, T, tc); e.nf.frequency.setTargetAtTime(300 + n * 1800, T, tc);
     }
     if (s.cabin && s.kind === 'jet') { e.lp.frequency.setTargetAtTime(500, T, 0.2); }
     const tas = isFinite(s.tas) ? Math.max(0, s.tas) : 0;

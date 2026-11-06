@@ -234,7 +234,7 @@ function CompactTelemetry({ hud, metric, minimal }: { hud: HudState; metric: boo
   const units = metric ? 'metric' : 'aviation';
   return <section className="flight-telemetry" data-minimal={minimal} aria-label="Flight telemetry" data-flight-ui>
     <div className="flight-telemetry-primary"><div><span className="flight-eyebrow">IAS · {metric ? 'KM/H' : 'KT'}</span><strong>{formatSpeed(hud.kias, units)}</strong></div><div><span className="flight-eyebrow">HDG · MAG</span><strong>{formatHeading(hud.hdg)}</strong></div><div><span className="flight-eyebrow">ALT · {metric ? 'M' : 'FT'}</span><strong>{formatAltitude(hud.altFt, units)}</strong></div>{!minimal && <div><span className="flight-eyebrow">VS · {metric ? 'M/S' : 'FPM'}</span><strong>{metric ? (hud.vsFpm * .00508).toFixed(1) : Math.round(hud.vsFpm / 50) * 50}</strong></div>}</div>
-    {!minimal && <div className="flight-telemetry-systems"><span>ENGINE <b>{Math.round(hud.n1 * 100)}%</b></span><span>FUEL <b>{Math.round(hud.fuelPct)}%</b></span><span>FLAPS <b>{hud.flapsIdx}/{hud.flapsDet}</b></span><span>TRIM <b>{Math.round(hud.trim * 100)}%</b></span><span data-active={hud.parking}>PARK BRAKE <b>{hud.parking ? 'SET' : 'OFF'}</b></span></div>}
+    {!minimal && <div className="flight-telemetry-systems"><span>ENGINE <b>{hud.n1 > 0.01 ? `${Math.round(hud.n1 * 100)}%` : 'OFF'}</b></span><span>FUEL <b>{Math.round(hud.fuelPct)}%</b></span><span>FLAPS <b>{hud.flapsIdx}/{hud.flapsDet}</b></span><span>TRIM <b>{Math.round(hud.trim * 100)}%</b></span><span data-active={hud.parking}>PARK BRAKE <b>{hud.parking ? 'SET' : 'OFF'}</b></span></div>}
   </section>;
 }
 
