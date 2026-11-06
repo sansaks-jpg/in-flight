@@ -10,7 +10,8 @@ import { PrimaryFlightDisplay, TouchControls } from './FlightInstruments';
 import { FlightEdgeInstruments } from './FlightEdgeInstruments';
 import type { NavigationMapView } from './MapPanel';
 import type { FlightTool, FlightWorkspace, WorkspaceAction } from './flightWorkspace';
-import { MiniMap, NavigationMap, type MapFocus } from './FlightMap';
+import { NavigationMap, type MapFocus } from './FlightMap';
+import { AirportMiniMap } from './AirportMiniMap';
 import { FlightToggle, IconButton, PanelHeader, RunwaySelect } from './FlightWidgets';
 import { FLIGHT_PHASE_LABELS, HUD_MODES, HUD_MODE_LABELS, flightUiScale, flightUnits, formatAltitude, formatSpeed, formatDistance, formatEte, formatHeading, primaryAlert } from './navigation';
 
@@ -151,25 +152,41 @@ function AutopilotPanel({ game, hud, to }: { game: Game; hud: HudState; to: Airp
   </div>;
 }
 
+const fmtT = (t: number) => `${Math.floor(t / 60).toString().padStart(2, '0')}:${String(Math.floor(t % 60)).padStart(2, '0')}`;
+function RadioLine({ m }: { m: NonNullable<HudState['atc']> }) {
+  const pilot = m.sender === 'PILOT';
+  return <div className="flight-transmission" data-pilot={pilot}>
+    <div><strong>{pilot ? `PILOT · ${m.label ?? ''}` : (m.label ?? m.sender).toUpperCase()}</strong><time>{fmtT(m.time)}</time></div>
+    <p>{m.text}</p>
+  </div>;
+}
+/** Fully automatic radio: the pilot and the controllers talk to each other (voiced + subtitled); nothing to press. */
 function RadioPanel({ game, hud }: { game: Game; hud: HudState }) {
-  const [history, setHistory] = useState(false);
-  const messages = hud.atc ? [hud.atc] : [];
+  const endRef = useRef<HTMLDivElement>(null);
+  useEffect(() => { endRef.current?.scrollIntoView({ block: 'end' }); }, [hud.atcLog.length]);
   return <>
-    <div className="flight-radio-status"><span className="flight-live-dot" />COM 1<span>{game.atcResponding ? 'TRANSMITTING…' : 'SIMULATED ATC'}</span></div>
-    <div className="flight-radio-log" aria-live="polite" aria-relevant="additions text">
-      {!messages.length && <div className="flight-empty-state"><FlightIcon name="radio" size={26} /><p>Radio standing by</p><span>Request a clearance using the options below.</span></div>}
-      {messages.map((m) => <div className="flight-transmission" key={m.id} data-pilot={m.sender === 'PILOT'}>
-        <div><strong>{m.sender}</strong><time>{Math.floor(m.time / 60).toString().padStart(2, '0')}:{String(Math.floor(m.time % 60)).padStart(2, '0')}</time></div>
-        <p>{m.text}</p>{m.needsAck && <span className="flight-response-needed">Response requested</span>}
-      </div>)}
+    <div className="flight-radio-status"><span className="flight-live-dot" />COM 1<span>{hud.atcLive ? 'ON AIR' : 'AUTOMATIC ATC · STANDING BY'}</span></div>
+    <div className="flight-radio-onair" data-live={!!hud.atcLive}>
+      {hud.atcLive ? <><strong>{hud.atcLive.sender === 'PILOT' ? 'PILOT' : (hud.atcLive.label ?? hud.atcLive.sender).toUpperCase()}</strong><p>{hud.atcLive.text}</p></>
+        : <p>Pilot and ATC exchange calls and readbacks automatically (ICAO / FAA phraseology). Voices follow the sim's voice setting.</p>}
     </div>
-    <div className="flight-radio-responses"><span className="flight-eyebrow">Transmit · keys 1–4 while radio is open</span>
-      {['Roger / Wilco', 'Request departure', 'Request approach', 'Say again'].map((text, i) => <button key={text} disabled={game.atcResponding} onClick={() => game.action(`atc${i + 1}`)}><kbd>{i + 1}</kbd>{text}<FlightIcon name="chevron" size={13} /></button>)}
+    <div className="flight-radio-log flight-radio-history" aria-live="polite" aria-relevant="additions text">
+      {!hud.atcLog.length && <div className="flight-empty-state"><FlightIcon name="radio" size={26} /><p>Frequency quiet</p><span>Transmissions appear here as they are spoken.</span></div>}
+      {hud.atcLog.map((m) => <RadioLine key={m.id} m={m} />)}
+      <div ref={endRef} />
     </div>
-    <details className="flight-disclosure" open={history} onToggle={(e) => setHistory(e.currentTarget.open)}><summary>Transmission history <span>{hud.atcLog.length}</span></summary>
-      <div className="flight-radio-log">{hud.atcLog.slice().reverse().map((m) => <div className="flight-transmission" key={m.id} data-pilot={m.sender === 'PILOT'}><strong>{m.sender}</strong><p>{m.text}</p></div>)}</div>
-    </details>
+    <div className="flight-radio-footer"><span>{hud.atcLog.length} transmissions · history kept for this flight</span>
+      <button onClick={() => game.radio.cancel()} title="Skip pending radio traffic">Skip queue</button></div>
   </>;
+}
+
+/** Live subtitle: whoever is transmitting right now, with the speaker's role. */
+function RadioSubtitle({ hud }: { hud: HudState }) {
+  const l = hud.atcLive; if (!l) return null;
+  const pilot = l.sender === 'PILOT';
+  return <div className="flight-subtitle" data-pilot={pilot} role="status" aria-live="polite" data-flight-ui>
+    <FlightIcon name="radio" size={15} /><strong>{pilot ? `PILOT (${l.label})` : (l.label ?? l.sender).toUpperCase()}</strong><span>{l.text}</span>
+  </div>;
 }
 
 const CAMERA_VIEWS: { id: ViewId; label: string; description: string; icon: FlightIconName }[] = [
@@ -233,7 +250,6 @@ export function Hud({ game, hud, toasts, settings, setSettings, onMap, mapOpen, 
   const [toolbarVisible, setToolbarVisible] = useState(true);
   const [toolbarPinned, setToolbarPinned] = useState(true);
   const [fullInstruments, setFullInstruments] = useState(false);
-  const [radioNotice, setRadioNotice] = useState<number | null>(null);
   const toolbarTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const toolbarHover = useRef(false);
   const revealRef = useRef<() => void>(() => {});
@@ -293,12 +309,6 @@ export function Hud({ game, hud, toasts, settings, setSettings, onMap, mapOpen, 
     return () => window.removeEventListener('keydown', keydown, true);
   }, [visible]);
 
-  useEffect(() => {
-    if (!hud.atc || hud.atc.sender === 'PILOT') return;
-    setRadioNotice(hud.atc.id);
-    const timer = setTimeout(() => setRadioNotice(null), 11000);
-    return () => clearTimeout(timer);
-  }, [hud.atc?.id]);
 
   const toggleTool = (next: FlightTool) => {
     reveal();
@@ -334,7 +344,7 @@ export function Hud({ game, hud, toasts, settings, setSettings, onMap, mapOpen, 
         pinned={toolbarPinned} onPin={() => { setToolbarPinned((value) => !value); reveal(); }} />
     </div>
     <FlightAlerts game={game} hud={hud} />
-    {miniMap && <MiniMap game={game} hud={hud} from={from} to={to} settings={settings} viewStateRef={mapViewRef} onExpand={onMap} />}
+    {miniMap && <AirportMiniMap game={game} hud={hud} />}
 
     <div className="flight-tool-workspace">
       {activeTool && <section id={`flight-panel-${tool}`} className={`flight-panel flight-window ${tool === 'navigation' ? 'flight-navigation-panel' : 'flight-tool-panel'}`}
@@ -369,9 +379,7 @@ export function Hud({ game, hud, toasts, settings, setSettings, onMap, mapOpen, 
     {hud.freelookActive && <div className="flight-freelook-hint"><FlightIcon name="camera" size={14} />FREE LOOK<span>Release mouse to return to controls</span></div>}
     <div className="flight-bottom-left">
     {mode === 'assisted' && !narrow && !short && !viewport.touch && hud.hint && <div className="flight-instructor" role="status"><FlightIcon name="help" size={17} /><div><strong>FLIGHT ASSISTANT</strong><span>{hud.hint}</span></div></div>}
-      {tool !== 'radio' && radioNotice === hud.atc?.id && <button className="flight-radio-notice" onClick={() => toggleTool('radio')} data-flight-ui>
-        <FlightIcon name="radio" size={17} /><span><strong>{hud.atc?.sender}<span>{hud.atc?.needsAck ? 'RESPONSE REQUESTED' : 'RADIO TRANSMISSION'}</span></strong><span>{hud.atc?.text}</span></span><FlightIcon name="chevron" size={15} />
-      </button>}
+      <RadioSubtitle hud={hud} />
       <div className="flight-toasts" role="status" aria-live="polite">{toasts.slice(-2).map((toast) => <div key={toast.id} className="flight-toast" data-level={toast.level}>
         <FlightIcon name={toast.level === 'warn' || toast.level === 'bad' ? 'alert' : 'check'} size={14} /><span>{toast.text}</span>
       </div>)}</div>

@@ -130,6 +130,7 @@ export function loadImage(url: string, prio = 5): Promise<HTMLImageElement | nul
       img.decoding = 'async';
       let settled = false;
       const timeout = setTimeout(() => finish(false), 12_000);
+      if (typeof (timeout as any)?.unref === 'function') (timeout as any).unref();
       const finish = (ok: boolean) => {
         if (settled) return;
         settled = true; clearTimeout(timeout); img.onload = img.onerror = null; active--;

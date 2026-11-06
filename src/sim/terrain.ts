@@ -4,7 +4,7 @@ import * as THREE from 'three';
 import { Projection, R_MERC, tileSizeMerc, D2R, smoothstep, lerp, invMercX, invMercY, clamp } from './geo';
 import { loadImage, tileUrl, styleById, ELEVATION_URL, cancelQueued, DEFAULT_TILE_STYLE } from './tiles';
 import { groundDetailTexture } from './textures';
-import { airportsNear } from '../data/airports';
+import { airportsNear, airfieldSpines } from '../data/airports';
 import { QualityPreset } from './storage';
 import { QUALITY } from './quality';
 
@@ -44,7 +44,7 @@ const LOD_MAP: Record<QualityPreset, LodCfg[]> = {
   low: LOD_LOW,
 };
 
-const FLAT_R = 260, BLEND_R = 1800; // realistic envelope around runways preserving airport plates and surrounding plains
+const FLAT_R = 420, BLEND_R = 1800; // realistic envelope around runways preserving airport plates and surrounding plains
 
 const _tileBox = new THREE.Box3();
 const _boxMin = new THREE.Vector3();
@@ -713,6 +713,10 @@ export class Terrain {
     const segs: { ax: number; ay: number; bx: number; by: number; elev: number; cos: number }[] = [];
     for (const a of aps) for (const r of a.runways) {
       segs.push({ ax: mx_(r.leLon), ay: my_(r.leLat), bx: mx_(r.heLon), by: my_(r.heLat), elev: a.elev, cos: Math.cos(a.lat * D2R) });
+    }
+    // Surveyed aprons / terminals / hangars sit level with the field too, so a parked aircraft never floats or sinks.
+    for (const a of aps) for (const [la, lo] of airfieldSpines(a)) {
+      segs.push({ ax: mx_(lo), ay: my_(la), bx: mx_(lo), by: my_(la), elev: a.elev, cos: Math.cos(a.lat * D2R) });
     }
     for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
       const u = i / (N - 1), v = j / (N - 1);

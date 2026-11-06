@@ -74,6 +74,20 @@ Speech is serialized and deduplicated, stale callouts are dropped, and pause/mut
   - Callouts: *"Sink Rate"*, *"Terrain, Pull Up"*, *"Glideslope"*, *"500"*, *"Minimums"*.
   - Stall warning horn and overspeed clacker.
 
+## 🆕 Real-scale airside, hangar departures, airport map & automatic voiced ATC
+
+**Real-world scale (verified online).** Aircraft are 1:1 (C172S 8.28 m × 11.0 m, ATR 72-600 27.17 m × 27.05 m, A320-200 37.57 m × 34.10 m). Pilot eye height above ground is now ≈ 1.7 m (C172), 3.3 m (ATR), 4.8 m (A320; eye-to-wheel ≈ 20 ft in the flare). The world camera's near plane is 0.6 m on the ground (it was 1.8 m), so nothing in front of / below the pilot is clipped. Airside layout follows ICAO Annex 14 Vol. I: runway→parallel-taxiway centre-line separation 168 m (code 3/4 instrument, code C), 87–120 m for shorter runways, 4.5 m stand clearance (Table 3-1, 3.12.6), runway-holding position 40–90 m from the centre line.
+
+**Hangar departures (`src/sim/airportGround.ts`).** The aircraft starts cold & dark *outside the doors of a designated hangar*, nose towards the taxiway, never inside a building, on a runway, or at a boarding bridge with the fuselage in a terminal wall:
+- surveyed airfields (OSM layout, 330 Indonesian fields): the smallest suitable hangar (≥ 80 m² for a C172, ≥ 700 m² ATR, ≥ 1 400 m² A320) is chosen; the parking spot is computed from the hangar's oriented bounding box, every candidate face is validated against all hangar/terminal footprints (4.5 m ICAO clearance), runway corridors and taxiway surfaces. Explicit gates/stands are pulled back so the nose-wheel mark – not the CG – sits at the stand line.
+- all other airports: a deterministic, shared synthetic airside (ICAO taxiway separation, hangar apron, maintenance hangar for ATR/A320, T-hangars for light aircraft; small fields get a small terminal instead of jet bridges) that is placed clear of every other runway. The 3D scenery and the spawn use the same plan, so they always agree.
+- Trees, procedural houses and mapped OSM buildings are excluded from taxiways, aprons, hangars, terminals, stands and from the parked aircraft's footprint; the terrain plate is levelled under aprons/hangars so the aircraft never floats or sinks.
+- `npx tsx scripts/spawn-test.ts` checks ~16 000 spawns (all airports with a survey + sample): 0 overlaps with buildings, 5 pathological multi-runway airports reported.
+
+**Airport / runway navigation display (top-left).** `AirportMiniMap` is independent of the full-screen map (`M`): own range, orientation (heading-up / north-up) and zoom (+ / − / A=auto). Shows runways at true width with idents (departure runway green, arrival runway cyan), taxiways, aprons, hangars, terminals, stands, hold-short points, the **taxi route** (names of taxiways) to the departure runway, the final-approach course with 5/10 NM marks, the active waypoint, the aircraft at its real wingspan × length, scale bar and north arrow. Auto range: airport diagram (0.8–2.6 km) on the ground, approach scale (3–12 km) in the air; the square display is 256 px (was a 176 px circle).
+
+**Automatic, voiced ATC (`src/sim/atc.ts`).** No manual input. Every instruction is a complete standard exchange – *pilot call → controller → pilot readback → "readback correct"* (IFR clearance) – for clearance delivery, pushback / start-up, taxi, line up and wait, take-off clearance, hand-off, descent, landing clearance (with "request landing clearance"), vacating and ground. Mandatory readbacks follow ICAO Annex 10 / Doc 4444 / Doc 9432 and FAA JO 7110.65 / AIM (clearances, runway entry/take-off/landing/hold short, runway in use, QNH, SSR code, levels). Speech uses ICAO number pronunciation (*zero, tree, fower, fife, niner*, "decimal", flight levels ≥ 18 000 ft), distinct controller / pilot voices, and a squelch click on every key-up. Subtitles show the speaker live; the **Radio** window keeps the full transmission history. Pause stops the speech; restarting a flight clears the queue. `npx tsx scripts/atc-test.ts` prints sample exchanges.
+
 ---
 
 ## ✈️ Aircraft Roster
