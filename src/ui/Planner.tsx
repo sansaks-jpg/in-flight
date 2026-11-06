@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type MutableRefObject } from 'react';
 import { specById } from '../sim/specs';
-import { AIRPORT_BY_ID, Airport, DEFAULT_FROM, DEFAULT_TO, searchAirports } from '../data/airports';
+import { AIRPORT_BY_ID, Airport, searchAirports } from '../data/airports';
 import { Settings } from '../sim/storage';
 import { TILE_STYLES } from '../sim/tiles';
 import { FlightIcon } from './FlightIcon';
@@ -147,8 +147,6 @@ export function Planner({
   selectedArr = null,
   onSelectDep,
   onSelectArr,
-  setFrom,
-  setTo,
   onFly,
   onBack,
   initialHangarOpen = false,
@@ -240,19 +238,7 @@ export function Planner({
   const canStartSelectedFlight = Boolean(selectedDep || selectedArr);
 
   const handleStartFlight = () => {
-    if (selectedDep && !selectedArr) {
-      const autoArr =
-        selectedDep.id === DEFAULT_TO
-          ? AIRPORT_BY_ID.get(DEFAULT_FROM)!
-          : AIRPORT_BY_ID.get(DEFAULT_TO)!;
-      setTo(autoArr);
-    } else if (!selectedDep && selectedArr) {
-      const autoDep =
-        selectedArr.id === DEFAULT_FROM
-          ? AIRPORT_BY_ID.get(DEFAULT_TO)!
-          : AIRPORT_BY_ID.get(DEFAULT_FROM)!;
-      setFrom(autoDep);
-    }
+    // Missing endpoints are filled in by the parent (App.flyFromPlanner) at start time only
     onFly();
   };
 
@@ -344,7 +330,7 @@ export function Planner({
                 type="button"
                 onClick={() => {
                   if (selectedDep) {
-                    globeControlRef?.current?.focusLocation(selectedDep.lat, selectedDep.lon, 9.5);
+                    globeControlRef?.current?.focusLocation(selectedDep.lat, selectedDep.lon);
                   }
                 }}
                 className="font-mono hover:text-sky-300 transition"
@@ -355,7 +341,7 @@ export function Planner({
                 type="button"
                 onClick={() => {
                   if (selectedArr) {
-                    globeControlRef?.current?.focusLocation(selectedArr.lat, selectedArr.lon, 9.5);
+                    globeControlRef?.current?.focusLocation(selectedArr.lat, selectedArr.lon);
                   }
                 }}
                 className="font-mono hover:text-sky-300 transition"
@@ -635,7 +621,7 @@ export function Planner({
                         onMouseDown={(e) => {
                           e.preventDefault();
                           setCustomInspectedAirport(airport);
-                          globeControlRef?.current?.focusLocation(airport.lat, airport.lon, 9.5);
+                          globeControlRef?.current?.focusLocation(airport.lat, airport.lon);
                           setLocationQuery(item.label);
                           setLocationOpen(false);
                         }}
@@ -660,7 +646,7 @@ export function Planner({
                     onMouseDown={(e) => {
                       e.preventDefault();
                       setCustomInspectedAirport(a);
-                      globeControlRef?.current?.focusLocation(a.lat, a.lon, 9.5);
+                      globeControlRef?.current?.focusLocation(a.lat, a.lon);
                       setLocationQuery(`${a.icao} - ${a.city || a.name}`);
                       setLocationOpen(false);
                     }}
@@ -1034,8 +1020,12 @@ export function Planner({
           {/* Scale Bar ("107.68 km" / "4.24 km") + Blue 3-Icon Pill */}
           <div className="w-full flex items-end justify-between pl-4">
             <div className="flex flex-col items-center text-[11px] font-semibold text-white drop-shadow">
-              <div className="w-6 h-1.5 border-l border-r border-b border-white/90 mb-0.5" />
-              <span>{scaleKm.toFixed(2)} km</span>
+              <div className="w-8 h-1.5 border-l border-r border-b border-white/90 mb-0.5" />
+              <span>
+                {scaleKm < 1
+                  ? `${Math.round(scaleKm * 1000)} m (${scaleKm.toFixed(2)} km)`
+                  : `${Number.isInteger(scaleKm) ? scaleKm : scaleKm.toFixed(2)} km`}
+              </span>
             </div>
 
             <div className="flex items-center bg-[#1d6ae5] border border-sky-300/30 shadow-lg divide-x divide-white/20">

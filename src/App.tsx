@@ -4,7 +4,7 @@ import { AIRPORT_BY_ID, Airport, DEFAULT_FROM, DEFAULT_TO } from './data/airport
 import { Settings, loadSettings, saveSettings, loadRoute, saveRoute, loadScores } from './sim/storage';
 import { StartScreen } from './ui/Screens';
 import { Planner } from './ui/Planner';
-import { GlobeControlHandle, InteractiveEarthGlobe } from './ui/PreGameVisuals';
+import { GLOBE_AIRPORT_FOCUS_ZOOM, GlobeControlHandle, InteractiveEarthGlobe } from './ui/PreGameVisuals';
 import { nextHudMode } from './ui/navigation';
 import { flightWorkspaceReducer, INITIAL_WORKSPACE } from './ui/flightWorkspace';
 import type { NavigationMapView } from './ui/MapPanel';
@@ -29,7 +29,9 @@ export default function App() {
   const [to, setTo] = useState<Airport>(AIRPORT_BY_ID.get(saved?.to || DEFAULT_TO) || AIRPORT_BY_ID.get(DEFAULT_TO)!);
   const [selectedDep, setSelectedDep] = useState<Airport | null>(null);
   const [selectedArr, setSelectedArr] = useState<Airport | null>(null);
-  const [scaleKm, setScaleKm] = useState<number>(107.68);
+  const selectedDepRef = useRef(selectedDep); selectedDepRef.current = selectedDep;
+  const selectedArrRef = useRef(selectedArr); selectedArrRef.current = selectedArr;
+  const [scaleKm, setScaleKm] = useState<number>(1000);
   const [hud, setHud] = useState<HudState | null>(null);
   const [phase, setPhase] = useState<Phase>('idle');
   const [toasts, setToasts] = useState<Toast[]>([]);
@@ -122,41 +124,54 @@ export default function App() {
   // planner → back to menu reloads attract if departure changed
   const backFromPlanner = useCallback(() => { setOpenHangarOnEnter(false); setTransitioningMenuExit(false); setScreen('start'); loadAttract(); }, [loadAttract]);
 
+  // Selecting one endpoint never auto-fills the other one. If the user picks the airport that is
+  // currently set on the opposite field, that opposite field is simply cleared (no silent WIII default).
+  const selectDep = useCallback((airport: Airport | null) => {
+    setSelectedDep(airport);
+    if (!airport) return;
+    setFrom(airport);
+    cur.current.from = airport;
+    setSelectedArr((prev) => (prev && prev.id === airport.id ? null : prev));
+    globeControlRef.current?.focusLocation(airport.lat, airport.lon, GLOBE_AIRPORT_FOCUS_ZOOM);
+  }, []);
+
+  const selectArr = useCallback((airport: Airport | null) => {
+    setSelectedArr(airport);
+    if (!airport) return;
+    setTo(airport);
+    cur.current.to = airport;
+    setSelectedDep((prev) => (prev && prev.id === airport.id ? null : prev));
+    globeControlRef.current?.focusLocation(airport.lat, airport.lon, GLOBE_AIRPORT_FOCUS_ZOOM);
+  }, []);
+
   const handleSelectAirport = useCallback((airport: Airport, role: 'from' | 'to') => {
-    if (role === 'from') {
-      setSelectedDep(airport);
-      setFrom(airport);
-      cur.current.from = airport;
-      if (!selectedArr || selectedArr.id === airport.id) {
-        const fallbackArr = airport.id === DEFAULT_TO ? AIRPORT_BY_ID.get(DEFAULT_FROM)! : AIRPORT_BY_ID.get(DEFAULT_TO)!;
-        setSelectedArr(fallbackArr);
-        setTo(fallbackArr);
-        cur.current.to = fallbackArr;
-      }
-      globeControlRef.current?.focusLocation(airport.lat, airport.lon, 9.5);
-    } else {
-      setSelectedArr(airport);
-      setTo(airport);
-      cur.current.to = airport;
-      if (!selectedDep || selectedDep.id === airport.id) {
-        const fallbackDep = airport.id === DEFAULT_FROM ? AIRPORT_BY_ID.get(DEFAULT_TO)! : AIRPORT_BY_ID.get(DEFAULT_FROM)!;
-        setSelectedDep(fallbackDep);
-        setFrom(fallbackDep);
-        cur.current.from = fallbackDep;
-      }
-      globeControlRef.current?.focusLocation(airport.lat, airport.lon, 9.5);
-    }
-  }, [selectedDep, selectedArr]);
+    if (role === 'from') selectDep(airport);
+    else selectArr(airport);
+  }, [selectDep, selectArr]);
+
+  const fallbackAirport = (avoid: Airport | null, preferred: string, alternate: string) =>
+    avoid && avoid.id === preferred ? AIRPORT_BY_ID.get(alternate)! : AIRPORT_BY_ID.get(preferred)!;
+
+  // Only when the flight actually starts do we fill a missing endpoint with a sensible default
+  const flyFromPlanner = useCallback(() => {
+    const dep = selectedDepRef.current || fallbackAirport(selectedArrRef.current, DEFAULT_FROM, DEFAULT_TO);
+    const arr = selectedArrRef.current || fallbackAirport(dep, DEFAULT_TO, DEFAULT_FROM);
+    setFrom(dep);
+    setTo(arr);
+    cur.current.from = dep;
+    cur.current.to = arr;
+    startFlight();
+  }, [startFlight]);
 
   const handleFlyNowFromGlobe = useCallback((airport: Airport) => {
     setSelectedDep(airport);
     setFrom(airport);
     cur.current.from = airport;
-    if (cur.current.to.id === airport.id) {
-      const altTo = airport.id === DEFAULT_TO ? AIRPORT_BY_ID.get(DEFAULT_FROM)! : AIRPORT_BY_ID.get(DEFAULT_TO)!;
-      setTo(altTo);
-      cur.current.to = altTo;
-    }
+    const arr = selectedArrRef.current && selectedArrRef.current.id !== airport.id
+      ? selectedArrRef.current
+      : fallbackAirport(airport, DEFAULT_TO, DEFAULT_FROM);
+    setTo(arr);
+    cur.current.to = arr;
     startFlight();
   }, [startFlight]);
 
@@ -176,8 +191,8 @@ export default function App() {
         >
           <InteractiveEarthGlobe
             mode={screen === 'start' ? 'menu' : 'planner'}
-            focusLat={screen === 'start' ? 14.0 : -2.5}
-            focusLon={screen === 'start' ? 85.0 : 115.0}
+            focusLat={-2.5}
+            focusLon={115.0}
             selectedDep={selectedDep}
             selectedArr={selectedArr}
             onSelectAirport={handleSelectAirport}
@@ -198,37 +213,11 @@ export default function App() {
           to={to}
           selectedDep={selectedDep}
           selectedArr={selectedArr}
-          onSelectDep={(a) => {
-            setSelectedDep(a);
-            if (a) {
-              setFrom(a);
-              cur.current.from = a;
-              if (!selectedArr || selectedArr.id === a.id) {
-                const fallbackArr = a.id === DEFAULT_TO ? AIRPORT_BY_ID.get(DEFAULT_FROM)! : AIRPORT_BY_ID.get(DEFAULT_TO)!;
-                setSelectedArr(fallbackArr);
-                setTo(fallbackArr);
-                cur.current.to = fallbackArr;
-              }
-              globeControlRef.current?.focusLocation(a.lat, a.lon, 9.5);
-            }
-          }}
-          onSelectArr={(a) => {
-            setSelectedArr(a);
-            if (a) {
-              setTo(a);
-              cur.current.to = a;
-              if (!selectedDep || selectedDep.id === a.id) {
-                const fallbackDep = a.id === DEFAULT_FROM ? AIRPORT_BY_ID.get(DEFAULT_TO)! : AIRPORT_BY_ID.get(DEFAULT_FROM)!;
-                setSelectedDep(fallbackDep);
-                setFrom(fallbackDep);
-                cur.current.from = fallbackDep;
-              }
-              globeControlRef.current?.focusLocation(a.lat, a.lon, 9.5);
-            }
-          }}
+          onSelectDep={selectDep}
+          onSelectArr={selectArr}
           setFrom={setFrom}
           setTo={setTo}
-          onFly={startFlight}
+          onFly={flyFromPlanner}
           onBack={backFromPlanner}
           initialHangarOpen={openHangarOnEnter}
           globeControlRef={globeControlRef}

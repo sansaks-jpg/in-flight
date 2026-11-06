@@ -436,17 +436,29 @@ function drawMercatorTileToEquirectangular(
 
 /**
  * Builds a curved 3D spherical patch BufferGeometry on the unit sphere for a Web Mercator tile (z, tx, ty).
- * Allows native 256x256 Esri World Imagery satellite tiles at z = 4..11 to render with full crispness on the 3D globe.
+ * Allows native 256x256 Esri World Imagery satellite tiles at z = 4..19 to render with full crispness on the 3D globe.
+ *
+ * Vertices are stored relative to the patch center (RTC) and the mesh is positioned at that center, so float32
+ * vertex precision stays sub-centimetre even when the camera hovers a few hundred metres above an airport.
+ * All patches lie exactly on the unit sphere; layering is resolved by draw order (coarse → fine), not by
+ * per-level radius offsets (those offsets caused visible parallax "squares" and z-fighting seams).
  */
-function createSphericalTileGeometry(z: number, tx: number, ty: number): THREE.BufferGeometry {
-  const grid = 8;
+function createSphericalTileGeometry(
+  z: number,
+  tx: number,
+  ty: number
+): { geo: THREE.BufferGeometry; center: THREE.Vector3 } {
+  const grid = z <= 6 ? 16 : 8;
   const nTiles = Math.pow(2, z);
-  const radius = 1.00035 + (z - 3) * 0.00012;
   const vertCount = (grid + 1) * (grid + 1);
   const positions = new Float32Array(vertCount * 3);
   const normals = new Float32Array(vertCount * 3);
   const uvs = new Float32Array(vertCount * 2);
   const indices: number[] = [];
+
+  const centerLat = mercatorTileYToLatDeg(ty + 0.5, z);
+  const centerLon = ((tx + 0.5) / nTiles) * 360 - 180;
+  const [cx, cy, cz] = latLonToUnitSphere(centerLat, centerLon);
 
   let ptr3 = 0;
   let ptr2 = 0;
@@ -457,9 +469,9 @@ function createSphericalTileGeometry(z: number, tx: number, ty: number): THREE.B
       const u = ix / grid;
       const lonDeg = ((tx + u) / nTiles) * 360 - 180;
       const [ux, uy, uz] = latLonToUnitSphere(latDeg, lonDeg);
-      positions[ptr3] = ux * radius;
-      positions[ptr3 + 1] = uy * radius;
-      positions[ptr3 + 2] = uz * radius;
+      positions[ptr3] = ux - cx;
+      positions[ptr3 + 1] = uy - cy;
+      positions[ptr3 + 2] = uz - cz;
       normals[ptr3] = ux;
       normals[ptr3 + 1] = uy;
       normals[ptr3 + 2] = uz;
@@ -485,7 +497,55 @@ function createSphericalTileGeometry(z: number, tx: number, ty: number): THREE.B
   geo.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
   geo.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
   geo.setIndex(indices);
-  return geo;
+  geo.computeBoundingSphere();
+  return { geo, center: new THREE.Vector3(cx, cy, cz) };
+}
+
+/* ---------- Globe camera model (fixed FOV, altitude-based zoom like standard map apps) ---------- */
+
+const EARTH_RADIUS_KM = 6371;
+const GLOBE_FOV_DEG = 35;
+const GLOBE_TAN_HALF_FOV = Math.tan((GLOBE_FOV_DEG * Math.PI) / 360);
+/** Camera altitude above the surface, in Earth radii, at zoom 1 (whole globe framed in the planner). */
+const GLOBE_BASE_ALT = 1.819;
+/** Closest camera altitude (≈ 550 m) — runways, taxiways and aprons are clearly visible at this height. */
+const GLOBE_MIN_ALT_KM = 0.55;
+export const MAX_GLOBE_ZOOM = (GLOBE_BASE_ALT * EARTH_RADIUS_KM) / GLOBE_MIN_ALT_KM; // ≈ 21 000x
+/** Zoom used when an airport is selected (≈ 45 km of terrain visible vertically, airport + surroundings). */
+export const GLOBE_AIRPORT_FOCUS_ZOOM = 160;
+/** Zoom used by "Zoom to Airport" (≈ 4 km visible, runway/apron detail). */
+export const GLOBE_AIRPORT_DETAIL_ZOOM = 1800;
+/** Zoom of the slowly spinning main-menu globe (slightly closer than the planner overview). */
+const GLOBE_MENU_ZOOM = 1.16;
+const MAX_TILE_Z = 19;
+const GLOBE_PLANNER_SCALE = 0.94;
+const GLOBE_MENU_SCALE = 1.06;
+
+/** Camera altitude above the surface (Earth radii) for a zoom factor. */
+function globeAltitudeForZoom(zoom: number): number {
+  return GLOBE_BASE_ALT / Math.max(1, zoom);
+}
+
+/** Ground kilometres per screen pixel at the view center. */
+function globeKmPerPixel(zoom: number, viewH: number): number {
+  return (2 * globeAltitudeForZoom(zoom) * EARTH_RADIUS_KM * GLOBE_TAN_HALF_FOV) / Math.max(200, viewH);
+}
+
+/** Picks a "nice" scale-bar distance (1 / 2 / 5 × 10ⁿ km) whose bar is at most ~90 px wide. */
+function computeNiceScaleBar(kmPerPx: number): { km: number; px: number } {
+  const raw = kmPerPx * 90;
+  const pow = Math.pow(10, Math.floor(Math.log10(raw)));
+  const norm = raw / pow;
+  const nice = (norm >= 5 ? 5 : norm >= 2 ? 2 : 1) * pow;
+  return { km: nice, px: nice / kmPerPx };
+}
+
+/** Best Web Mercator tile level so a tile pixel roughly matches a screen pixel at the view center. */
+function globeTileLevelFor(zoom: number, latDeg: number, viewH: number): number {
+  const metersPerPx = globeKmPerPixel(zoom, viewH) * 1000;
+  const equatorM = 40075016.686 * Math.max(0.05, Math.cos((latDeg * Math.PI) / 180));
+  const z = Math.round(Math.log2(equatorM / (256 * metersPerPx)) + 0.25);
+  return Math.max(2, Math.min(MAX_TILE_Z, z));
 }
 
 export interface GlobeControlHandle {
@@ -573,11 +633,9 @@ function drawFivePointStar(ctx: CanvasRenderingContext2D, cx: number, cy: number
   ctx.closePath();
 }
 
-const MAX_GLOBE_ZOOM = 36.0;
-
 export function InteractiveEarthGlobe({
-  focusLat = 14.0,
-  focusLon = 85.0,
+  focusLat = -2.5,
+  focusLon = 115.0,
   mode = 'menu',
   paused = false,
   selectedDep = null,
@@ -634,7 +692,7 @@ export function InteractiveEarthGlobe({
     lon: focusLon * (Math.PI / 180),
     targetLat: focusLat * (Math.PI / 180),
     targetLon: focusLon * (Math.PI / 180),
-    zoom: 1.0,
+    zoom: mode === 'menu' ? GLOBE_MENU_ZOOM : 1.0,
     targetZoom: 1.0,
     plannerAlpha: mode === 'planner' ? 1.0 : 0.0,
     menuElapsed: 0,
@@ -654,9 +712,9 @@ export function InteractiveEarthGlobe({
   const screenPinsRef = useRef<{ airport: Airport; x: number; y: number; isStar: boolean }[]>([]);
   const requestHighResTilesRef = useRef<((latDeg: number, lonDeg: number, zoomLevel: number) => void) | null>(null);
   const cameraStateRef = useRef<{ fov: number; camZ: number; scale: number; viewH: number }>({
-    fov: 35,
-    camZ: 2.72,
-    scale: 0.94,
+    fov: GLOBE_FOV_DEG,
+    camZ: 2.65,
+    scale: GLOBE_PLANNER_SCALE,
     viewH: 900,
   });
 
@@ -691,7 +749,7 @@ export function InteractiveEarthGlobe({
   useEffect(() => {
     if (!controlRef) return;
     controlRef.current = {
-      focusLocation: (lat: number, lon: number, targetZoom = 9.5) => {
+      focusLocation: (lat: number, lon: number, targetZoom = GLOBE_AIRPORT_FOCUS_ZOOM) => {
         const clampedZoom = Math.max(1.0, Math.min(MAX_GLOBE_ZOOM, targetZoom));
         setShortestTargetLatLon(lat, lon, clampedZoom);
         requestHighResTilesRef.current?.(lat, lon, clampedZoom);
@@ -700,14 +758,14 @@ export function InteractiveEarthGlobe({
         const view = computeRouteFocusView(dep, arr);
         setShortestTargetLatLon(view.lat, view.lon, view.zoom);
         requestHighResTilesRef.current?.(view.lat, view.lon, view.zoom);
-        requestHighResTilesRef.current?.(dep.lat, dep.lon, Math.max(view.zoom, 5.5));
-        requestHighResTilesRef.current?.(arr.lat, arr.lon, Math.max(view.zoom, 5.5));
+        requestHighResTilesRef.current?.(dep.lat, dep.lon, Math.max(view.zoom, 12));
+        requestHighResTilesRef.current?.(arr.lat, arr.lon, Math.max(view.zoom, 12));
       },
       zoomBy: (delta: number) => {
-        const factor = delta > 0 ? 1.45 : 1 / 1.45;
+        const factor = delta > 0 ? 1.55 : 1 / 1.55;
         const nextZoom = Math.max(1.0, Math.min(MAX_GLOBE_ZOOM, rotRef.current.targetZoom * factor));
         rotRef.current.targetZoom = nextZoom;
-        if (nextZoom > 1.25) {
+        if (nextZoom > 1.2) {
           requestHighResTilesRef.current?.(
             rotRef.current.targetLat * (180 / Math.PI),
             rotRef.current.targetLon * (180 / Math.PI),
@@ -771,8 +829,8 @@ export function InteractiveEarthGlobe({
     glMount.appendChild(domCanvas);
 
     const scene = new THREE.Scene();
-    const camera = new THREE.PerspectiveCamera(35, 1, 0.02, 50);
-    camera.position.set(0, 0, 2.72);
+    const camera = new THREE.PerspectiveCamera(GLOBE_FOV_DEG, 1, 0.0001, 50);
+    camera.position.set(0, 0, 2.65);
 
     // Balanced 3-point studio lighting rig for a solid, glossy globe (zero edge transparency or holes, locked 60 FPS)
     const hemiLight = new THREE.HemisphereLight(0xf1f5f9, 0x102347, 1.65);
@@ -789,7 +847,7 @@ export function InteractiveEarthGlobe({
     // Root group positioned on the right in 'menu' mode and centered in 'planner' mode
     const earthGroup = new THREE.Group();
     earthGroup.position.set(modeRef.current === 'menu' ? 0.56 : 0.0, 0.0, 0);
-    const initialScale = modeRef.current === 'menu' ? 1.06 : 0.94;
+    const initialScale = modeRef.current === 'menu' ? GLOBE_MENU_SCALE : GLOBE_PLANNER_SCALE;
     earthGroup.scale.setScalar(initialScale);
     scene.add(earthGroup);
 
@@ -812,7 +870,7 @@ export function InteractiveEarthGlobe({
     earthTexture.magFilter = THREE.LinearFilter;
     earthTexture.anisotropy = isSoftwareGl ? 1 : maxAniso;
 
-    const segs = isSoftwareGl ? 56 : 96;
+    const segs = isSoftwareGl ? 64 : 112;
     const earthGeo = new THREE.SphereGeometry(1.0, segs, segs);
     // 100% solid, opaque, high-gloss material (zero transparency, zero holes on the edges, 60 FPS)
     const earthMat = new THREE.MeshPhongMaterial({
@@ -826,9 +884,10 @@ export function InteractiveEarthGlobe({
       shininess: 38,
     });
     const earthMesh = new THREE.Mesh(earthGeo, earthMat);
+    earthMesh.renderOrder = 0;
     spinGroup.add(earthMesh);
 
-    // Group holding native 256x256 curved 3D spherical tile patches for sharp multi-zoom (z = 4..11)
+    // Group holding native 256x256 curved 3D spherical tile patches for sharp multi-zoom (z = 4..19)
     const highResTileGroup = new THREE.Group();
     spinGroup.add(highResTileGroup);
 
@@ -847,8 +906,8 @@ export function InteractiveEarthGlobe({
       const key = `${z}/${tx}/${ty}`;
       if (sphericalTiles.has(key)) return;
 
-      // Evict oldest unused patches if cache exceeds 160 tiles to maintain 60 FPS and bounded VRAM
-      if (sphericalTiles.size >= 160) {
+      // Evict oldest unused patches if cache exceeds 240 tiles to maintain 60 FPS and bounded VRAM
+      if (sphericalTiles.size >= 240) {
         let oldestKey = '';
         let oldestTime = Infinity;
         for (const [k, v] of sphericalTiles) {
@@ -876,21 +935,22 @@ export function InteractiveEarthGlobe({
       tex.anisotropy = isSoftwareGl ? 1 : maxAniso;
       tex.needsUpdate = true;
 
-      const geo = createSphericalTileGeometry(z, tx, ty);
+      const { geo, center } = createSphericalTileGeometry(z, tx, ty);
+      // Patches lie on the front hemisphere and are sorted coarse→fine via renderOrder = z.
+      // Disabling depthTest/depthWrite between coplanar spherical layers completely eliminates
+      // depth-buffer z-fighting squares and parallax seams while backface culling hides the far side.
       const mat = new THREE.MeshPhongMaterial({
         map: tex,
         transparent: false,
         opacity: 1.0,
-        depthWrite: true,
-        depthTest: true,
+        depthWrite: false,
+        depthTest: false,
         side: THREE.FrontSide,
         specular: new THREE.Color(0x4a6b94),
         shininess: 38,
-        polygonOffset: true,
-        polygonOffsetFactor: -z,
-        polygonOffsetUnits: -z,
       });
       const mesh = new THREE.Mesh(geo, mat);
+      mesh.position.copy(center);
       mesh.renderOrder = z;
       highResTileGroup.add(mesh);
       sphericalTiles.set(key, { key, z, mesh, geo, mat, tex, lastUsed: performance.now() });
@@ -917,14 +977,13 @@ export function InteractiveEarthGlobe({
         }
       }
 
-      // Level 3: higher-resolution satellite tiles prioritizing Afro-Eurasia (75°E) and Indonesia (115°E)
+      // Level 3: higher-resolution satellite tiles prioritizing Indonesia (115°E) and neighboring regions
       const z3Queue: { tx: number; ty: number; dist: number }[] = [];
       for (let ty = 1; ty < 7; ty++) {
         for (let tx = 0; tx < 8; tx++) {
           const tileLon = (tx / 8) * 360 - 180 + 22.5;
-          const dCont = Math.abs(tileLon - 80);
           const dIndo = Math.abs(tileLon - 115);
-          z3Queue.push({ tx, ty, dist: Math.min(dCont, dIndo) });
+          z3Queue.push({ tx, ty, dist: dIndo });
         }
       }
       z3Queue.sort((a, b) => a.dist - b.dist);
@@ -950,23 +1009,23 @@ export function InteractiveEarthGlobe({
       };
       setTimeout(pumpZ3, 120);
 
-      // Multi-resolution spherical tile streaming (z = 4 up to z = 11) so zooming in is crystal-clear
+      // Multi-resolution spherical tile streaming (z = 4 up to z = 19) so zooming in to runways/taxiways is sharp
       requestHighResTilesRef.current = (latDeg: number, lonDeg: number, zoomLevel: number) => {
         if (disposed || !texCtx) return;
-        const maxZ = Math.min(
-          11,
-          Math.max(4, Math.floor(3.8 + Math.log2(Math.max(1, zoomLevel)) * 1.38))
-        );
-        // Load progressive hierarchy: regional base (z=4, 5) + target zoom level (maxZ - 1, maxZ)
+        const targetZ = Math.max(4, globeTileLevelFor(zoomLevel, latDeg, cameraStateRef.current.viewH));
+        // Progressive ancestor pyramid so lower-zoom patches always cover the area while finer tiles stream in
         const levels = new Set<number>([4]);
-        if (maxZ >= 5) levels.add(5);
-        if (maxZ >= 6) levels.add(Math.max(5, maxZ - 1));
-        levels.add(maxZ);
+        if (targetZ >= 6) levels.add(6);
+        if (targetZ >= 9) levels.add(9);
+        if (targetZ >= 12) levels.add(12);
+        if (targetZ >= 15) levels.add(15);
+        if (targetZ >= 5) levels.add(targetZ - 1);
+        levels.add(targetZ);
 
         const nowPerf = performance.now();
         for (const z of levels) {
           const { tx: centerTx, ty: centerTy, n } = latLonToMercatorTile(latDeg, lonDeg, z);
-          const radius = z <= 4 ? 3 : 2;
+          const radius = z === targetZ ? 2 : 1;
           for (let dy = -radius; dy <= radius; dy++) {
             for (let dx = -radius; dx <= radius; dx++) {
               const tx = (centerTx + dx + n) % n;
@@ -981,10 +1040,8 @@ export function InteractiveEarthGlobe({
               loadedTiles.add(key);
               loadGlobeTile(esriUrl(z, tx, ty)).then((img) => {
                 if (disposed || !img) return;
-                if (z <= 5) {
-                  drawMercatorTileToEquirectangular(texCtx, img, z, tx, ty, texCanvas.width, texCanvas.height);
-                  texNeedsUpload = true;
-                }
+                // Only z=2 and z=3 are painted onto the shared equirectangular base canvas.
+                // Drawing sparse z=4/5 tiles onto the base canvas left sharp rectangular patch borders at low zoom.
                 addSphericalPatchTile(img, z, tx, ty);
               });
             }
@@ -1038,6 +1095,8 @@ export function InteractiveEarthGlobe({
       const alpha = rotRef.current.plannerAlpha;
       const zoom = rotRef.current.zoom;
       const scale = earthGroup.scale.x;
+      const kmPerPx = globeKmPerPixel(zoom, viewH);
+      const scaleKm = computeNiceScaleBar(kmPerPx).km;
 
       if (alpha <= 0.02) {
         screenPinsRef.current = [];
@@ -1048,8 +1107,9 @@ export function InteractiveEarthGlobe({
       ctx.globalAlpha = alpha;
       spinGroup.updateMatrixWorld();
 
-      // Minimum normal Z threshold avoids horizon bunching along the curved globe limb
-      const minLimbNz = zoom < 1.8 ? 0.48 : zoom < 4.0 ? 0.34 : 0.16;
+      // Geometric horizon dot-product cos(θ_horizon) = R / camZ, plus a small margin near the limb
+      const cosHorizon = Math.min(0.999999, scale / Math.max(scale + 1e-5, camera.position.z));
+      const minLimbNz = zoom < 1.8 ? Math.max(cosHorizon, 0.44) : Math.min(0.99999, cosHorizon + 0.02 / zoom);
 
       // Camera view direction in local unit-sphere space for ultra-fast dot-product culling (Zero-GC)
       const viewLat = rotRef.current.lat;
@@ -1059,9 +1119,9 @@ export function InteractiveEarthGlobe({
         viewLon * (180 / Math.PI)
       );
 
-      // 1. Settlement light dots across landmasses (batched for 60 FPS)
-      if (zoom < 14.0) {
-        ctx.fillStyle = 'rgba(254, 249, 195, 0.68)';
+      // 1. Subtle warm night-light dots across landmasses at planetary overview scales
+      if (scaleKm >= 80) {
+        ctx.fillStyle = 'rgba(254, 243, 199, 0.55)';
         for (let i = 0; i < GLOBE_SETTLEMENT_DOTS.length; i++) {
           const dot = GLOBE_SETTLEMENT_DOTS[i];
           const dotNz = dot.ux * camUx + dot.uy * camUy + dot.uz * camUz;
@@ -1092,7 +1152,7 @@ export function InteractiveEarthGlobe({
           iy /= len;
           iz /= len;
           ScratchVec.set(ix, iy, iz).applyMatrix4(spinGroup.matrixWorld);
-          if (ScratchVec.z / scale <= 0.06) continue;
+          if (ScratchVec.z / scale <= cosHorizon * 0.98) continue;
           ScratchVec.project(camera);
           const sx = (ScratchVec.x * 0.5 + 0.5) * viewW;
           const sy = (-ScratchVec.y * 0.5 + 0.5) * viewH;
@@ -1162,9 +1222,9 @@ export function InteractiveEarthGlobe({
         }
       }
 
-      // 3. Project & spatially declutter 3D airport pins
+      // 3. Project & spatially declutter 3D airport pins (all regional/small airports appear by <= 50 km scale)
       const visiblePins: { airport: Airport; x: number; y: number; isStar: boolean; nz: number }[] = [];
-      const minSpacingPx = zoom < 1.8 ? 22 : zoom < 3.8 ? 15 : zoom < 8.0 ? 11 : 6;
+      const minSpacingPx = scaleKm > 300 ? 20 : scaleKm > 80 ? 14 : scaleKm > 20 ? 10 : 4;
       const minSpacingSq = minSpacingPx * minSpacingPx;
 
       for (let i = 0; i < GLOBE_AIRPORT_MARKERS.length; i++) {
@@ -1174,26 +1234,29 @@ export function InteractiveEarthGlobe({
           arr?.id === m.airport.id ||
           activeAirportRef.current?.airport.id === m.airport.id;
 
-        if (!isSelected && zoom < 1.7 && m.airport.size === 2) continue;
+        // Show size-2 (regional/domestic) airports as soon as the user zooms to regional scales (~500 km or closer,
+        // and always at the 50 km zoom level); only thin them out at full-planet view when not in Indonesia.
+        if (!isSelected && scaleKm > 450 && m.airport.size === 2 && m.airport.country !== 'ID') continue;
 
         const approxNz = m.ux * camUx + m.uy * camUy + m.uz * camUz;
-        if (approxNz <= minLimbNz) continue;
+        if (!isSelected && approxNz <= minLimbNz) continue;
+        if (isSelected && approxNz <= cosHorizon * 0.95) continue;
 
         ScratchVec.set(m.ux, m.uy, m.uz).applyMatrix4(spinGroup.matrixWorld);
         const nz = ScratchVec.z / scale;
-        if (nz <= minLimbNz) continue;
+        if (!isSelected && nz <= minLimbNz) continue;
 
         ScratchVec.project(camera);
         const sx = (ScratchVec.x * 0.5 + 0.5) * viewW;
         const sy = (-ScratchVec.y * 0.5 + 0.5) * viewH;
 
-        // UI Safe-Zone Clipping (always keep selected DEP/ARR/active pins visible inside the viewport)
-        if (!isSelected) {
-          if (sx < 20 || sx > viewW - 20 || sy < 158 || sy > viewH - 52) continue;
-          if (sx < 290 && sy < 202) continue;
-          if (sx > viewW - 315 && sy > viewH - 142) continue;
+        // Viewport clipping — keep selected/active pins and zoomed-in pins visible across the whole map canvas
+        if (!isSelected && scaleKm > 120) {
+          if (sx < 18 || sx > viewW - 18 || sy < 148 || sy > viewH - 48) continue;
+          if (sx < 280 && sy < 195) continue;
+          if (sx > viewW - 295 && sy > viewH - 135) continue;
         } else {
-          if (sx < 8 || sx > viewW - 8 || sy < 120 || sy > viewH - 36) continue;
+          if (sx < -24 || sx > viewW + 24 || sy < -24 || sy > viewH + 24) continue;
         }
 
         if (!isSelected) {
@@ -1219,7 +1282,7 @@ export function InteractiveEarthGlobe({
         const act = activeAirportRef.current.airport;
         const [aux, auy, auz] = latLonToUnitSphere(act.lat, act.lon);
         ScratchVec.set(aux, auy, auz).applyMatrix4(spinGroup.matrixWorld);
-        if (ScratchVec.z / scale > 0.1) {
+        if (ScratchVec.z / scale > cosHorizon * 0.95) {
           ScratchVec.project(camera);
           const ax = (ScratchVec.x * 0.5 + 0.5) * viewW;
           const ay = (-ScratchVec.y * 0.5 + 0.5) * viewH;
@@ -1239,8 +1302,8 @@ export function InteractiveEarthGlobe({
         }
       }
 
-      // Draw actual oriented runway strips when zoomed in closely (zoom >= 6.0)
-      if (zoom >= 6.0) {
+      // Draw actual oriented runway strips with threshold markings when zoomed in (<= 25 km scale)
+      if (scaleKm <= 25) {
         ctx.save();
         for (let i = 0; i < visiblePins.length; i++) {
           const p = visiblePins[i];
@@ -1254,21 +1317,54 @@ export function InteractiveEarthGlobe({
             const rx2 = (ScratchVecB.x * 0.5 + 0.5) * viewW;
             const ry2 = (-ScratchVecB.y * 0.5 + 0.5) * viewH;
             const rLenPx = Math.hypot(rx2 - rx1, ry2 - ry1);
-            if (rLenPx < 6) continue;
+            if (rLenPx < 5) continue;
+            const widthM = Math.max(25, rwy.width || 45);
+            const rWidthPx = Math.max(4, Math.min(28, (widthM / 1000) / kmPerPx));
+
+            // Runway shoulder / asphalt casing
             ctx.beginPath();
             ctx.moveTo(rx1, ry1);
             ctx.lineTo(rx2, ry2);
-            ctx.strokeStyle = '#0f172a';
-            ctx.lineWidth = Math.min(9, Math.max(4, zoom * 0.35));
+            ctx.strokeStyle = 'rgba(15, 23, 42, 0.92)';
+            ctx.lineWidth = rWidthPx + 3;
             ctx.lineCap = 'butt';
             ctx.stroke();
 
             ctx.beginPath();
             ctx.moveTo(rx1, ry1);
             ctx.lineTo(rx2, ry2);
-            ctx.strokeStyle = '#e2e8f0';
-            ctx.lineWidth = Math.min(5, Math.max(2, zoom * 0.2));
+            ctx.strokeStyle = '#334155';
+            ctx.lineWidth = rWidthPx;
             ctx.stroke();
+
+            // Centerline dashes
+            ctx.beginPath();
+            ctx.moveTo(rx1, ry1);
+            ctx.lineTo(rx2, ry2);
+            ctx.strokeStyle = '#f8fafc';
+            ctx.lineWidth = Math.max(1.2, rWidthPx * 0.18);
+            ctx.setLineDash([Math.max(4, rWidthPx * 0.9), Math.max(3, rWidthPx * 0.65)]);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            // Runway threshold numbers when zoomed in close (<= 5 km scale)
+            if (scaleKm <= 5 && rLenPx >= 48) {
+              const ux = (rx2 - rx1) / rLenPx;
+              const uy = (ry2 - ry1) / rLenPx;
+              ctx.font = '800 10px ui-monospace, SFMono-Regular, monospace';
+              ctx.textAlign = 'center';
+              ctx.textBaseline = 'middle';
+              const leX = rx1 - ux * 14;
+              const leY = ry1 - uy * 14;
+              const heX = rx2 + ux * 14;
+              const heY = ry2 + uy * 14;
+              ctx.fillStyle = 'rgba(2, 6, 23, 0.85)';
+              ctx.fillRect(leX - 13, leY - 7, 26, 14);
+              ctx.fillRect(heX - 13, heY - 7, 26, 14);
+              ctx.fillStyle = '#38bdf8';
+              ctx.fillText(rwy.le, leX, leY + 0.5);
+              ctx.fillText(rwy.he, heX, heY + 0.5);
+            }
           }
         }
         ctx.restore();
@@ -1289,8 +1385,8 @@ export function InteractiveEarthGlobe({
       }
       hoveredAirportRef.current = hovered ? hovered.airport : null;
 
-      // Draw city names when zoomed in (with spatial decluttering so labels never overlap each other or DEP/ARR badges)
-      if (zoom >= 2.2) {
+      // Draw city / airport names when zoomed in (with spatial decluttering so labels never overlap)
+      if (scaleKm <= 400) {
         ctx.font = '600 11px ui-sans-serif, system-ui, sans-serif';
         ctx.textAlign = 'center';
         const drawnCityBoxes: { x: number; y: number }[] = [];
@@ -1303,11 +1399,15 @@ export function InteractiveEarthGlobe({
         for (let i = 0; i < visiblePins.length; i++) {
           const p = visiblePins[i];
           if (dep?.id === p.airport.id || arr?.id === p.airport.id) continue;
-          if (!p.airport.city || (!p.isStar && zoom < 3.2)) continue;
+          const labelText =
+            scaleKm <= 60
+              ? `${p.airport.icao} · ${p.airport.city || p.airport.name}`
+              : p.airport.city;
+          if (!labelText || (!p.isStar && scaleKm > 180)) continue;
           let overlaps = false;
           for (let j = 0; j < drawnCityBoxes.length; j++) {
             if (
-              Math.abs(drawnCityBoxes[j].x - p.x) < 84 &&
+              Math.abs(drawnCityBoxes[j].x - p.x) < 92 &&
               Math.abs(drawnCityBoxes[j].y - p.y) < 26
             ) {
               overlaps = true;
@@ -1316,11 +1416,11 @@ export function InteractiveEarthGlobe({
           }
           if (overlaps) continue;
           drawnCityBoxes.push({ x: p.x, y: p.y });
-          if (drawnCityBoxes.length > 24) break;
+          if (drawnCityBoxes.length > 28) break;
           ctx.fillStyle = 'rgba(0, 0, 0, 0.88)';
-          ctx.fillText(p.airport.city, p.x + 1, p.y - 12);
+          ctx.fillText(labelText, p.x + 1, p.y - 12);
           ctx.fillStyle = 'rgba(241, 245, 249, 0.95)';
-          ctx.fillText(p.airport.city, p.x, p.y - 13);
+          ctx.fillText(labelText, p.x, p.y - 13);
         }
       }
 
@@ -1451,43 +1551,47 @@ export function InteractiveEarthGlobe({
           6.5,
           dt
         );
-        rotRef.current.zoom = THREE.MathUtils.damp(
-          rotRef.current.zoom,
-          isMenu ? 1.0 : rotRef.current.targetZoom,
-          7.5,
+        // Interpolate zoom in log-space so zooming from 1x to 20 000x feels uniform at every scale
+        const desiredZoom = isMenu ? GLOBE_MENU_ZOOM : rotRef.current.targetZoom;
+        const nextLogZoom = THREE.MathUtils.damp(
+          Math.log(Math.max(1, rotRef.current.zoom)),
+          Math.log(Math.max(1, desiredZoom)),
+          8.5,
           dt
         );
+        rotRef.current.zoom = Math.exp(nextLogZoom);
 
         const zoom = rotRef.current.zoom;
-        const targetScale = isMenu ? 1.06 : 0.94;
+        const targetScale = isMenu ? GLOBE_MENU_SCALE : GLOBE_PLANNER_SCALE;
         earthGroup.position.x = THREE.MathUtils.damp(earthGroup.position.x, targetX, 7.0, dt);
         const nextScale = THREE.MathUtils.damp(earthGroup.scale.x, targetScale, 7.0, dt);
         earthGroup.scale.setScalar(nextScale);
 
-        // Smoothly move camera closer & narrow FOV up to 36x zoom (down to 0.35 km airport runway view)
-        const targetCamZ = isMenu ? 2.72 : Math.max(1.12, 2.65 - Math.log2(zoom) * 0.34);
-        camera.position.z = THREE.MathUtils.damp(camera.position.z, targetCamZ, 7.5, dt);
-        const targetFov = isMenu ? 35 : Math.max(1.8, 35 / Math.pow(zoom, 0.82));
-        if (Math.abs(camera.fov - targetFov) > 0.01) {
-          camera.fov = THREE.MathUtils.damp(camera.fov, targetFov, 7.5, dt);
+        // Fixed 35° FOV — zoom is achieved purely by bringing the camera closer to the surface
+        // along the exact screen-center ray [0, 0, +Z], down to ~550 m above the runway.
+        const altRadii = globeAltitudeForZoom(zoom);
+        camera.position.set(0, 0, nextScale * (1 + altRadii));
+        const nearPlane = Math.max(0.00002, Math.min(0.1, nextScale * altRadii * 0.25));
+        if (Math.abs(camera.near - nearPlane) / nearPlane > 0.15) {
+          camera.near = nearPlane;
           camera.updateProjectionMatrix();
         }
 
-        cameraStateRef.current.fov = camera.fov;
+        cameraStateRef.current.fov = GLOBE_FOV_DEG;
         cameraStateRef.current.camZ = camera.position.z;
         cameraStateRef.current.scale = nextScale;
 
-        // Update dynamic scale bar in km (107.68 km at zoom 1.0 -> 0.35 km at zoom 36.0)
-        const scaleKm = +(107.68 / Math.pow(zoom, 1.6)).toFixed(2);
-        if (Math.abs(scaleKm - lastReportedScale) > 0.05) {
+        // Report dynamic scale-bar distance in km (1000 km at planet view -> 0.05 km / 50 m at airport view)
+        const kmPerPx = globeKmPerPixel(zoom, viewH);
+        const scaleKm = computeNiceScaleBar(kmPerPx).km;
+        if (scaleKm !== lastReportedScale) {
           lastReportedScale = scaleKm;
           onScaleKmChangeRef.current?.(scaleKm);
         }
 
         if (!dragRef.current.active) {
           if (isMenu) {
-            // Smoothly pan across continents (Afro-Eurasia, India, SE Asia, Indonesia, Australia)
-            // Never rotate out into the empty Pacific or Atlantic oceans
+            // Standard, continuous global rotation starting over Indonesia (not locked to a single continent)
             rotRef.current.menuElapsed += dt;
             const cont = computeMenuContinentalTarget(rotRef.current.menuElapsed);
             setShortestTargetLatLon(cont.latDeg, cont.lonDeg);
@@ -1524,22 +1628,39 @@ export function InteractiveEarthGlobe({
         spinGroup.rotation.x = euler.rx;
         spinGroup.rotation.y = euler.ry;
 
+        const curLatDeg = rotRef.current.lat * (180 / Math.PI);
+        const curLonDeg = rotRef.current.lon * (180 / Math.PI);
+        const activeTargetZ = globeTileLevelFor(zoom, curLatDeg, viewH);
+
         // Automatically stream high-resolution satellite tiles for the active view center as the user pans/zooms
-        if (!isMenu && zoom > 1.25 && now - lastAutoStreamTime > 200) {
+        if (!isMenu && zoom > 1.2 && now - lastAutoStreamTime > 160) {
           lastAutoStreamTime = now;
-          const curLatDeg = rotRef.current.lat * (180 / Math.PI);
-          const curLonDeg = rotRef.current.lon * (180 / Math.PI);
-          const zBand = Math.floor(Math.log2(zoom) * 2);
-          const streamKey = `${zBand}:${curLatDeg.toFixed(1)}:${curLonDeg.toFixed(1)}`;
+          const bucketDeg = Math.max(0.002, 45 / Math.pow(2, Math.max(0, activeTargetZ - 3)));
+          const latBucket = Math.round(curLatDeg / bucketDeg);
+          const lonBucket = Math.round(curLonDeg / bucketDeg);
+          const streamKey = `${activeTargetZ}:${latBucket}:${lonBucket}`;
           if (streamKey !== lastStreamKey) {
             lastStreamKey = streamKey;
             requestHighResTilesRef.current?.(curLatDeg, curLonDeg, Math.max(zoom, rotRef.current.targetZoom));
           }
         }
 
-        highResTileGroup.visible = !isMenu && zoom >= 1.5;
-        for (const [, entry] of sphericalTiles) {
-          entry.mesh.visible = entry.z <= 5 ? zoom >= 1.5 : zoom >= 4.6;
+        // Only display spherical patch levels up to activeTargetZ + 1 and lying on the visible hemisphere
+        const [camUx, camUy, camUz] = latLonToUnitSphere(curLatDeg, curLonDeg);
+        const showPatches = !isMenu && zoom >= 1.35;
+        highResTileGroup.visible = showPatches;
+        if (showPatches) {
+          for (const [, entry] of sphericalTiles) {
+            if (entry.z > activeTargetZ + 1) {
+              entry.mesh.visible = false;
+              continue;
+            }
+            const c = entry.mesh.position;
+            const dot = c.x * camUx + c.y * camUy + c.z * camUz;
+            // Patch angular half-diagonal is ~π / 2^z; keep visible if any corner can face the camera
+            const minDot = -Math.min(0.85, 4.5 / Math.pow(2, entry.z));
+            entry.mesh.visible = dot > minDot;
+          }
         }
         renderer.render(scene, camera);
         drawOverlay();
@@ -1597,10 +1718,10 @@ export function InteractiveEarthGlobe({
         dragRef.current.x = e.clientX;
         dragRef.current.y = e.clientY;
 
-        // Exact 1:1 projective surface-locked drag sensitivity across all zoom levels (1x .. 36x)
+        // Exact 1:1 projective surface-locked drag sensitivity across all zoom levels (1x .. 21 000x)
         const { fov, camZ, scale, viewH } = cameraStateRef.current;
         const fovRad = (fov * Math.PI) / 180;
-        const surfDist = Math.max(0.14, camZ - scale);
+        const surfDist = Math.max(0.00005, camZ - scale);
         const radPerPixel =
           (2 * surfDist * Math.tan(fovRad * 0.5)) / (Math.max(300, viewH) * scale);
         const cosLat = Math.max(0.25, Math.cos(rotRef.current.lat));
@@ -1630,7 +1751,7 @@ export function InteractiveEarthGlobe({
           }
           if (picked) {
             setActiveAirport(picked);
-            const nextZoom = Math.max(rotRef.current.targetZoom, 8.5);
+            const nextZoom = Math.max(rotRef.current.targetZoom, GLOBE_AIRPORT_FOCUS_ZOOM);
             setShortestTargetLatLon(picked.airport.lat, picked.airport.lon, nextZoom);
             requestHighResTilesRef.current?.(picked.airport.lat, picked.airport.lon, nextZoom);
             onInspectAirport?.(picked.airport);
@@ -1644,13 +1765,16 @@ export function InteractiveEarthGlobe({
       }}
       onWheel={(e) => {
         if (modeRef.current !== 'planner') return;
-        const factor = e.deltaY < 0 ? 1.32 : 1 / 1.32;
+        const factor = e.deltaY < 0 ? 1.38 : 1 / 1.38;
         const nextZoom = Math.max(1.0, Math.min(MAX_GLOBE_ZOOM, rotRef.current.targetZoom * factor));
         rotRef.current.targetZoom = nextZoom;
-        if (nextZoom > 1.25) {
+        // Anchor wheel zoom to the current screen center so the globe never drifts toward a corner
+        rotRef.current.targetLat = rotRef.current.lat;
+        rotRef.current.targetLon = rotRef.current.lon;
+        if (nextZoom > 1.2) {
           requestHighResTilesRef.current?.(
-            rotRef.current.targetLat * (180 / Math.PI),
-            rotRef.current.targetLon * (180 / Math.PI),
+            rotRef.current.lat * (180 / Math.PI),
+            rotRef.current.lon * (180 / Math.PI),
             nextZoom
           );
         }
@@ -1720,14 +1844,14 @@ export function InteractiveEarthGlobe({
               type="button"
               onClick={() => {
                 const chosen = activeAirport.airport;
-                setShortestTargetLatLon(chosen.lat, chosen.lon, 20.0);
-                requestHighResTilesRef.current?.(chosen.lat, chosen.lon, 20.0);
+                setShortestTargetLatLon(chosen.lat, chosen.lon, GLOBE_AIRPORT_DETAIL_ZOOM);
+                requestHighResTilesRef.current?.(chosen.lat, chosen.lon, GLOBE_AIRPORT_DETAIL_ZOOM);
                 onInspectAirport?.(chosen);
               }}
               className="px-3 py-1.5 text-left text-xs font-bold bg-[#1e293b] text-slate-100 hover:bg-[#334155] transition flex items-center justify-between"
             >
               <span>Zoom to Airport</span>
-              <span className="text-[10px] font-mono text-sky-300">20x</span>
+              <span className="text-[10px] font-mono text-sky-300">RWY</span>
             </button>
             <button
               type="button"

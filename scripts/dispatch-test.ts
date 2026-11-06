@@ -101,12 +101,19 @@ test('computeGlobeEulerForLatLon with XYZ order centers any global airport at [0
   }
 });
 
-test('computeMenuContinentalTarget stays strictly over continental hemisphere longitudes', () => {
-  for (let t = 0; t <= 300; t += 5) {
+test('computeMenuContinentalTarget starts over Indonesia and spins continuously around the globe', () => {
+  const start = computeMenuContinentalTarget(0);
+  assert.ok(start.lonDeg >= 100 && start.lonDeg <= 130, `Initial menu lon ${start.lonDeg} should face Indonesia`);
+  assert.ok(start.latDeg >= -10 && start.latDeg <= 5, `Initial menu lat ${start.latDeg} should face Indonesia`);
+
+  const seenQuadrants = new Set<number>();
+  for (let t = 0; t <= 200; t += 5) {
     const { latDeg, lonDeg } = computeMenuContinentalTarget(t);
-    assert.ok(lonDeg >= 30 && lonDeg <= 125, `Menu lon ${lonDeg} should stay over continents`);
-    assert.ok(latDeg >= 4 && latDeg <= 24, `Menu lat ${latDeg} should stay over low/mid northern continents`);
+    assert.ok(lonDeg >= -180 && lonDeg <= 180, `Menu lon ${lonDeg} should wrap cleanly in [-180, 180]`);
+    assert.ok(latDeg >= -20 && latDeg <= 15, `Menu lat ${latDeg} should stay near the equatorial belt`);
+    seenQuadrants.add(Math.floor((lonDeg + 180) / 90));
   }
+  assert.ok(seenQuadrants.size >= 4, 'Menu rotation should sweep across all four longitude quadrants');
 });
 
 test('latLonToMercatorTile and computeRouteFocusView compute valid tile indices and route framing', () => {
@@ -120,7 +127,7 @@ test('latLonToMercatorTile and computeRouteFocusView compute valid tile indices 
   const focus = computeRouteFocusView(wiii, wadd);
   assert.ok(focus.lat > -9 && focus.lat < -6);
   assert.ok(focus.lon > 106 && focus.lon < 116);
-  assert.ok(focus.zoom >= 3 && focus.zoom <= 6);
+  assert.ok(focus.zoom >= 3 && focus.zoom <= 10);
 });
 
 test('filterAircraftVariants filters by category, search query, and favourites', () => {

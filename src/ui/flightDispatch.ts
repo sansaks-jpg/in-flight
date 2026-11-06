@@ -125,15 +125,14 @@ export function computeGlobeEulerForLatLon(
 }
 
 /**
- * Returns a smooth continental camera target (latDeg, lonDeg) for the initial 3D Earth menu
- * that sweeps across Eurasia, Africa, India, Southeast Asia, Indonesia, and Australia (28°E .. 122°E)
- * so the globe always faces continents and never rotates into the empty Pacific or Atlantic oceans.
+ * Returns a natural, continuous global rotation target (latDeg, lonDeg) for the 3D Earth menu.
+ * Starts centered on Indonesia (-2.5°S, 115°E) so the archipelago is immediately visible, then
+ * rotates smoothly around the globe rather than being locked to a single continent.
  */
 export function computeMenuContinentalTarget(elapsedSec: number): { latDeg: number; lonDeg: number } {
-  // Smooth sinusoidal sweep with 90-second period across the Afro-Eurasian & Maritime Continent belt
-  const phase = elapsedSec * 0.07;
-  const lonDeg = 76.0 + Math.sin(phase) * 42.0; // Sweeps smoothly between 34°E (Africa/Europe/Middle East) and 118°E (Asia/Indonesia/Australia)
-  const latDeg = 14.0 + Math.cos(phase * 0.8) * 8.0; // Gently tilts between +6°N (Indonesia/Indian Ocean rim) and +22°N (India/Arabia/East Asia)
+  const lonRaw = 115.0 + elapsedSec * 2.2;
+  const lonDeg = ((((lonRaw + 180) % 360) + 360) % 360) - 180;
+  const latDeg = -2.5 + Math.sin(elapsedSec * 0.05) * 12.0;
   return { latDeg, lonDeg };
 }
 
@@ -179,11 +178,11 @@ export function computeRouteFocusView(
   // Choose zoom so both endpoints and the great-circle path fit comfortably in the viewport
   const zoom =
     distKm < 120
-      ? 11.5
+      ? 24.0
       : distKm < 300
-      ? 7.8
+      ? 12.0
       : distKm < 650
-      ? 5.2
+      ? 6.0
       : distKm < 1400
       ? 3.4
       : distKm < 3000
