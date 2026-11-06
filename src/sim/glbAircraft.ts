@@ -6,6 +6,7 @@
 //   * the A320 source model has no undercarriage, so a real-dimension (track 7.59 m, wheelbase 12.64 m) gear is built here.
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.js';
 import { AircraftSpec } from './specs';
 import { AircraftVisual, buildAircraftModel } from './aircraftModel';
 import { FlightModel } from './physics';
@@ -27,19 +28,26 @@ interface ModelCfg {
 }
 
 const CFG: Record<string, ModelCfg> = {
-  // Cessna 172: model is in metres, nose toward -X (8.24 x 11.0 x 2.72 m). Main gear axle at model x=-1.35, wheel bottoms y=-1.32.
-  swift: { url: c172Url, rotY: -Math.PI / 2, scale: [1, 1, 1], offset: [0, 0.27, 1.825], lights: { wing: [5.5, 0.96, 0.95], tail: [0, 1.45, 5.9], beacon: [0, 1.62, 5.35], landing: [0, -0.2, -2.3] } },
+  // Cessna 172: NLM model (nose toward +Z, length 2.63m, span 3.69m). Rotate PI to face -Z. Scale to 8.28m x 11.0m.
+  swift: { url: c172Url, rotY: Math.PI, scale: [11.0 / 3.69, 11.0 / 3.69, 8.28 / 2.63], offset: [0, -0.05, 0.2], lights: { wing: [5.5, 0.96, 0.95], tail: [0, 1.45, 4.2], beacon: [0, 1.62, 3.8], landing: [0, -0.2, -4.1] } },
   // ATR 72-600: metres, nose toward -X (27.2 x 26.87 x 7.62 m). Main gear at model x=-0.85, wheel bottoms y=-3.8.
   trek: { url: atr72Url, rotY: -Math.PI / 2, scale: [1, 1, 1], offset: [0, 1.75, 1.95], lights: { wing: [13.44, 1.43, 1.82], tail: [0, 5.3, 15.5], beacon: [0, 1.15, -2.5], landing: [0, -1.2, -10.8] } },
   // A320: nose toward -Z; stretched to the real 34.10 m span / 37.57 m length / 11.76 m height.
-  sky: { url: a320Url, rotY: 0, scale: [34.1 / 33.91, 0.96, 37.57 / 38.27], offset: [0, -1.956, -0.8], lights: { wing: [17.03, 0.83, 5.18], tail: [0, 1.8, 20.9], beacon: [0, 1.95, -6.0], landing: [0, -1.6, -11.2] } },
+  sky: { url: a320Url, rotY: 0, scale: [34.1 / 135.5, 0.25164, 37.57 / 149.3], offset: [0, -1.956, -0.8], lights: { wing: [17.03, 0.83, 5.18], tail: [0, 1.8, 20.9], beacon: [0, 1.95, -6.0], landing: [0, -1.6, -11.2] } },
 };
 
 const loader = new GLTFLoader();
+loader.setMeshoptDecoder(MeshoptDecoder);
 const cache = new Map<string, Promise<THREE.Group>>();
 function loadScene(url: string): Promise<THREE.Group> {
   let p = cache.get(url);
-  if (!p) { p = loader.loadAsync(url).then((g) => g.scene); cache.set(url, p); }
+  if (!p) {
+    p = loader.loadAsync(url).then((g) => g.scene).catch((err) => {
+      cache.delete(url);
+      throw err;
+    });
+    cache.set(url, p);
+  }
   return p;
 }
 
@@ -94,7 +102,18 @@ export async function loadAircraftVisual(spec: AircraftSpec): Promise<AircraftVi
   let scene: THREE.Group;
   try { scene = (await loadScene(cfg.url)).clone(true); } catch (e) { console.warn('GLB aircraft load failed, using procedural model', e); return buildAircraftModel(spec); }
   // per-flight copies so edits never leak between flights
-  scene.traverse((o) => { const m = o as THREE.Mesh; if (m.isMesh) { m.material = Array.isArray(m.material) ? m.material.map((x) => x.clone()) : (m.material as THREE.Material).clone(); m.geometry = m.geometry.clone(); m.frustumCulled = false; } });
+  scene.traverse((o) => {
+    const m = o as THREE.Mesh;
+    if (m.isMesh) {
+      m.material = Array.isArray(m.material) ? m.material.map((x) => x.clone()) : (m.material as THREE.Material).clone();
+      m.geometry = m.geometry.clone();
+      m.frustumCulled = false;
+      const matName = Array.isArray(m.material) ? m.material[0]?.name : (m.material as THREE.Material)?.name;
+      if (matName && (/concrete/i.test(matName) || /remove_before_flight/i.test(matName))) {
+        m.visible = false;
+      }
+    }
+  });
 
   const root = new THREE.Group();
   const offsetG = new THREE.Group(); offsetG.position.set(...cfg.offset); root.add(offsetG);
@@ -111,15 +130,24 @@ export async function loadAircraftVisual(spec: AircraftSpec): Promise<AircraftVi
   const discMat = () => new THREE.MeshBasicMaterial({ color: 0x1c2026, transparent: true, opacity: 0, side: THREE.DoubleSide, depthWrite: false });
 
   if (spec.id === 'swift') {
-    // Cessna 172: carve the two propeller blades out of the baked mesh (thin slab at the front, outside the spinner radius).
-    const hub = new THREE.Vector3(-3.775, -0.14, 0);
-    const meshes: THREE.Mesh[] = []; scene.traverse((o) => { if ((o as THREE.Mesh).isMesh) meshes.push(o as THREE.Mesh); });
-    for (const m of meshes) {
-      const blades = carve(m, scene, hub, (c) => Math.abs(c.x - hub.x) < 0.07 && Math.hypot(c.y - hub.y, c.z - hub.z) > 0.16 && Math.hypot(c.y - hub.y, c.z - hub.z) < 1.05);
-      if (!blades) continue;
-      const pivot = new THREE.Group(); pivot.position.copy(hub); scene.add(pivot); pivot.add(blades);
-      const disc = new THREE.Mesh(new THREE.CircleGeometry(0.95, 32).rotateY(Math.PI / 2), discMat()); pivot.add(disc); disc.visible = false;
-      spinners.push({ pivot, axis: 'x', engine: 0, blades: [blades], disc, fan: false, dir: -1 });
+    // If c172 has Object_50 node (the propeller in NLM model)
+    const propNode = byName('Object_50');
+    if (propNode) {
+      const hub = sceneBox(propNode).getCenter(new THREE.Vector3());
+      const pivot = new THREE.Group(); pivot.position.copy(hub); scene.add(pivot); pivot.attach(propNode);
+      const disc = new THREE.Mesh(new THREE.CircleGeometry(0.95, 32), discMat()); pivot.add(disc); disc.visible = false;
+      spinners.push({ pivot, axis: 'z', engine: 0, blades: [propNode], disc, fan: false, dir: 1 });
+    } else {
+      // Cessna 172: carve the two propeller blades out of the baked mesh (thin slab at the front, outside the spinner radius).
+      const hub = new THREE.Vector3(-3.775, -0.14, 0);
+      const meshes: THREE.Mesh[] = []; scene.traverse((o) => { if ((o as THREE.Mesh).isMesh) meshes.push(o as THREE.Mesh); });
+      for (const m of meshes) {
+        const blades = carve(m, scene, hub, (c) => Math.abs(c.x - hub.x) < 0.07 && Math.hypot(c.y - hub.y, c.z - hub.z) > 0.16 && Math.hypot(c.y - hub.y, c.z - hub.z) < 1.05);
+        if (!blades) continue;
+        const pivot = new THREE.Group(); pivot.position.copy(hub); scene.add(pivot); pivot.add(blades);
+        const disc = new THREE.Mesh(new THREE.CircleGeometry(0.95, 32).rotateY(Math.PI / 2), discMat()); pivot.add(disc); disc.visible = false;
+        spinners.push({ pivot, axis: 'x', engine: 0, blades: [blades], disc, fan: false, dir: -1 });
+      }
     }
   } else if (spec.id === 'trek') {
     // ATR 72: both propellers are baked into two meshes (black blades / yellow tips) – split per side and spin around each hub.
@@ -200,7 +228,19 @@ export async function loadAircraftVisual(spec: AircraftSpec): Promise<AircraftVi
   const visual: AircraftVisual = {
     root, bodyParts: [], engineGlow: [],
     setVisible(v) { root.visible = v; },
-    setInterior(_v) { /* the cockpit scene is drawn over the world pass, so the exterior shell needs no toggling */ },
+    setInterior(v) {
+      // In interior view, hide exterior windows and cockpit shell so they don't block
+      // the pilot's forward visibility or instruments
+      scene.traverse((o) => {
+        const m = o as THREE.Mesh;
+        if (m.isMesh) {
+          const matName = Array.isArray(m.material) ? m.material[0]?.name : (m.material as THREE.Material)?.name;
+          if (matName && /window|glass|cockpit/i.test(matName)) {
+            m.visible = !v;
+          }
+        }
+      });
+    },
     update(fm: FlightModel, dt: number, time: number, lights) {
       // wheels touch the ground exactly: lift the rigid model by the suspension compression the physics applies
       let cs = 0, n = 0; for (let i = 1; i < fm.gear.length; i++) { cs += fm.gear[i].comp; n++; }
