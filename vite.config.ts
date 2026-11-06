@@ -17,6 +17,14 @@ if (!fs.existsSync(localTmp)) {
 process.env.TEMP = localTmp;
 process.env.TMP = localTmp;
 
+// Mirror src/assets/images to public/src/assets/images so static string paths work in production builds
+const srcImages = path.resolve(__dirname, "src/assets/images");
+const publicSrcImages = path.resolve(__dirname, "public/src/assets/images");
+if (fs.existsSync(srcImages)) {
+  fs.mkdirSync(publicSrcImages, { recursive: true });
+  fs.cpSync(srcImages, publicSrcImages, { recursive: true });
+}
+
 // https://vite.dev/config/
 export default defineConfig({
   server: {
