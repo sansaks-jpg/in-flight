@@ -566,7 +566,7 @@ export function Planner({
           {conditionsPopoverOpen && (
             <div className="absolute top-[122px] right-0 z-40 w-[265px] bg-[#141c27]/96 border border-white/20 p-3 shadow-2xl space-y-2.5 text-xs">
               <div className="flex items-center justify-between border-b border-white/10 pb-1.5">
-                <span className="font-bold text-white">Weather &amp; Wind Presets</span>
+                <span className="font-bold text-white">Live Weather &amp; Wind</span>
                 <button
                   type="button"
                   onClick={() => setConditionsPopoverOpen(false)}
@@ -576,50 +576,10 @@ export function Planner({
                   <FlightIcon name="close" size={12} />
                 </button>
               </div>
-              <div className="grid grid-cols-3 gap-1">
-                {(
-                  [
-                    ['clear', 'Clear'],
-                    ['scattered', 'Scattered'],
-                    ['overcast', 'Overcast'],
-                  ] as const
-                ).map(([wId, wLabel]) => (
-                  <button
-                    key={wId}
-                    type="button"
-                    onClick={() => set({ weather: wId })}
-                    className={`h-6 text-[11px] font-bold border transition ${
-                      settings.weather === wId
-                        ? 'bg-[#2572eb] border-sky-300 text-white'
-                        : 'bg-[#0e141d] border-white/10 text-slate-300 hover:text-white'
-                    }`}
-                  >
-                    {wLabel}
-                  </button>
-                ))}
-              </div>
-              <div className="grid grid-cols-3 gap-1">
-                {(
-                  [
-                    ['calm', 'Calm 3kt'],
-                    ['light', 'Light 10kt'],
-                    ['strong', 'Gusty 24kt'],
-                  ] as const
-                ).map(([windId, windLabel]) => (
-                  <button
-                    key={windId}
-                    type="button"
-                    onClick={() => set({ wind: windId })}
-                    className={`h-6 text-[11px] font-bold border transition ${
-                      settings.wind === windId
-                        ? 'bg-[#2572eb] border-sky-300 text-white'
-                        : 'bg-[#0e141d] border-white/10 text-slate-300 hover:text-white'
-                    }`}
-                  >
-                    {windLabel}
-                  </button>
-                ))}
-              </div>
+              <p className="text-[11px] leading-snug text-slate-300">
+                Weather is <b className="text-sky-300">live</b>: when the flight starts, the real METAR and forecast model for the departure airfield
+                (wind, gusts, rain, cloud base, visibility, temperature, QNH) drive the sky and the flight physics. Rain in Jakarta means rain in the sim.
+              </p>
             </div>
           )}
         </div>

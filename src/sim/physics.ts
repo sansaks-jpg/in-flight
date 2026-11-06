@@ -4,19 +4,32 @@ import { AircraftSpec } from './specs';
 import { clamp, lerp, smoothstep, wrap180 } from './geo';
 
 export const G = 9.80665;
+/**
+ * Real-time air state, fed from live weather (see liveWeather.ts): ISA temperature deviation (K) and the sea-level pressure (hPa)
+ * that applies at the aircraft's position. Density altitude, true airspeed, Mach and engine lapse all follow from these.
+ */
+export const airState = { dT: 0, qnh: 1013.25 };
 export function atmosphere(h: number) {
   const hh = Math.max(-300, h);
-  const T = hh < 11000 ? 288.15 - 0.0065 * hh : 216.65;
-  const rho = hh < 11000 ? 1.225 * Math.pow(T / 288.15, 4.2559) : 0.3639 * Math.exp(-(hh - 11000) / 6342);
-  return { T, rho, a: Math.sqrt(1.4 * 287.05 * T), sigma: rho / 1.225 };
+  const Tisa = hh < 11000 ? 288.15 - 0.0065 * hh : 216.65;
+  const T = Tisa + airState.dT * (hh < 11000 ? 1 - hh / 22000 : 0.5);
+  const pIsa = hh < 11000 ? 101325 * Math.pow(Tisa / 288.15, 5.2559) : 22632 * Math.exp(-(hh - 11000) / 6342);
+  // a sea-level pressure anomaly decays with height (roughly follows the column mass)
+  const p = pIsa * (1 + (airState.qnh / 1013.25 - 1) * Math.exp(-hh / 9000));
+  const rho = p / (287.05 * T);
+  return { T, rho, p, a: Math.sqrt(1.4 * 287.05 * T), sigma: rho / 1.225 };
 }
 
 export interface Controls {
   pitch: number; roll: number; yaw: number; // pilot demand -1..1 (pitch +1 = pull back / nose up, roll +1 = right, yaw +1 = right)
   throttle: number; brake: number; parking: boolean; reverse: boolean; speedbrake: number;
   flapsIdx: number; gearDown: boolean; trim: number; assist: boolean; apHold: boolean;
+  /** Differential wheel brakes (added to `brake`): left / right main gear, 0..1. */
+  brakeL: number; brakeR: number;
+  /** Aircraft electrics + piston mixture (0 = cut-off, 1 = full rich). */
+  battery: boolean; mixture: number;
 }
-export const defaultControls = (): Controls => ({ pitch: 0, roll: 0, yaw: 0, throttle: 0, brake: 0, parking: true, reverse: false, speedbrake: 0, flapsIdx: 0, gearDown: true, trim: 0, assist: true, apHold: false });
+export const defaultControls = (): Controls => ({ pitch: 0, roll: 0, yaw: 0, throttle: 0, brake: 0, parking: true, reverse: false, speedbrake: 0, flapsIdx: 0, gearDown: true, trim: 0, assist: true, apHold: false, brakeL: 0, brakeR: 0, battery: true, mixture: 1 });
 
 export interface GearState { comp: number; fn: number; contact: boolean; skid: number; }
 export interface ContactEvent { kind: 'touchdown' | 'hull' | 'gearbreak'; vs: number; speed: number; bank: number; pitch: number; point: Vector3; severity: number; }
@@ -30,6 +43,12 @@ export class FlightModel {
   fuel: number; mass: number;
   gearPos = 1; flapsPos = 0; sbPos = 0;
   n = new Array<number>(2).fill(0.2); // engine spool 0..1 (normalised N1/RPM)
+  /** Engine state: 0 = shut down, 1 = starting (starter engaged), 2 = running. `t` = seconds since starter engage. */
+  eng: { state: 0 | 1 | 2; t: number }[] = [{ state: 2, t: 0 }, { state: 2, t: 0 }];
+  /** Runway/taxiway surface friction multiplier (1 dry, ~0.55 wet, ~0.3 snow/ice) – from live weather. */
+  friction = 1;
+  /** Water depth proxy (0..1) for hydroplaning drag/loss of braking on a flooded runway. */
+  wetness = 0;
   surf = { el: 0, ail: 0, rud: 0 };
   trimAuto = 0;
   gear: GearState[];
@@ -61,15 +80,29 @@ export class FlightModel {
   get totalMass() { return this.spec.emptyMass + this.spec.payload + this.fuel; }
   forward(out = new Vector3()) { return out.set(0, 0, -1).applyQuaternion(this.quat); }
 
-  /** Place on ground at a runway threshold, heading in degrees true. */
-  placeOnRunway(x: number, z: number, hdg: number, groundY: number) {
+  /** Real start-up: starter engages (needs battery; piston needs mixture rich; fuel > 0). Returns a refusal reason or ''. */
+  startEngine(i: number): string {
+    const s = this.spec, e = this.eng[i]; if (!e) return 'No such engine';
+    if (e.state !== 0) return e.state === 1 ? 'Engine already starting' : 'Engine already running';
+    if (!this.ctl.battery) return 'Battery is OFF – no electrical power for the starter';
+    if (this.fuel <= 0) return 'No fuel';
+    if (s.kind === 'piston' && this.ctl.mixture < 0.3) return 'Mixture is lean – set the mixture rich before start';
+    e.state = 1; e.t = 0; return '';
+  }
+  stopEngine(i: number) { const e = this.eng[i]; if (e) { e.state = 0; e.t = 0; } }
+  get enginesRunning() { return this.eng.slice(0, this.spec.engines).every((e) => e.state === 2); }
+  get anyEngineRunning() { return this.eng.slice(0, this.spec.engines).some((e) => e.state === 2); }
+  /** Place on ground (runway threshold / stand), heading in degrees true. `coldDark` = engines off, battery off, parking brake set. */
+  placeOnRunway(x: number, z: number, hdg: number, groundY: number, coldDark = false) {
     const s = this.spec;
     const gy = s.gear[1].pos[1];
     this.quat.setFromAxisAngle(UP, -hdg * Math.PI / 180);
     this.pos.set(x, groundY - gy - 0.05, z);
     this.vel.set(0, 0, 0); this.w.set(0, 0, 0);
     this.ctl.parking = true; this.ctl.throttle = 0;
-    this.n.fill(s.idle); this.gearPos = 1; this.ctl.gearDown = true;
+    this.n.fill(coldDark ? 0 : s.idle); this.gearPos = 1; this.ctl.gearDown = true;
+    this.eng.forEach((e) => { e.state = coldDark ? 0 : 2; e.t = 0; });
+    this.ctl.battery = !coldDark; this.ctl.mixture = coldDark && s.kind === 'piston' ? 0 : 1;
   }
   /** Spawn in stable flight. */
   placeAirborne(x: number, y: number, z: number, hdg: number, kt: number, flapsIdx = 0, gearDown = false) {
@@ -81,6 +114,7 @@ export class FlightModel {
     this.w.set(0, 0, 0);
     this.ctl.parking = false; this.ctl.flapsIdx = flapsIdx; this.flapsPos = flapsIdx / (s.flapDetents); this.ctl.gearDown = gearDown; this.gearPos = gearDown ? 1 : 0;
     this.ctl.throttle = 0.55; this.n.fill(0.55); this.onGround = false; this.airborneTime = 30;
+    this.eng.forEach((e) => { e.state = 2; e.t = 0; }); this.ctl.battery = true; this.ctl.mixture = 1;
     // trim pitch to level flight: solve approx alpha
     const q = 0.5 * atmosphere(y).rho * v * v;
     const cl = this.totalMass * G / (q * s.S);
@@ -100,7 +134,7 @@ export class FlightModel {
     const tgtFlap = c.flapsIdx / s.flapDetents;
     this.flapsPos += clamp(tgtFlap - this.flapsPos, -dt * 0.12, dt * 0.12);
     const gTgt = c.gearDown ? 1 : 0;
-    this.gearPos += clamp(gTgt - this.gearPos, -dt / 6, dt / 6);
+    if (s.fixedGear) { this.gearPos = 1; c.gearDown = true; } else this.gearPos += clamp(gTgt - this.gearPos, -dt / 6, dt / 6);
     this.sbPos += clamp(c.speedbrake - this.sbPos, -dt * 0.8, dt * 0.8);
 
     // ---- airmass-relative velocity ----
@@ -159,7 +193,7 @@ export class FlightModel {
       if (!c.apHold && Math.abs(pilotRoll) < 0.03 && Math.abs(bankDeg) < 22) pCmd = -this.bank * 0.9;
       if (Math.abs(bankDeg) > 62 && Math.sign(pilotRoll) === Math.sign(bankDeg)) pCmd = 0;
       ailCmd = (pCmd - (-this.w.z)) * 1.1;
-      rudCmd = c.yaw + (this.wow ? 0 : clamp(this.beta * 7, -0.5, 0.5));
+      rudCmd = c.yaw + (this.wow ? (Math.abs(c.yaw) < 0.05 && this.gs > 3 ? clamp(this.w.y * 0.9, -0.5, 0.5) : 0) : clamp(this.beta * 7, -0.5, 0.5)); // ground: yaw damper (assist)
     } else {
       elevCmd = pilotPitch + c.trim * 0.5 + (c.assist ? this.trimAuto * 0.7 + prot : 0);
       ailCmd = pilotRoll; rudCmd = c.yaw;
@@ -171,33 +205,54 @@ export class FlightModel {
     this.surf.ail += clamp(ailCmd - this.surf.ail, -dt * 5, dt * 5);
     this.surf.rud += clamp(rudCmd - this.surf.rud, -dt * 4, dt * 4);
 
-    // ---- engines ----
+    // ---- engines (real start-up sequence: OFF -> starter -> light-off -> idle -> running) ----
     let thrust = 0, ff = 0;
     const thr = this.fuel > 0 ? c.throttle : 0;
-    this.engineOut = this.fuel <= 0;
     const nEng = s.engines;
+    let anyOut = false;
     for (let i = 0; i < nEng; i++) {
-      const tgt = this.fuel > 0 ? s.idle + (1 - s.idle) * thr : 0;
-      const tau = tgt > this.n[i] ? s.spoolUp : s.spoolDown;
-      this.n[i] += (tgt - this.n[i]) * Math.min(1, dt / tau);
+      const e = this.eng[i];
+      if (this.fuel <= 0 && e.state !== 0) { e.state = 0; anyOut = true; }
+      if (s.kind === 'piston' && e.state === 2 && c.mixture < 0.15) e.state = 0; // idle cut-off
+      let tgt: number, tau: number;
+      if (e.state === 1) {
+        e.t += dt;
+        const k = clamp(e.t / s.startSecs, 0, 1);
+        // starter motoring to ~40% of idle, light-off at 45% of the sequence, then self-accelerating to idle
+        const crank = Math.min(0.4, k / 0.45 * 0.4);
+        const accel = k > 0.45 ? smoothstep(0.45, 1, k) : 0;
+        this.n[i] = s.idle * (crank + (1 - 0.4) * accel);
+        if (!c.battery && k < 0.45) { e.state = 0; e.t = 0; }
+        if (k >= 1) { e.state = 2; e.t = 0; }
+        tgt = this.n[i]; tau = 1e9;
+      } else if (e.state === 2) {
+        tgt = s.idle + (1 - s.idle) * thr; tau = tgt > this.n[i] ? s.spoolUp : s.spoolDown;
+      } else {
+        tgt = 0; tau = s.kind === 'jet' ? 9 : s.kind === 'turboprop' ? 7 : 1.2; // run-down
+      }
+      if (e.state !== 1) this.n[i] += (tgt - this.n[i]) * Math.min(1, dt / tau);
       const N = this.n[i];
+      const run = e.state === 2 ? 1 : 0;
       const pf = clamp((N - s.idle) / (1 - s.idle), 0, 1); // power fraction
       let T = 0;
-      if (s.kind === 'jet') {
-        const lapse = Math.pow(atm.sigma, 0.78) * (1 - 0.32 * Math.min(this.mach, 1)) ;
-        const idleT = 0.035;
-        T = (s.thrust / nEng) * lapse * (idleT + (1 - idleT) * Math.pow(pf, 1.25));
-        if (c.reverse && this.wow) T = -(s.thrust / nEng) * 0.38 * Math.pow(pf, 1.2) * lapse - 0;
-      } else {
-        const pw = (s.power / nEng) * (s.kind === 'piston' ? Math.max(0.1, (atm.sigma - 0.12) / 0.88) : Math.pow(atm.sigma, 0.7)) * (0.06 + 0.94 * Math.pow(pf, 1.1));
-        const Vp = Math.max(0, u);
-        T = (s.propEff * pw) / Math.sqrt(Vp * Vp + s.staticV0 * s.staticV0);
-        if (s.kind === 'turboprop' && Vp < 5) T *= 1;
-        if (c.reverse && this.wow && s.hasReverse) T = -T * 0.55;
+      if (run) {
+        if (s.kind === 'jet') {
+          const lapse = Math.pow(atm.sigma, 0.78) * (1 - 0.32 * Math.min(this.mach, 1)) ;
+          const idleT = 0.05;
+          T = (s.thrust / nEng) * lapse * (idleT + (1 - idleT) * Math.pow(pf, 1.25));
+          if (c.reverse && this.wow) T = -(s.thrust / nEng) * 0.38 * Math.pow(pf, 1.2) * lapse - 0;
+        } else {
+          const pw = (s.power / nEng) * (s.kind === 'piston' ? Math.max(0.1, (atm.sigma - 0.12) / 0.88) * clamp(0.35 + c.mixture * 0.65, 0.35, 1) : Math.pow(atm.sigma, 0.7)) * (0.06 + 0.94 * Math.pow(pf, 1.1));
+          const Vp = Math.max(0, u);
+          T = (s.propEff * pw) / Math.sqrt(Vp * Vp + s.staticV0 * s.staticV0);
+          if (c.reverse && this.wow && s.hasReverse) T = -T * 0.55;
+        }
       }
       thrust += T;
-      ff += s.fuelFlow * (0.08 + 0.92 * Math.pow(Math.max(N, 0.01), 1.4)) * (this.fuel > 0 ? 1 : 0) * (s.kind === 'jet' ? Math.max(0.55, atm.sigma + 0.3) : 1);
+      const starting = e.state === 1 && e.t / s.startSecs > 0.45 ? 0.5 : 0;
+      ff += s.fuelFlow * (0.08 + 0.92 * Math.pow(Math.max(N, 0.01), 1.4)) * (run ? 1 : starting) * (this.fuel > 0 ? 1 : 0) * (s.kind === 'jet' ? Math.max(0.55, atm.sigma + 0.3) : 1);
     }
+    this.engineOut = this.fuel <= 0 || anyOut;
     this.thrustN = thrust; this.fuelFlow = ff;
     this.fuel = Math.max(0, this.fuel - ff * dt);
     const mass = this.totalMass; this.mass = mass;
@@ -266,7 +321,7 @@ export class FlightModel {
     this.agl = this.pos.y + s.gear[1].pos[1] - this.groundH;
     let anyContact = false, maxFn = 0;
     let steer = 0;
-    if (this.wow || this.agl < 4) steer = c.yaw * s.maxSteer * (1 - smoothstep(6, 45, this.gs)) ;
+    if (this.wow || this.agl < 4) steer = (c.yaw + (c.assist && Math.abs(c.yaw) < 0.05 && this.gs > 3 ? clamp(this.w.y * 0.6, -0.3, 0.3) : 0)) * s.maxSteer * (1 - smoothstep(8, 40, this.gs));
     const brakeIn = c.parking ? 1 : c.brake;
     const gearActive = this.gearPos > 0.9;
     s.gear.forEach((g, i) => {
@@ -280,7 +335,7 @@ export class FlightModel {
       const pen = gh - pw.y;
       if (pen <= 0) { st.comp = lerp(st.comp, 0, 0.3); return; }
       const velP = this.vel.clone().add(new Vector3().copy(this.w).applyQuaternion(this.quat).cross(rW));
-      const staticComp = 0.22 * (s.gearTravel / 0.35 > 1 ? 1.2 : 1);
+      const staticComp = Math.max(0.06, s.gearTravel * 0.45); // static oleo / spring deflection
       const gsh = this.share[i];
       const kSpring = (mass * G * gsh) / staticComp;
       const mEff = mass * gsh;
@@ -296,10 +351,10 @@ export class FlightModel {
       if (g.nose && steer) fwdW.applyAxisAngle(UP, -steer);
       const latW = new Vector3().crossVectors(UP, fwdW).multiplyScalar(-1); // right-ish
       const vl = velP.dot(fwdW), vt = velP.dot(latW);
-      const brk = g.nose ? 0 : brakeIn;
-      const rollRes = 0.017 + brk * 0.52;
+      const brk = g.nose ? 0 : clamp(brakeIn + (g.pos[0] > 0 ? c.brakeR : c.brakeL), 0, 1);
+      const rollRes = 0.015 + Math.min(0.012, 0.0008 * Math.abs(vl)) + brk * 0.45 * this.friction * (1 - 0.5 * this.wetness);
       const FL = -Fn * rollRes * Math.tanh(vl * 2.5);
-      const lim = Fn * (g.nose ? 0.75 : 0.95);
+      const lim = Fn * (g.nose ? 0.75 : 0.95) * this.friction;
       let FT = -Fn * (g.nose ? 0.9 : 1.0) * Math.tanh(vt * 2.2);
       FT = clamp(FT, -lim, lim);
       st.skid = Math.abs(vt) > 3 ? 1 : 0;
