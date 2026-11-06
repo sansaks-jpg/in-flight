@@ -1,12 +1,16 @@
 import * as THREE from 'three';
 import { Airport, airportsNear, frequenciesFor } from '../data/airports';
-import { taxiRoute, findStartSpot, TaxiRoute } from './airfield';
+import { taxiRoute, TaxiRoute } from './airfield';
 import { magVar } from './magvar';
 import { AircraftSpec, specById } from './specs';
-import { FlightModel, G, atmosphere } from './physics';
+import { FlightModel, G, atmosphere, airState } from './physics';
+import { LiveWx, OFFLINE_WX, fetchLiveWeather, windProfile, windVector, isaDeviation, wxSummary } from './liveWeather';
+import { Precip } from './precip';
+import { chooseSpawn, Spawn } from './departure';
 import { Projection, haversine, bearing, wrap180, wrap360, D2R, R2D, clamp, M_PER_NM, MS_TO_KT, destination, greatCircle, FlightWaypoint } from './geo';
 import { World, Threshold, TimeOfDay, Weather } from './world';
-import { buildAircraftModel, AircraftVisual } from './aircraftModel';
+import { AircraftVisual } from './aircraftModel';
+import { loadAircraftVisual } from './glbAircraft';
 import { Cockpit } from './cockpit';
 import { PanelData } from './instruments';
 import { Autopilot, IlsData } from './autopilot';
@@ -79,6 +83,8 @@ export interface HudState {
   fuelTimeMin: number;
   relWindDir: number; crosswindKt: number; headwindKt: number;
   qnhInHg: number; oatC: number;
+  /** live weather */
+  wxText: string; wxMetar: string; wxSource: string; wxCondition: string; wxRain: number; wxQnhHpa: number; wxVisKm: number; wxObsAge: number;
   runwayRemM: number;
   pitchTarget: number | null;
   trim: number;
@@ -285,6 +291,11 @@ export class Game {
   private score = 0; private items: Breakdown[] = []; private comfort = 100; private bestRem = 0; private flightTime = 0; private flownKm = 0; private lastLL: [number, number] = [0, 0];
   trail: [number, number][] = []; private trailT = 0;
   private lights = { nav: true, strobe: false, land: false, beacon: true }; seatbelt = true;
+  /** Real-time weather at the aircraft (METAR + model data); see liveWeather.ts. */
+  liveWx: LiveWx | null = null; private wxFetchedAt = 0; private wxBusy = false; private wxPoint: [number, number] = [0, 0]; precip: Precip | null = null;
+  /** Where the aircraft is parked (stand / gate / apron) and the departure procedure state. */
+  spawn: Spawn | null = null; depStage = 0; pushback = { active: false, t: 0, done: false }; private depT = 0;
+  private windTmp = new THREE.Vector3(); private relAir = new THREE.Vector3(); private wxTmp = { dir: 0, kt: 0, tempC: 15 };
   private windFrom = 270; private windKt = 0; private turb = 0; private gustPhase = Math.random() * 100; private gust = new THREE.Vector3();
   private warnState: { text: string; level: 'caution' | 'warning'; sound: WarnSound }[] = []; private warnPenalty: Record<string, number> = {};
   private landing: LandingInfo | null = null; private takeoffDone = false; private stoppedT = 0; private endT = 0; private result: Result | null = null; private crashTimer = 0;
@@ -376,13 +387,15 @@ export class Game {
     });
     this.world.terrain.fallbackH = from.elev;
     this.effects = new Effects(this.world.scene);
-    this.visual = buildAircraftModel(this.spec); this.world.scene.add(this.visual.root);
+    this.precip = new Precip(this.world.scene);
+    this.visual = await loadAircraftVisual(this.spec); this.world.scene.add(this.visual.root);
     this.cockpit = new Cockpit(this.spec, this.quality); this.cockpit.camera.aspect = this.camera.aspect; this.cockpit.camera.updateProjectionMatrix();
     this.audio.voiceOn = s.voice; this.audio.setVolume(s.volume); this.audio.setMuted(s.muted);
-    // wind (deterministic per airport so replays are comparable)
-    const seed = Math.abs(Math.sin(from.lat * 12.9898 + from.lon * 78.233)) * 360;
-    this.windFrom = Math.round(seed / 10) * 10; this.windKt = s.wind === 'calm' ? 0 : Math.round(s.wind === 'light' ? 6 + (seed % 5) : 14 + (seed % 7));
-    this.turb = s.wind === 'calm' ? 0.02 : s.wind === 'light' ? 0.16 : 0.5; if (s.weather === 'overcast') this.turb += 0.1;
+    // REAL weather: METAR + model data for the departure airfield (no presets). Never blocks the sim for more than a few seconds.
+    let wx: LiveWx = OFFLINE_WX;
+    try { wx = await Promise.race([fetchLiveWeather(from.lat, from.lon, from.icao), new Promise<LiveWx>((_, rej) => setTimeout(() => rej(new Error('timeout')), 7000))]); } catch { wx = { ...OFFLINE_WX, lat: from.lat, lon: from.lon, elevM: from.elev }; }
+    this.wxPoint = [from.lat, from.lon];
+    this.applyLiveWx(wx, from.elev);
     this.world.rebuildAirports(from.lat, from.lon);
 
     // 3D Navigation Assists in World Scene
@@ -398,6 +411,35 @@ export class Game {
     this.resize();
   }
 
+  /** Push a weather report into wind, turbulence, air density, runway friction, clouds, fog and precipitation. */
+  private applyLiveWx(wx: LiveWx, groundM: number) {
+    this.liveWx = wx; this.wxFetchedAt = performance.now();
+    windProfile(wx, groundM + 10, 10, this.wxTmp);
+    this.windFrom = Math.round(this.wxTmp.dir) % 360; this.windKt = Math.round(this.wxTmp.kt);
+    // turbulence from the real gust spread (+ convective weather)
+    const spreadMs = Math.max(0, wx.gustKt - wx.windKt) * 0.514444;
+    this.turb = clamp(0.03 + spreadMs / 3.2 * 0.9 + (wx.thunder ? 0.6 : 0) + wx.rain * 0.08 + wx.windKt / 80 * 0.1, 0.02, 2.2);
+    airState.dT = isaDeviation(wx, groundM); airState.qnh = wx.qnh;
+    this.applyAirToFm();
+    this.world?.setLiveWeather(wx.cover, wx.baseAglM, groundM, wx.rain, wx.snow, wx.visM, wx.thunder);
+    this.precip?.set(wx.rain, wx.snow);
+  }
+  private applyAirToFm() {
+    const wx = this.liveWx; if (!wx || !this.fm) return;
+    this.fm.friction = wx.snow > 0.05 ? 0.35 : wx.rain > 0.05 ? Math.max(0.38, 0.62 - 0.22 * wx.rain) : wx.fog > 0.5 ? 0.85 : 1;
+    this.fm.wetness = Math.min(1, wx.rain * 1.2 + wx.snow);
+  }
+  private async refreshWx() {
+    if (this.wxBusy || !this.world) return; this.wxBusy = true;
+    const lat = this.lat(), lon = this.lon();
+    const near = (a: Airport) => haversine(lat, lon, a.lat, a.lon) < 40000 ? a.icao : undefined;
+    try {
+      const wx = await fetchLiveWeather(lat, lon, near(this.cfg.from) || near(this.cfg.to));
+      if (this.world) { this.wxPoint = [lat, lon]; this.applyLiveWx(wx, this.fm.groundH); if (this.phase === 'playing') this.toast(`Weather updated – ${wxSummary(wx)}`, 'info'); }
+    } catch { /* keep the previous report */ }
+    this.wxBusy = false;
+  }
+
   /** Re-spawn the aircraft (instant restart – terrain stays loaded). */
   resetFlight(startMode: 'runway' | 'cruise' | 'final') {
     const w = this.world!, cfg = this.cfg, spec = this.spec, from = cfg.from, to = cfg.to;
@@ -406,7 +448,7 @@ export class Game {
     const cruiseT = (dist / (spec.cruiseKt * 0.514)) / 3600;
     const need = Math.min(spec.fuelCap, (spec.fuelFlow * spec.engines * 0.62 * 3600) * cruiseT * 1.25 + spec.fuelFlow * spec.engines * 0.35 * 3600 * 0.5 + 20);
     this.fm = new FlightModel(spec, (x, z) => this.world!.terrain.heightAt(x, z), Math.max(need, spec.fuelCap * 0.25));
-    this.fm.ctl.assist = cfg.settings.assist;
+    this.fm.ctl.assist = cfg.settings.assist; this.applyAirToFm();
     this.ap = new Autopilot(); this.ap.vsLimit = spec.kind === 'jet' ? 12 : spec.kind === 'turboprop' ? 7 : 4.5;
     const dep = this.pickDepRunway(from);
     this.depTh = dep;
@@ -420,11 +462,9 @@ export class Game {
     this.rebuildFlightPlan();
     const brg = bearing(from.lat, from.lon, to.lat, to.lon);
     if (startMode === 'runway' && dep) {
-      const h = dep.hdg * D2R;
-      const spot = cfg.startSpot ? findStartSpot(from, cfg.startSpot) : null;
-      if (spot) this.fm.placeOnRunway(w.proj.x(spot.lon), w.proj.z(spot.lat), spot.hdg, from.elev);
-      else this.fm.placeOnRunway(dep.startX + Math.sin(h) * 18, dep.startZ - Math.cos(h) * 18, dep.hdg, from.elev);
-      this.fm.ctl.flapsIdx = spec.kind === 'piston' ? 1 : 0; this.fm.flapsPos = this.fm.ctl.flapsIdx / spec.flapDetents;
+      // REAL start: cold & dark on a stand / gate / apron (never on the runway); engines are started by the pilot.
+      this.placeAtStand(dep);
+      this.fm.ctl.flapsIdx = 0; this.fm.flapsPos = 0;
     } else if (startMode === 'cruise') {
       const alt = Math.max(spec.cruiseAlt * (dist < 120000 ? 0.55 : 1), from.elev + 1500, to.elev + 1500, 1500);
       const d0 = Math.min(dist * 0.12, 18000) + 3000;
@@ -442,7 +482,7 @@ export class Game {
     this.fm.wind.copy(this.windVec(0));
     this.score = 0; this.items = []; this.comfort = 100; this.landing = null; this.takeoffDone = startMode !== 'runway'; this.stoppedT = 0; this.result = null; this.endT = 0; this.crashTimer = 0;
     this.visual?.setVisible(true); this.effects?.clear(); this.paEvents = { welcome: false, landing: false }; this.flightTime = 0; this.flownKm = 0; this.trail = []; this.fuelWarned = false; this.warnPenalty = {}; this.timeScale = 1; this.todShown = false;
-    this.seatbelt = true; this.lights = { nav: true, strobe: startMode !== 'runway', land: false, beacon: true };
+    this.seatbelt = true; if (startMode !== 'runway') this.lights = { nav: true, strobe: true, land: false, beacon: true };
     if (startMode !== 'final' && !cfg.arrRwy) { this.apprKey = ''; this.apprLocked = false; }
     this.currentFlightPhase = startMode === 'runway' ? 'taxi' : startMode === 'final' ? 'final' : 'cruise';
     this.speedTrendSmoothed = 0;
@@ -450,7 +490,7 @@ export class Game {
     this.atcMessages = []; this.atcReply = null;
     const rwyInit = this.depRwy || '09';
     if (startMode === 'runway') {
-      this.addAtc('GROUND', `Aero 101, ${from.icao} Ground${this.atcFreq(from, 'GND')}. Cleared to taxi to holding point runway ${rwyInit}${this.taxiVia()}. ${this.qnh(from)}.`, true);
+      this.addAtc('ATIS', this.atisText(from, rwyInit), false);
     } else if (startMode === 'final') {
       this.addAtc('TOWER', `Aero 101, ${to.icao} Tower. Established final approach runway ${this.apprKey || '27'}, cleared to land.`, true);
     } else {
@@ -484,6 +524,16 @@ export class Game {
     this.rebuild3dNavAssists();
   }
 
+  /** Park the aircraft at the chosen / best start position for the departure runway. */
+  private placeAtStand(dep: Threshold) {
+    const w = this.world!, from = this.cfg.from;
+    const sp = chooseSpawn(from, dep, this.spec, w.proj, w.runways, this.cfg.startSpot);
+    this.spawn = sp; this.depStage = 0; this.depT = 0; this.pushback = { active: false, t: 0, done: false };
+    this.fm.placeOnRunway(sp.x, sp.z, sp.hdg, from.elev, true);
+    this.lights = { nav: false, strobe: false, land: false, beacon: false };
+    this.fm.ctl.parking = true;
+  }
+
   setDepRunway(ident: string) {
     if (!this.world) return;
     const ths = this.world.thresholds(this.cfg.from);
@@ -493,7 +543,7 @@ export class Game {
     this.depRwy = th.ident;
     if (this.cfg.settings.startMode === 'runway' && !this.takeoffDone && this.fm) {
       const h = th.hdg * D2R;
-      if (!this.cfg.startSpot) this.fm.placeOnRunway(th.startX + Math.sin(h) * 18, th.startZ - Math.cos(h) * 18, th.hdg, this.cfg.from.elev);
+      void h; if (!this.fm.anyEngineRunning && this.fm.gs < 0.5 && !this.pushback.active) { this.placeAtStand(th); this.depStage = 0; }
       this.ap.takeoffHdg = th.hdg;
       this.toast(`Departure runway ${th.ident} selected`, 'info');
     }
@@ -523,7 +573,85 @@ export class Game {
     const f = frequenciesFor(ap.id).find((x) => x.type === type);
     return f ? ` on ${f.mhz.toFixed(3).replace(/0$/, '')}` : '';
   }
-  private qnh(ap: Airport) { return ap.id.startsWith('K') ? 'Altimeter 29.92' : 'QNH 1013'; }
+  private atisText(ap: Airport, rwy: string) {
+    const wx = this.liveWx; const letter = String.fromCharCode(65 + (Math.floor(simNowMs() / 3600000) % 26));
+    if (!wx || !wx.ok) return `${ap.icao} information ${letter}. Weather unavailable (offline) – assume calm, ISA. Runway ${rwy} in use. ${this.qnh(ap)}.`;
+    const gust = wx.gustKt > wx.windKt + 4 ? `, gusting ${Math.round(wx.gustKt)}` : '';
+    const vis = wx.visM >= 10000 ? 'visibility 10 kilometres or more' : `visibility ${(wx.visM / 1000).toFixed(1)} kilometres`;
+    return `${ap.icao} information ${letter} (${wx.metar ? 'METAR ' + wx.icao : 'model data'}). Runway ${rwy} in use. Wind ${String(this.windFrom).padStart(3, '0')}° ${this.windKt} knots${gust}. ${vis}. ${wx.condition}. Temperature ${Math.round(wx.tempC)}, ${this.qnh(ap)}.`;
+  }
+  private depFreq() { return this.atcFreq(this.cfg.from, 'GND'); }
+  /** Pilot start-up sequence, one real step per press: battery → (mixture) → beacon → starter, engine by engine. */
+  startSequence() {
+    if (!this.fm || this.phase !== 'playing' || !this.fm.wow) return;
+    const fm = this.fm, c = fm.ctl, s = this.spec, a = this.audio;
+    if (!c.battery) { c.battery = true; a.click(); this.lights.nav = true; this.toast('BATTERY MASTER ON – avionics powered, NAV lights ON', 'good'); return; }
+    if (s.kind === 'piston' && c.mixture < 1) { c.mixture = 1; a.click(); this.toast('MIXTURE RICH · fuel selector BOTH · fuel pump ON', 'good'); return; }
+    if (!this.lights.beacon) { this.lights.beacon = true; a.click(); this.toast(s.kind === 'piston' ? 'BEACON ON – "CLEAR PROP!"' : 'BEACON (anti-collision) ON – ground crew clear', 'good'); return; }
+    if (fm.gs > 1.5 && !c.parking) { this.toast('Stop the aircraft before engine start', 'warn'); return; }
+    const engs = fm.eng.slice(0, s.engines);
+    const st = engs.findIndex((e) => e.state === 1);
+    if (st >= 0) { this.toast(`Engine ${st + 1} starting – wait for stabilised idle`, 'info'); return; }
+    const nxt = engs.findIndex((e) => e.state === 0);
+    if (nxt < 0) { this.toast('Engines running – after start: set take-off flaps, release the parking brake [B], taxi', 'info'); return; }
+    const err = fm.startEngine(nxt);
+    if (err) { this.toast(err, 'warn'); return; }
+    a.chirp(); this.toast(`Engine ${nxt + 1} START – ${s.kind === 'jet' ? 'N2 rising, light-off at 15%' : s.kind === 'turboprop' ? 'Np / ITT rising' : 'turning the key'}`, 'info');
+  }
+  shutdownEngines() {
+    if (!this.fm || this.phase !== 'playing') return; const fm = this.fm;
+    if (!fm.wow || fm.gs > 1.5 || !fm.ctl.parking) { this.toast('Set the parking brake and stop before shutdown', 'warn'); return; }
+    for (let i = 0; i < this.spec.engines; i++) fm.stopEngine(i);
+    this.toast('Engines SHUTDOWN', 'info');
+  }
+  startPushback() {
+    if (!this.fm || this.phase !== 'playing') return; const c = this.fm.ctl, sp = this.spawn;
+    if (!sp?.pushback) { this.toast('This stand is a drive-out position – no pushback needed, taxi forward', 'info'); return; }
+    if (this.pushback.active || this.pushback.done) { this.toast(this.pushback.active ? 'Pushback in progress' : 'Pushback already completed', 'info'); return; }
+    if (!c.battery || !this.lights.beacon) { this.toast('Battery and BEACON must be ON before pushback', 'warn'); return; }
+    this.pushback = { active: true, t: 0, done: false }; c.parking = false;
+    this.addAtc('GROUND', `Aero 101, pushback approved, tail towards the taxiway${this.depFreq()}. Start-up at your discretion.`, false);
+    this.toast('PUSHBACK – tug connected, parking brake released', 'good');
+  }
+  /** ATC departure flow driven by what the pilot actually does (clearance → start → taxi → line-up → take-off). */
+  private updateDeparture(dt: number) {
+    if (this.takeoffDone || this.cfg.settings.startMode !== 'runway' || !this.depTh || !this.fm.wow) return;
+    this.depT += dt; const fm = this.fm, th = this.depTh, c = fm.ctl, s = this.spec, rwy = this.depRwy || th.ident, w = this.world!;
+    const ev = fm.eng.slice(0, s.engines);
+    switch (this.depStage) {
+      case 0:
+        if (this.depT > 4) { this.addAtc('CLEARANCE', `Aero 101, ${this.cfg.from.icao} Delivery. Cleared to ${this.cfg.to.icao} as filed, runway ${rwy} departure, initial climb ${s.kind === 'piston' ? '3000' : '5000'} feet, squawk ${1000 + Math.floor(Math.abs(Math.sin(this.cfg.from.lat * 91.7 + this.cfg.from.lon * 13.3)) * 6999)}. ${this.qnh(this.cfg.from)}.`, true); this.depStage = 1; }
+        break;
+      case 1:
+        if (ev.some((e) => e.state > 0) || this.pushback.active) {
+          this.addAtc('GROUND', this.spawn?.pushback && !this.pushback.done ? `Aero 101, start-up approved.` : `Aero 101, ${this.cfg.from.icao} Ground. Start-up approved${this.depFreq()}.`, false); this.depStage = 2;
+        }
+        break;
+      case 2:
+        if (ev.every((e) => e.state === 2) && !c.parking && !this.pushback.active) {
+          this.addAtc('GROUND', `Aero 101, taxi to holding point runway ${rwy}${this.taxiVia()}. ${this.qnh(this.cfg.from)}.`, true); this.depStage = 3;
+          const it = this.checklistItems.find((x) => x.id === 'atc_ground'); if (it) it.done = true;
+        }
+        break;
+      case 3: {
+        const d = Math.hypot(fm.pos.x - th.startX, fm.pos.z - th.startZ);
+        if (d < 160 && fm.gs < 8) { this.addAtc('TOWER', `Aero 101, ${this.cfg.from.icao} Tower${this.atcFreq(this.cfg.from, 'TWR')}. Runway ${rwy}, line up and wait.`, true); this.depStage = 4; }
+        break;
+      }
+      case 4: {
+        const r = w.runwayAt(fm.pos.x, fm.pos.z, 0), hd = Math.abs(wrap180(fm.heading - th.hdg));
+        if (r && hd < 14 && Math.abs(r.across) < th.wid / 2 && fm.gs < 20) {
+          const gust = this.liveWx && this.liveWx.gustKt > this.liveWx.windKt + 4 ? ` gusting ${Math.round(this.liveWx.gustKt)}` : '';
+          this.addAtc('TOWER', `Aero 101, wind ${String(this.windFrom).padStart(3, '0')}° ${this.windKt} knots${gust}, runway ${rwy}, cleared for take-off.`, true); this.audio.chirp(); this.depStage = 5;
+        }
+        break;
+      }
+    }
+  }
+  private qnh(ap: Airport) {
+    const hpa = this.liveWx?.ok ? this.liveWx.qnh : 1013.25;
+    return ap.id.startsWith('K') ? `Altimeter ${(hpa / 33.8639).toFixed(2)}` : `QNH ${Math.round(hpa)}`;
+  }
   private taxiVia() { return this.taxiPlan && this.taxiPlan.via.length ? ` via ${this.taxiPlan.via.join(', ')}` : ''; }
   /** Real taxi route (surveyed taxiways) from the aircraft to the physical start of the departure runway. */
   private computeTaxiRoute(): TaxiRoute | null {
@@ -570,7 +698,7 @@ export class Game {
     this.navAssistsGroup.clear();
     this.approachGatesGroup.clear();
     this.taxiRibbonGroup.clear();
-    this.world?.dispose(); this.effects?.dispose(); this.cockpit?.dispose(); this.world = null; this.effects = null; this.cockpit = null; this.visual = null;
+    this.precip?.dispose(); this.precip = null; this.world?.dispose(); this.effects?.dispose(); this.cockpit?.dispose(); this.world = null; this.effects = null; this.cockpit = null; this.visual = null;
   }
 
   rebuild3dNavAssists() {
@@ -592,7 +720,7 @@ export class Game {
       this.taxiPlan = this.computeTaxiRoute();
       const path: [number, number][] = this.taxiPlan
         ? this.taxiPlan.pts.map(([la, lo]) => [w.proj.x(lo), w.proj.z(la)] as [number, number])
-        : [[this.fm.pos.x, this.fm.pos.z], [this.depTh.startX, this.depTh.startZ]];
+        : (this.spawn?.path ?? [[this.fm.pos.x, this.fm.pos.z], [this.depTh.startX, this.depTh.startZ]]);
       const ribbons = buildTaxiRibbon(path, this.depTh.hdg, (x, z) => this.world?.terrain.heightAt(x, z), this.cfg.from.elev);
       for (const r of ribbons) this.taxiRibbonGroup.add(r);
     }
@@ -645,17 +773,9 @@ export class Game {
     this.toast('Time is synchronised with the real world (UTC) and cannot be changed', 'info');
   }
 
-  setWeather(w: Weather) {
-    this.world?.setWeather(w);
-    this.cfg.settings.weather = w;
-    this.toast(`Weather: ${w.toUpperCase()}`, 'info');
-  }
-
-  setWindPreset(preset: 'calm' | 'light' | 'strong') {
-    this.cfg.settings.wind = preset;
-    this.windKt = preset === 'calm' ? 0 : preset === 'light' ? 8 : 22;
-    this.toast(`Wind: ${preset.toUpperCase()} (${this.windKt} kt)`, 'info');
-  }
+  /** Weather is always the real thing – the old presets only report what is live. */
+  setWeather(_w?: Weather) { this.toast(`Live weather: ${wxSummary(this.liveWx)}`, 'info'); void this.refreshWx(); }
+  setWindPreset(_preset?: 'calm' | 'light' | 'strong') { this.toast(`Live wind: ${this.windFrom}° / ${this.windKt} kt (${this.liveWx?.source ?? 'offline'})`, 'info'); }
 
   setAssistGates(v: boolean) {
     this.show3dGates = v;
@@ -870,11 +990,17 @@ export class Game {
     for (const it of this.checklistItems) {
       if (it.done) continue;
       switch (it.id) {
+        case 'battery_on':
+          if (c.battery) it.done = true;
+          break;
+        case 'engines_start':
+          if (this.fm.enginesRunning) it.done = true;
+          break;
         case 'park_brake':
-          if (!c.parking) it.done = true;
+          if (!c.parking && this.fm.enginesRunning) it.done = true;
           break;
         case 'flaps_takeoff':
-          if (c.flapsIdx >= 1) it.done = true;
+          if (c.flapsIdx === this.spec.toFlaps && this.fm.enginesRunning) it.done = true;
           break;
         case 'lights_taxi':
           if (this.lights.beacon) it.done = true;
@@ -954,9 +1080,12 @@ export class Game {
   // ---- helpers ----
   lat() { return this.world!.proj.lat(this.fm.pos.z); }
   lon() { return this.world!.proj.lon(this.fm.pos.x); }
+  /** Air-mass velocity at `alt` metres above ground: real winds aloft interpolated through the METAR / pressure-level profile. */
+  private oat() { const fm = this.fm; if (this.liveWx?.ok && this.liveWx.layers.length) return Math.round(windProfile(this.liveWx, fm.pos.y, fm.agl, this.wxTmp).tempC); return Math.round(atmosphere(fm.pos.y).T - 273.15); }
   private windVec(alt: number) {
+    if (this.liveWx && this.liveWx.ok) return windVector(this.liveWx, (this.fm ? this.fm.groundH : 0) + alt, alt, this.windTmp);
     const k = 1 + clamp(alt / 2500, 0, 1.6), toward = (this.windFrom + 180) * D2R, v = this.windKt * 0.514444 * k;
-    return new THREE.Vector3(Math.sin(toward) * v, 0, -Math.cos(toward) * v);
+    return this.windTmp.set(Math.sin(toward) * v, 0, -Math.cos(toward) * v);
   }
   private rebaseTo(lat: number, lon: number) {
     const w = this.world!, oldP = w.proj, np = new Projection(lat, lon);
@@ -987,6 +1116,10 @@ export class Game {
     this.audio.start(); this.setPhase('playing'); this.last = performance.now();
     if (this.mode === 'play') {
       this.toast(`${this.cfg.from.icao} → ${this.cfg.to.icao}  ·  ${this.spec.name}`, 'info');
+      if (this.cfg.settings.startMode === 'runway' && this.spawn) {
+        this.toast(`Parked at ${this.spawn.label} · cold & dark. Press [I] to power up: battery → ${this.spec.kind === 'piston' ? 'mixture → ' : ''}beacon → engines${this.spawn.pushback ? ' · [F5] pushback' : ''}`, 'info');
+        this.toast(`Live weather: ${wxSummary(this.liveWx)}`, 'info');
+      }
     }
   }
   setPhase(p: Phase) { if (this.phase === p) return; this.phase = p; this.hooks.onPhase(p); }
@@ -1035,7 +1168,7 @@ export class Game {
     // Native keyboard navigation belongs to the focused UI, not to the flight controls.
     if (e.target instanceof HTMLElement && e.target.closest('[data-flight-ui]') && [' ', 'Enter', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown'].includes(e.key)) return;
     const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
-    if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', ' ', 'PageUp', 'PageDown'].includes(k)) e.preventDefault();
+    if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', ' ', 'PageUp', 'PageDown', 'F1', 'F2', 'F3', 'F4', 'F5'].includes(k)) e.preventDefault();
     if (e.repeat) return;
     this.keys.add(k);
     if (this.mode === 'play' && (this.phase === 'paused' || this.phase === 'crashed' || this.phase === 'complete')) { if (k === 'r') this.restart(); else if ((k === 'p' || k === 'Escape') && this.phase === 'paused') this.resume(); return; }
@@ -1057,6 +1190,9 @@ export class Game {
       case 'c': this.cycleView(); break; case 'm': this.hooks.onCommand(e.shiftKey ? 'fullMap' : 'map'); break;
       case 'h': this.hooks.onCommand('cycleHudMode'); break;
       case 'x': c.throttle = 0; break; case 'Home': this.resetView(); break;
+      case 'i': if (e.shiftKey) this.shutdownEngines(); else this.startSequence(); break;
+      case 'F1': c.throttle = 0; break; case 'F2': c.throttle = clamp(c.throttle - 0.1, 0, 1); break; case 'F3': c.throttle = clamp(c.throttle + 0.1, 0, 1); break; case 'F4': c.throttle = 1; break;
+      case 'F5': this.startPushback(); break;
       case '\\': this.cycleWarp(); break;
       case 'r': this.restartHold = 0.0001; break;
       default:
@@ -1075,7 +1211,10 @@ export class Game {
     if (!this.fm || this.mode !== 'play' || this.phase !== 'playing') return;
     const c = this.fm.ctl, s = this.spec, a = this.audio;
     switch (id) {
-      case 'gear': c.gearDown = !c.gearDown; a.gearClunk(); this.toast(c.gearDown ? 'Gear DOWN' : 'Gear UP', 'info'); if (!c.gearDown && this.fm.wow) { c.gearDown = true; this.toast('Gear cannot retract on the ground', 'warn'); } break;
+      case 'start': this.startSequence(); break;
+      case 'stop': this.shutdownEngines(); break;
+      case 'pushback': this.startPushback(); break;
+      case 'gear': if (s.fixedGear) { this.toast('Fixed undercarriage – the Skyhawk has no retractable gear', 'info'); break; } c.gearDown = !c.gearDown; a.gearClunk(); this.toast(c.gearDown ? 'Gear DOWN' : 'Gear UP', 'info'); if (!c.gearDown && this.fm.wow) { c.gearDown = true; this.toast('Gear cannot retract on the ground', 'warn'); } break;
       case 'flaps+': if (c.flapsIdx < s.flapDetents) { c.flapsIdx++; a.click(); this.toast(`Flaps ${c.flapsIdx}`, 'info'); } break;
       case 'flaps-': if (c.flapsIdx > 0) { c.flapsIdx--; a.click(); this.toast(`Flaps ${c.flapsIdx}`, 'info'); } break;
       case 'park': c.parking = !c.parking; a.click(); this.toast(c.parking ? 'Parking brake ON' : 'Parking brake released', 'info'); break;
@@ -1447,8 +1586,10 @@ export class Game {
       roll: (k.has('d') || k.has('ArrowRight') ? 1 : 0) - (k.has('a') || k.has('ArrowLeft') ? 1 : 0),
       yaw: (k.has('e') ? 1 : 0) - (k.has('q') ? 1 : 0),
     };
-    const up = 3.4 * set.sens, down = 6.5;
+    // Gentler, finer keyboard slews (full deflection in ~0.55 s, centre in ~0.2 s) – the old 0.3 s ramp made precise flying impossible.
+    const upBase = 1.8 * set.sens, down = 5;
     for (const ax of ['pitch', 'roll', 'yaw'] as const) {
+      const up = ax === 'yaw' ? upBase * 1.5 : upBase;
       const cur = this.axes[ax], tgt = raw[ax]; const rate = Math.abs(tgt) > Math.abs(cur) || Math.sign(tgt) !== Math.sign(cur) ? up : down;
       this.axes[ax] = cur + clamp(tgt - cur, -rate * dt, rate * dt);
     }
@@ -1467,13 +1608,20 @@ export class Game {
     const expo = (x: number) => x * 0.65 + x * x * x * 0.35;
     let pitch = clamp(expo(this.axes.pitch) + this.touch.pitch * inv + this.pad.pitch + (this.yokeDrag ? this.yokeDrag.pitch : 0), -1, 1);
     let roll = clamp(expo(this.axes.roll) + this.touch.roll + this.pad.roll + (this.yokeDrag ? this.yokeDrag.roll : 0), -1, 1);
-    const yaw = clamp(this.axes.yaw + this.touch.yaw + this.pad.yaw, -1, 1);
+    let yaw = clamp(this.axes.yaw + this.touch.yaw + this.pad.yaw, -1, 1);
+    // On the ground the left/right keys are the nose-wheel tiller (A/D, arrows, stick) below ~30 kt, blending into ailerons + rudder by ~55 kt
+    if (fm.wow && !this.ap.on) {
+      const tl = clamp(1 - (fm.gs * MS_TO_KT - 30) / 25, 0, 1);
+      yaw = clamp(yaw + roll * tl, -1, 1); roll *= 1 - tl;
+    }
     // throttle keys
     const thrUp = k.has('Shift') || k.has('PageUp'), thrDn = k.has('Control') || k.has('PageDown');
     if (thrUp) c.throttle = clamp(c.throttle + 0.5 * dt, 0, 1); if (thrDn) c.throttle = clamp(c.throttle - 0.5 * dt, 0, 1);
     if (k.has('Insert')) c.trim = clamp(c.trim + 0.3 * dt, -1, 1); if (k.has('Delete')) c.trim = clamp(c.trim - 0.3 * dt, -1, 1);
     // brakes
     const brakeTgt = k.has(' ') || this.touch.brake ? 1 : 0; this.brakeAxis += clamp(brakeTgt - this.brakeAxis, -dt * 8, dt * 5); c.brake = this.brakeAxis;
+    // differential braking: hard tiller input while braking at taxi speed tightens the turn
+    c.brakeL = fm.wow && fm.gs < 12 && c.brake > 0.1 ? Math.max(0, -yaw) * 0.7 : 0; c.brakeR = fm.wow && fm.gs < 12 && c.brake > 0.1 ? Math.max(0, yaw) * 0.7 : 0;
     // FMS waypoint sequencing (geometric fly-by logic, see lnav.ts). It runs whenever the aircraft is flying - with or
     // without the autopilot - and never targets a fix behind the aircraft (the old capture-radius rule did, which sent the
     // aircraft back to the departure runway when the autopilot was engaged after a manual take-off).
@@ -1542,6 +1690,13 @@ export class Game {
     fm.gust.copy(this.gust); fm.turb = gustScale;
     fm.wind.copy(this.windVec(fm.pos.y - fm.groundH));
     // physics
+    // pushback tug: pulls the aircraft straight back along the stand lead-out line (parking brake released, ~1.6 m/s, ~40 m)
+    if (this.pushback.active && this.spawn) {
+      this.pushback.t += dt; const v = Math.min(1.6, this.pushback.t * 0.9) * (this.pushback.t > 24 ? Math.max(0, 1 - (this.pushback.t - 24) * 0.9) : 1), pd = this.spawn.pushDir * D2R;
+      fm.ctl.parking = false; fm.ctl.brake = 0; fm.ctl.throttle = 0;
+      fm.vel.x = Math.sin(pd) * v; fm.vel.z = -Math.cos(pd) * v; fm.w.y = 0;
+      if (this.pushback.t > 25) { this.pushback = { active: false, t: 0, done: true }; fm.ctl.parking = true; fm.vel.set(0, 0, 0); this.addAtc('GROUND', `Aero 101, pushback complete, tug disconnected – set parking brake. Report ready to taxi.`, false); this.toast('Pushback complete – set parking brake [B] and start engines [I]', 'good'); }
+    }
     const h = 1 / 120; this.acc += dt * this.timeScale; let steps = 0;
     while (this.acc >= h && steps < 140) { fm.step(h); this.acc -= h; steps++; if (fm.events.length) this.handleEvents(); if (fm.crashed) break; }
     if (this.acc > h * 8) this.acc = 0;
@@ -1576,6 +1731,10 @@ export class Game {
     if (Math.hypot(fm.pos.x, fm.pos.z) > 80000) { this.rebaseTo(lat, lon); this.lastLL = [lat, lon]; return; }
     w.rebuildAirports(lat, lon);
     this.magv = magVar(lat, lon);
+    this.updateDeparture(1);
+    // live weather: refresh every 10 min, or when 60 km from the last sample point
+    if (!this.wxBusy && (performance.now() - this.wxFetchedAt > 600000 || haversine(lat, lon, this.wxPoint[0], this.wxPoint[1]) > 60000)) void this.refreshWx();
+    if (this.liveWx) { windProfile(this.liveWx, fm.groundH + 10, 10, this.wxTmp); this.windFrom = Math.round(this.wxTmp.dir) % 360; this.windKt = Math.round(this.wxTmp.kt); }
     // auto approach-runway selection while far away
     if (!this.apprLocked) {
       const th = this.bestApproachFor(lat, lon); if (th && th.ident !== this.apprKey) this.apprKey = th.ident;
@@ -1812,6 +1971,7 @@ export class Game {
     fx.update(dt);
     // camera
     this.updateCamera(dt);
+    if (this.precip) { this.relAir.copy(fm.wind).add(fm.gust).sub(fm.vel); this.precip.update(this.phase === 'paused' ? 0 : dt, this.camera.position, this.relAir, w.wx.baseMsl, clamp((w.sunElevation + 8) / 20, 0.12, 1)); }
     // sim → cockpit instruments
     const interior = this.isInterior() && this.mode === 'play';
     if (interior && this.cockpit) this.cockpit.update(dt, this.time, this.panelData(), { pitch: fm.ctl.pitch, roll: fm.ctl.roll, yaw: fm.ctl.yaw, throttle: fm.ctl.throttle, flapsIdx: fm.ctl.flapsIdx, gearDown: fm.ctl.gearDown, speedbrake: fm.ctl.speedbrake }, { lights: this.lights, seatbelt: this.seatbelt, parking: fm.ctl.parking, reverse: fm.ctl.reverse, apOn: this.ap.on, apNav: this.ap.nav, apAppr: this.ap.appr, apHdg: this.magHdg(this.ap.hdg), apAlt: this.ap.altFt, apSpd: this.ap.spd, mood: this.comfort / 100, shake: clamp(this.turb * 1.6 + this.shakeImpulse, 0, 1.6) }, true);
@@ -1905,8 +2065,8 @@ export class Game {
       activeWp,
       flightPhase: this.currentFlightPhase,
       vSpeeds: { v1: Math.max(20, Math.round(s.vr - 5)), vr: s.vr, v2: Math.round(s.vr + 10), vapp: s.vapp },
-      qnhInHg: 29.92,
-      oatC: Math.round(15 - (fm.pos.y / 1000) * 6.5),
+      qnhInHg: +((this.liveWx?.ok ? this.liveWx.qnh : 1013.25) / 33.8639).toFixed(2),
+      oatC: this.oat(),
     };
   }
 
@@ -1951,15 +2111,15 @@ export class Game {
 
     switch (next) {
       case 'taxi':
-        if (this.landing) {
+        if (this.landing || this.depStage < 5) {
+          if (!this.landing) break;
           this.addAtc('GROUND', `Aero 101, welcome to ${toIcao}. Taxi to the apron, vacate the runway and contact Ground${this.atcFreq(this.cfg.to, 'GND')}.`, true);
         } else {
           this.addAtc('GROUND', `Aero 101, ${fromIcao} Ground. Taxi to holding point runway ${depRwy}${this.taxiVia()}.`, true);
         }
         break;
       case 'takeoff':
-        this.addAtc('TOWER', `Aero 101, ${fromIcao} Tower${this.atcFreq(this.cfg.from, 'TWR')}. Runway ${depRwy}, wind ${wind}, cleared for takeoff.`, true);
-        this.audio.chirp();
+        if (this.depStage < 5) { this.addAtc('TOWER', `Aero 101, ${fromIcao} Tower${this.atcFreq(this.cfg.from, 'TWR')}. Runway ${depRwy}, wind ${wind}, cleared for takeoff.`, true); this.audio.chirp(); this.depStage = 5; }
         break;
       case 'climb':
         this.addAtc('DEPARTURE', `Aero 101, airborne, radar contact. Climb and maintain ${Math.round(this.spec.cruiseAlt / 0.3048)} ft, contact Departure${this.atcFreq(this.cfg.from, 'DEP') || this.atcFreq(this.cfg.from, 'APP')}.`, false);
@@ -2147,8 +2307,9 @@ export class Game {
       relWindDir: relWind,
       crosswindKt,
       headwindKt,
-      qnhInHg: 29.92,
-      oatC: Math.round(atmosphere(fm.pos.y).T - 273.15),
+      qnhInHg: +((this.liveWx?.ok ? this.liveWx.qnh : 1013.25) / 33.8639).toFixed(2),
+      oatC: this.oat(),
+      wxText: wxSummary(this.liveWx), wxMetar: this.liveWx?.metar || '', wxSource: this.liveWx?.source || 'offline', wxCondition: this.liveWx?.condition || '', wxRain: this.liveWx?.rain ?? 0, wxQnhHpa: this.liveWx?.qnh ?? 1013.25, wxVisKm: (this.liveWx?.visM ?? 30000) / 1000, wxObsAge: this.liveWx?.obsAgeMin ?? 0,
       runwayRemM,
       pitchTarget,
       trim: fm.ctl.trim,

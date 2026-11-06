@@ -606,7 +606,7 @@ export function ChecklistWindow({
    7. WEATHER & TIME OF DAY WINDOW
    ========================================================================= */
 export function WeatherWindow({
-  game,
+  game: _game,
   hud,
   onClose,
 }: {
@@ -614,13 +614,11 @@ export function WeatherWindow({
   hud: HudState;
   onClose: () => void;
 }) {
-  const metarText = `${hud.destId} 050012Z ${String(Math.round(hud.wind.dir)).padStart(3, '0')}${String(
-    Math.round(hud.wind.kt)
-  ).padStart(2, '0')}KT 10SM BKN045 ${hud.oatC}/10 A2992 RMK AO2`;
+  const metarText = hud.wxMetar || hud.wxText;
 
   return (
     <MsfsFloatingWindow
-      title="Weather & Time of Day"
+      title="Live Weather & Time of Day"
       icon="cloud"
       onClose={onClose}
       initialPos={{ x: 140, y: 70 }}
@@ -639,72 +637,29 @@ export function WeatherWindow({
           <p className="text-[9px] text-slate-500 mt-1">Sun position, sky and lighting follow the real UTC time at the aircraft's location.</p>
         </div>
 
-        {/* Weather Conditions Presets */}
+        {/* LIVE weather: real METAR + model data, no presets */}
         <div>
           <span className="text-[9px] text-slate-400 uppercase tracking-widest font-bold block mb-1.5">
-            Atmospheric Conditions
+            Real-world conditions · {hud.wxSource}
           </span>
-          <div className="grid grid-cols-3 gap-1.5">
-            <button
-              onClick={() => game.setWeather('clear')}
-              className="p-2 rounded-xl bg-white/5 hover:bg-white/15 border border-white/10 text-center font-bold text-xs transition flex items-center justify-center gap-1"
-            >
-              <FlightIcon name="sun" size={12} className="text-amber-300" />
-              <span>Clear</span>
-            </button>
-            <button
-              onClick={() => game.setWeather('scattered')}
-              className="p-2 rounded-xl bg-white/5 hover:bg-white/15 border border-white/10 text-center font-bold text-xs transition flex items-center justify-center gap-1"
-            >
-              <FlightIcon name="cloud" size={12} className="text-sky-300" />
-              <span>Scattered</span>
-            </button>
-            <button
-              onClick={() => game.setWeather('overcast')}
-              className="p-2 rounded-xl bg-white/5 hover:bg-white/15 border border-white/10 text-center font-bold text-xs transition flex items-center justify-center gap-1"
-            >
-              <FlightIcon name="cloud" size={12} className="text-slate-300" />
-              <span>Overcast</span>
-            </button>
+          <div className="grid grid-cols-2 gap-1.5 text-xs">
+            <div className="p-2 rounded-xl bg-white/5 border border-white/10"><div className="text-[9px] text-slate-400 uppercase">Sky / weather</div><div className="font-bold text-sky-200">{hud.wxCondition || '—'}</div></div>
+            <div className="p-2 rounded-xl bg-white/5 border border-white/10"><div className="text-[9px] text-slate-400 uppercase">Precipitation</div><div className="font-bold text-sky-200">{hud.wxRain > 0.02 ? `${Math.round(hud.wxRain * 100)}% intensity` : 'None'}</div></div>
+            <div className="p-2 rounded-xl bg-white/5 border border-white/10"><div className="text-[9px] text-slate-400 uppercase">Wind at aircraft</div><div className="font-bold text-sky-200">{String(Math.round(hud.wind.dir)).padStart(3, '0')}° / {Math.round(hud.wind.kt)} kt</div></div>
+            <div className="p-2 rounded-xl bg-white/5 border border-white/10"><div className="text-[9px] text-slate-400 uppercase">Visibility</div><div className="font-bold text-sky-200">{hud.wxVisKm >= 10 ? '10 km+' : `${hud.wxVisKm.toFixed(1)} km`}</div></div>
           </div>
-        </div>
-
-        {/* Wind Preset */}
-        <div>
-          <span className="text-[9px] text-slate-400 uppercase tracking-widest font-bold block mb-1.5">
-            Wind Intensity
-          </span>
-          <div className="grid grid-cols-3 gap-1.5">
-            <button
-              onClick={() => game.setWindPreset('calm')}
-              className="p-2 rounded-xl bg-white/5 hover:bg-white/15 border border-white/10 text-center font-bold text-xs transition"
-            >
-              Calm (0 kt)
-            </button>
-            <button
-              onClick={() => game.setWindPreset('light')}
-              className="p-2 rounded-xl bg-white/5 hover:bg-white/15 border border-white/10 text-center font-bold text-xs transition"
-            >
-              Breeze (8 kt)
-            </button>
-            <button
-              onClick={() => game.setWindPreset('strong')}
-              className="p-2 rounded-xl bg-white/5 hover:bg-white/15 border border-white/10 text-center font-bold text-xs transition"
-            >
-              Cross (22 kt)
-            </button>
-          </div>
+          <p className="text-[9px] text-slate-500 mt-1">Wind, rain, cloud, visibility, temperature and pressure are fetched for your position and refreshed every 10 minutes (and when you fly 60 km). They drive the physics: density altitude, headwind, gusts and runway friction.</p>
         </div>
 
         {/* Decoded METAR Report Box */}
         <div className="p-2.5 rounded-xl bg-slate-900 border border-white/15 font-mono">
           <div className="text-[9px] text-slate-400 uppercase tracking-wider mb-1 flex items-center justify-between">
-            <span>OFFICIAL METAR WEATHER</span>
-            <span className="text-emerald-400">SPECI</span>
+            <span>{hud.wxMetar ? 'LIVE METAR' : 'LIVE MODEL WEATHER'}</span>
+            <span className="text-emerald-400">{hud.wxMetar ? `${hud.wxObsAge} min old` : 'MODEL'}</span>
           </div>
-          <div className="text-xs text-amber-300 font-bold leading-relaxed">{metarText}</div>
+          <div className="text-xs text-amber-300 font-bold leading-relaxed break-words">{metarText}</div>
           <div className="mt-2 text-[10px] text-slate-400 border-t border-white/10 pt-1.5 flex justify-between">
-            <span>QNH: {hud.qnhInHg} inHg</span>
+            <span>QNH: {hud.qnhInHg} inHg / {Math.round(hud.wxQnhHpa)} hPa</span>
             <span>OAT: {hud.oatC}°C</span>
             <span>Headwind: {hud.headwindKt} kt</span>
           </div>

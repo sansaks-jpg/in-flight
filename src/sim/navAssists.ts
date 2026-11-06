@@ -4,9 +4,11 @@ import type { Threshold, World } from './world';
 import type { ChecklistItem, WorldScreenMarker } from './game';
 
 export const DEFAULT_CHECKLIST_ITEMS: ChecklistItem[] = [
-  { id: 'park_brake', label: 'PARKING BRAKE', detail: 'Release before taxi roll (B)', done: false, phase: 'taxi' },
-  { id: 'flaps_takeoff', label: 'FLAPS POSITION 1', detail: 'Set takeoff flap detent (F)', done: false, phase: 'taxi' },
-  { id: 'lights_taxi', label: 'LIGHTS BEACON & NAV', detail: 'Verify anti-collision beacon ON', done: false, phase: 'taxi' },
+  { id: 'battery_on', label: 'BATTERY MASTER ON', detail: 'Power up the aircraft (I)', done: false, phase: 'taxi' },
+  { id: 'lights_taxi', label: 'BEACON & NAV LIGHTS', detail: 'Anti-collision beacon ON before start (I)', done: false, phase: 'taxi' },
+  { id: 'engines_start', label: 'ENGINE START', detail: 'Start each engine, wait for idle (I)', done: false, phase: 'taxi' },
+  { id: 'flaps_takeoff', label: 'TAKE-OFF FLAPS', detail: 'Set the take-off flap detent (F)', done: false, phase: 'taxi' },
+  { id: 'park_brake', label: 'PARKING BRAKE', detail: 'Release after start, before taxi (B)', done: false, phase: 'taxi' },
   { id: 'atc_ground', label: 'TAXI CLEARANCE', detail: 'Acknowledge Ground taxi clearance', done: false, phase: 'taxi' },
 
   { id: 'throttle_takeoff', label: 'TAKEOFF THRUST', detail: 'Advance throttle to 100% N1 (F4)', done: false, phase: 'takeoff' },

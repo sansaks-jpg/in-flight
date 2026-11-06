@@ -163,7 +163,7 @@ function cloudTexture() {
 
 function runwayTexture(rw: Runway, len: number, wid: number) {
   if (!isPaved(rw.surface)) return unpavedRunwayTexture(rw, len, wid);
-  const W = 256, Hh = Math.min(4096, Math.max(1024, Math.round(len / 2)));
+  const W = 512, Hh = Math.min(6144, Math.max(1024, Math.round(len * 1.6)));
   const c = document.createElement('canvas'); c.width = W; c.height = Hh;
   const g = c.getContext('2d')!;
   g.fillStyle = '#34363a'; g.fillRect(0, 0, W, Hh);
@@ -173,20 +173,45 @@ function runwayTexture(rw: Runway, len: number, wid: number) {
   }
   const sx = W / wid, sy = Hh / len;
   const rect = (x: number, y: number, w: number, h: number) => g.fillRect(x * sx, Hh - (y + h) * sy, w * sx, h * sy);
+  // ---- ICAO Annex 14 (Ch. 5.2) runway markings, true metres ----
   g.fillStyle = '#f0f0ec';
-  rect(1.2, 0, 0.5, len); rect(wid - 1.7, 0, 0.5, len);
-  const cl = (wid / 2) - 0.45;
-  for (let y = 60; y < len - 60; y += 50) rect(cl, y, 0.9, 30);
-  const nb = Math.max(3, Math.min(8, Math.floor(wid / 8)));
+  // runway side stripes: 0.9 m wide (0.45 m on narrow runways), 1.5 m inside the edge
+  const edgeW = wid >= 30 ? 0.9 : 0.45;
+  rect(1.5, 0, edgeW, len); rect(wid - 1.5 - edgeW, 0, edgeW, len);
+  // centre line: 30 m stripes / 20 m gaps (ICAO: stripe+gap = 50 m), width 0.9 m (0.45 m on non-precision)
+  const clW = len >= 1500 ? 0.9 : 0.45;
+  const sparse = (len - 2 * 12) % 50; void sparse;
+  for (let y = 12; y + 30 <= len - 12; y += 50) rect(wid / 2 - clW / 2, y, clW, 30);
+  // threshold stripes: number by runway width (18 m: 4, 23 m: 6, 30 m: 8, 45 m: 12, 60 m: 16), 30 m long, 1.8 m wide
+  const nTot = wid >= 60 ? 16 : wid >= 45 ? 12 : wid >= 30 ? 8 : wid >= 23 ? 6 : 4;
+  const half = nTot / 2, stripeW = 1.8, gapW = wid >= 45 ? 1.8 : 1.5;
+  const centreGap = nTot >= 12 ? 3.6 : 1.8; // gap at the centre line for the 2 groups
   for (const end of [0, 1]) {
     const at = (d: number, h: number) => (end ? len - d - h : d);
-    for (let i = 0; i < nb * 2; i++) {
-      const xx = 2.4 + (i * (wid - 4.8)) / (nb * 2 - 0.4);
-      if (Math.abs(xx - wid / 2) < 1.8) continue;
-      rect(Math.min(xx, wid - 4), at(7, 30), 1.2, 30);
+    for (let grp = 0; grp < 2; grp++) {
+      for (let i = 0; i < half; i++) {
+        const off = centreGap / 2 + i * (stripeW + gapW);
+        const xx = grp ? wid / 2 + off : wid / 2 - off - stripeW;
+        rect(xx, at(6, 30), stripeW, 30);
+      }
     }
-    if (len > 1200) { rect(wid / 2 - 9 - 3, at(300, 45), 3, 45); rect(wid / 2 + 9, at(300, 45), 3, 45); }
-    if (len > 2000) for (const d of [450, 600, 750]) { rect(wid / 2 - 8, at(d, 22), 2, 22); rect(wid / 2 + 6, at(d, 22), 2, 22); }
+    // aiming-point marking (distance from threshold / stripe length & width / inner spacing depend on runway length)
+    if (len >= 800) {
+      const ap = len >= 2400 ? 400 : len >= 1200 ? 300 : 250;
+      const sl = len >= 2400 ? 60 : len >= 1200 ? 45 : 30, sw = len >= 2400 ? 10 : len >= 1200 ? 8 : 6, inner = len >= 1200 ? 18 : 9;
+      rect(wid / 2 - inner / 2 - sw, at(ap, sl), sw, sl); rect(wid / 2 + inner / 2, at(ap, sl), sw, sl);
+      // touchdown-zone stripes (22.5 m long, 1.8 m wide): 3 / 2 / 2 / 1 / 1 per side at 150 m intervals
+      if (len >= 1500) {
+        const tdz: [number, number][] = [[150, 3], [300, 2], [450, 2], [600, 1], [750, 1]];
+        for (const [d, cnt] of tdz) {
+          if (Math.abs(d - ap) < 70 || d + 30 > len / 2) continue;
+          for (let i = 0; i < cnt; i++) {
+            const off = 9 + i * (1.8 + 1.5);
+            rect(wid / 2 - off - 1.8, at(d, 22.5), 1.8, 22.5); rect(wid / 2 + off, at(d, 22.5), 1.8, 22.5);
+          }
+        }
+      }
+    }
     const label = end ? rw.he : rw.le;
     g.save();
     g.translate(W / 2, end ? Hh - (len - 60 - 8) * sy : Hh - 70 * sy);
@@ -406,6 +431,10 @@ export class World {
   sunAzimuth = 180;
   nightAmount = 0;
   private cloudColor = new THREE.Color(0xffffff);
+  /** Live (real-world) weather state driving clouds, light, fog and rain. */
+  wx = { cover: [0.1, 0, 0.1] as [number, number, number], baseMsl: 1800, rain: 0, snow: 0, visM: 30000, thunder: false };
+  private flash = 0; private nextFlash = 5;
+  private _grey = new THREE.Color();
   private lastSunClockMs = 0;
   private sunFog = new THREE.FogExp2(0xffffff, 0.00003);
   private papiOn = new THREE.MeshBasicMaterial({ color: 0xffffff });
@@ -522,6 +551,16 @@ export class World {
     this.cloudCover = w === 'clear' ? 0.12 : w === 'scattered' ? 0.42 : 0.8;
   }
 
+  /** Overall sky obscuration 0..1 (drives overcast lighting and the grey sky). */
+  overcast() { return Math.min(1, Math.max(this.wx.cover[0], this.wx.cover[1] * 0.85, this.wx.cover[2] * 0.4)); }
+
+  /** Apply real weather: cloud layers (low / mid / high), ceiling, precipitation, visibility. */
+  setLiveWeather(cover: [number, number, number], baseAglM: number | null, groundM: number, rain: number, snow: number, visM: number, thunder: boolean) {
+    this.wx.cover = cover; this.wx.baseMsl = groundM + (baseAglM ?? 1800); this.wx.rain = rain; this.wx.snow = snow; this.wx.visM = visM; this.wx.thunder = thunder;
+    this.cloudCover = Math.max(cover[0], cover[1], cover[2]);
+    this.updateSunFromClock(true);
+  }
+
   /**
    * Recomputes the sun from the real-world UTC clock at the aircraft's current position
    * (or the departure airfield before the flight starts). Cheap; throttled by the caller.
@@ -538,6 +577,13 @@ export class World {
   setSun(elDeg: number, azDeg: number) {
     this.sunElevation = elDeg; this.sunAzimuth = azDeg;
     const c = blendSky(elDeg);
+    const ov = this.overcast(), wet = Math.min(1, this.wx.rain + this.wx.snow);
+    if (ov > 0.02) {
+      // overcast / rainy sky: desaturate toward a grey whose brightness follows the real light level
+      const lum = c.hor.r * 0.3 + c.hor.g * 0.59 + c.hor.b * 0.11, k = Math.min(1, ov * (0.55 + 0.3 * wet));
+      this._grey.setRGB(lum * (0.78 - 0.2 * wet), lum * (0.8 - 0.2 * wet), lum * (0.84 - 0.18 * wet));
+      c.zen.lerp(this._grey, Math.min(1, k + 0.1)); c.hor.lerp(this._grey, k); c.haze.lerp(this._grey, k);
+    }
     const az = azDeg * D2R;
     const trueEl = elDeg * D2R;
     const skyDir = this.skyMat.uniforms.sunDir.value as THREE.Vector3;
@@ -551,12 +597,15 @@ export class World {
     this.skyMat.uniforms.sunCol.value.copy(c.sun);
     this.skyMat.uniforms.stars.value = Math.max(0, Math.min(1, (-elDeg - 3) / 10));
     this.sunLight.color.copy(c.sun);
-    this.sunLight.intensity = c.dir;
+    this.sunLight.intensity = c.dir * (1 - 0.72 * Math.pow(ov, 1.2));
     this.hemi.color.copy(c.zen).lerp(this.cloudColor.set(1, 1, 1), 0.5);
     this.hemi.groundColor.copy(c.ground);
-    this.hemi.intensity = c.hemi;
+    this.hemi.intensity = c.hemi * (1 + 0.18 * ov) * (1 - 0.25 * wet);
     // Exponential fog (see rationale in the original two-state version): same colour as the sky horizon haze.
-    this.sunFog.color.copy(c.haze); this.sunFog.density = c.fog;
+    this.sunFog.color.copy(c.haze);
+    // real visibility (Koschmieder: extinction = 3.912 / V); unlimited visibility leaves the scene's own aerial perspective alone
+    const visD = this.wx.visM < 20000 ? 3.912 / Math.max(150, this.wx.visM) : 0;
+    this.sunFog.density = Math.max(c.fog, visD * 0.9);
     this.scene.fog = this.sunFog;
     this.terrain.setEnvironment(c.haze, this.sunDir);
     this.detail.setEnvironment(c.haze, this.sunDir);
@@ -565,6 +614,7 @@ export class World {
     // Cloud tint: white by day, warm at sunset, dark grey-blue at night.
     const dayL = Math.max(0, Math.min(1, (elDeg + 6) / 14));
     this.cloudColor.setRGB(0.16, 0.19, 0.28).lerp(c.hor.clone().lerp(c.sun, 0.25).lerp(new THREE.Color(1, 1, 1), Math.min(1, Math.max(0, (elDeg - 2) / 20))), dayL);
+    this.cloudColor.multiplyScalar(1 - 0.38 * Math.min(1, ov * (0.4 + wet)));
   }
 
   setStyle(id: string) {
@@ -1000,35 +1050,41 @@ export class World {
   }
 
   private updateClouds(cam: THREE.Vector3, time: number) {
+    // three real layers: low (base = METAR ceiling / dew-point estimate), mid (~4.5 km), high cirrus (~9 km)
     const cell = 6500;
     const target = this.cloudTarget;
     const R = Math.ceil(Math.sqrt(target) / 2) + 1;
     const cx = Math.floor(cam.x / cell), cz = Math.floor(cam.z / cell);
     let k = 0;
-
+    const cov = this.wx.cover, lowBase = this.wx.baseMsl;
     for (let i = -R; i <= R && k < target; i++) {
       for (let j = -R; j <= R && k < target; j++) {
         const gx = cx + i, gz = cz + j;
-        if (hashN(gx, gz, 1) > this.cloudCover) continue;
-
-        const sp = this.clouds[k++];
-        const layer = hashN(gx, gz, 2) < 0.7 ? 0 : 1;
-        const base = layer ? 5800 + hashN(gx, gz, 3) * 1400 : 1600 + hashN(gx, gz, 4) * 1600;
-        const sz = (layer ? 7200 : 3800) * (0.7 + hashN(gx, gz, 5) * 0.8);
-
-        sp.position.set((gx + hashN(gx, gz, 6)) * cell + time * 3, base, (gz + hashN(gx, gz, 7)) * cell);
-        sp.scale.set(sz, sz * 0.46, 1);
-
-        const d = Math.hypot(sp.position.x - cam.x, sp.position.y - cam.y, sp.position.z - cam.z);
-        const m = sp.material as THREE.SpriteMaterial;
-        m.opacity = clamp((d - 250) / 700, 0, 1) * 0.92;
-        sp.visible = m.opacity > 0.02;
-        m.color.copy(this.cloudColor);
+        for (let layer = 0; layer < 3 && k < target; layer++) {
+          const c = cov[layer];
+          if (c <= 0.04 || hashN(gx, gz, 1 + layer * 11) > Math.min(1, c * 1.05)) continue;
+          const sp = this.clouds[k++];
+          const base = layer === 0 ? lowBase + hashN(gx, gz, 4) * 220 : layer === 1 ? 4300 + hashN(gx, gz, 3) * 900 : 8800 + hashN(gx, gz, 8) * 900;
+          // fuller layers merge into a continuous deck: bigger, flatter sprites
+          const merge = 0.75 + c * 0.9;
+          const sz = (layer === 0 ? 3800 : layer === 1 ? 5600 : 7600) * (0.7 + hashN(gx, gz, 5) * 0.8) * merge;
+          sp.position.set((gx + hashN(gx, gz, 6)) * cell + time * 3, base, (gz + hashN(gx, gz, 7)) * cell);
+          sp.scale.set(sz, sz * (layer === 0 && c > 0.7 ? 0.3 : 0.46), 1);
+          const d = Math.hypot(sp.position.x - cam.x, sp.position.y - cam.y, sp.position.z - cam.z);
+          const m = sp.material as THREE.SpriteMaterial;
+          m.opacity = clamp((d - 250) / 700, 0, 1) * (layer === 2 ? 0.55 : 0.92);
+          sp.visible = m.opacity > 0.02;
+          m.color.copy(this.cloudColor);
+        }
       }
     }
-
     for (; k < target; k++) this.clouds[k].visible = false;
     for (let i = target; i < this.clouds.length; i++) this.clouds[i].visible = false;
+    // thunderstorm: occasional lightning flash lights the whole scene
+    if (this.wx.thunder) {
+      this.nextFlash -= 1 / 60; if (this.nextFlash <= 0) { this.flash = 0.35; this.nextFlash = 3 + Math.random() * 9; }
+    }
+    if (this.flash > 0) { this.flash -= 1 / 60; this.hemi.intensity += this.flash * 3.5 * (Math.random() > 0.4 ? 1 : 0.3); if (this.flash <= 0) this.updateSunFromClock(true); }
   }
 
   dispose() {
