@@ -10,7 +10,7 @@
 
 ### 🌍 Worldwide Terrain & Dynamic Tile Streaming
 - **Streamed Real-World Geospatial Data**: Procedural streaming of terrain heightmaps, satellite/vector land cover, roads, and coastlines using OpenStreetMap and Mapbox Vector Tiles (MVT).
-- **6,600+ Global Airports**: Database of real-world airports (`src/data/airports.ts`) with accurate runway orientations, dimensions, ICAO identifiers, and field elevations.
+- **8,400+ Global Airports**: Database of real-world airports (`src/data/airports.ts`) with accurate runway orientations, dimensions, ICAO identifiers, and field elevations.
 - **Procedural Scenery & Urban Environments**: High-density 3D building generation, road networks, runway lighting, PAPI lights, and instanced 3D tree vegetation.
 
 ### 🛩️ Rigid-Body Aerodynamic Physics
@@ -54,6 +54,17 @@ Panel geometry stays compact at every text-size setting. On short screens, navig
 The chart reads aircraft position, heading and ground track directly from the flight model on animation frames, while caching geographic artwork instead of rebuilding it every frame. Full-screen mode skips hidden 3D rendering but continues physics, terrain streaming and audio. Map/ILS runway geometry uses the airport database; invented taxiway/apron diagrams are not shown. Wind readouts use the aircraft's actual local wind/gust vector, and the flight director uses the existing autopilot command rather than a fixed climb angle. Missing external imagery does not disable the live aircraft, route, airports or georeferenced grid; failed providers use bounded retry backoff.
 
 Speech is serialized and deduplicated, stale callouts are dropped, and pause/mute/voice-off/restart clear pending playback. Genuine active safety warnings may still repeat after their cooldown; resolved warnings do not continue playing from a backlog. Flight-phase hysteresis prevents repeated clearance chimes during go-around and speed-threshold jitter. The aerodynamic flight model is unchanged.
+
+### 🕒 1:1 real-time simulation
+
+- **One clock**: the simulator runs on the real-world UTC clock (`src/sim/clock.ts`). Sun position (NOAA / Meeus solar algorithm, cross-checked against the sunrise-sunset.org API in `scripts/clock-test.ts`), sky colour, stars, night lighting and city lights follow the real time at the aircraft's actual position, continuously through dawn, day, dusk and night. The planner shows the live UTC time and the real light condition at the departure airfield; the flight HUD shows UTC (`Z`) and the ETA in UTC.
+- **No time compression / manual time-of-day**: simulation rate is locked at 1× so in-game time can never diverge from real time (the old `Day / Sunset` presets and the 2×–8× warp were removed).
+
+### 🛬 Runway data & selected-runway focus
+
+- **Runway marker follows the chosen runway**: zoomed out, the DEP / ARR marker sits on the airport; as the map zooms in it slides onto the *selected runway threshold* (physical end for take-off, displaced threshold for landing), the runway is highlighted with a direction chevron, and choosing a runway re-centres/zooms the map on that runway rather than on the airport centre.
+- **Runway database rebuilt** (`scripts/build-world-runways.mjs`, sources: OurAirports + OpenStreetMap): all runways are kept (the old build capped at 3 per airport – ORD now has 8, DEN 6), airports were widened to every large/medium airport and scheduled/IATA small airport, wrong threshold coordinates are rejected by heading/position sanity checks, and headings for unmapped runways use the World Magnetic Model to convert magnetic runway numbers to true bearings.
+- **Live survey upgrade** (`src/data/runwayRefine.ts`): any airport whose runways are still approximate is upgraded in place from OpenStreetMap (Overpass) when selected or before a flight loads, cached in `localStorage`, silently falling back to bundled data when offline.
 
 ### 🔊 Procedural Web Audio & GPWS
 - Real-time synthesized engine sounds: piston rumble, turboprop whine, and twin-spool turbofan jet roar.
@@ -103,7 +114,7 @@ Speech is serialized and deduplicated, stale callouts are dropped, and pause/mut
 | **Speed Target Adjust** | `-` / `=` | Target airspeed adjust |
 | **Navigation Map** | `M` | Full-screen map with other UI hidden; `M` or `Esc` returns to flight |
 | **HUD Mode** | `H` | Cycle Standard / Minimal / Assisted / Cockpit HUD layouts |
-| **Time Warp** | `\` | Cycle 1x, 2x, 4x simulation rate |
+| **Time Warp** | `\` | Disabled – simulation is locked to 1:1 real time |
 | **ATC Response** | `1`, `2`, `3`, `4` | Respond while the Radio panel is open; otherwise throttle presets |
 | **Pause / Resume** | `Esc` or `P` | Pause simulation |
 | **Restart Flight** | `R` (Hold) | Reset flight to runway |
@@ -200,7 +211,7 @@ in-flight/
 │   └── phys-test.ts        # Physics verification routines
 ├── src/
 │   ├── assets/             # 3D models and textures (GLB, shaders)
-│   ├── data/               # 6,600+ Airport database and runway threshold specifications
+│   ├── data/               # 8,400+ Airport database and runway threshold specifications
 │   ├── sim/                # Core simulation engine
 │   │   ├── aircraftModel.ts# 3D aircraft visual representation & control surface articulation
 │   │   ├── audio.ts        # Procedural Web Audio engine & GPWS synthesizer

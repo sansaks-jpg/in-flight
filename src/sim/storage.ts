@@ -3,15 +3,16 @@ export type QualityPreset = 'ultra' | 'high' | 'medium' | 'low';
 export type HudMode = 'minimal' | 'standard' | 'assisted' | 'cockpit';
 
 export interface Settings {
-  volume: number; muted: boolean; voice: boolean; assist: boolean; invertPitch: boolean; quality: QualityPreset | 'auto'; mapStyle: string; terrainStyle: string; tod: 'day' | 'sunset'; weather: 'clear' | 'scattered' | 'overcast'; wind: 'calm' | 'light' | 'strong'; startMode: 'runway' | 'cruise' | 'final'; name: string; sens: number; shake: boolean; hud: boolean; units: 'aviation' | 'metric';
+  volume: number; muted: boolean; voice: boolean; assist: boolean; invertPitch: boolean; quality: QualityPreset | 'auto'; mapStyle: string; terrainStyle: string; tod: 'live'; weather: 'clear' | 'scattered' | 'overcast'; wind: 'calm' | 'light' | 'strong'; startMode: 'runway' | 'cruise' | 'final'; name: string; sens: number; shake: boolean; hud: boolean; units: 'aviation' | 'metric';
   hudMode: HudMode; uiScale: number; colorblind: boolean;
 }
-export const DEFAULT_SETTINGS: Settings = { volume: 0.8, muted: false, voice: true, assist: true, invertPitch: false, quality: 'auto', mapStyle: 'hybrid', terrainStyle: 'hybrid', tod: 'day', weather: 'scattered', wind: 'light', startMode: 'runway', name: 'Pilot', sens: 1, shake: true, hud: true, units: 'aviation', hudMode: 'standard', uiScale: 1.0, colorblind: false };
+export const DEFAULT_SETTINGS: Settings = { volume: 0.8, muted: false, voice: true, assist: true, invertPitch: false, quality: 'auto', mapStyle: 'hybrid', terrainStyle: 'hybrid', tod: 'live', weather: 'scattered', wind: 'light', startMode: 'runway', name: 'Pilot', sens: 1, shake: true, hud: true, units: 'aviation', hudMode: 'standard', uiScale: 1.0, colorblind: false };
 const SK = 'skyline.settings.v3', HK = 'skyline.scores.v2', LK = 'skyline.lastroute.v2';
 export function loadSettings(): Settings {
   try {
     const raw = JSON.parse(localStorage.getItem(SK) || '{}');
     const s = { ...DEFAULT_SETTINGS, ...raw };
+    s.tod = 'live'; // time of day is always the real UTC clock; older saves stored 'day' / 'sunset'
     // the old default was the plain street map; move returning pilots to the satellite hybrid
     if (!raw.mapStyle) s.mapStyle = DEFAULT_SETTINGS.mapStyle;
     if (!raw.terrainStyle) s.terrainStyle = DEFAULT_SETTINGS.terrainStyle;

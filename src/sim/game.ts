@@ -16,6 +16,7 @@ import { Settings, addScore, QualityPreset } from './storage';
 import { QUALITY } from './quality';
 import { DEFAULT_CHECKLIST_ITEMS, buildApproachGates, buildTaxiRibbon, computeWorldScreenMarkers } from './navAssists';
 import { computeFlightPhaseState, FlightPhaseContext } from './flightPhase';
+import { simNowMs, sunPhase } from './clock';
 
 export type Phase = 'idle' | 'loading' | 'playing' | 'paused' | 'crashed' | 'complete';
 export type ViewId = 'cockpit' | 'chase' | 'spotter' | 'aisle' | 'window';
@@ -65,7 +66,7 @@ export interface ChecklistItem {
 export interface HudState {
   phase: Phase; view: ViewId; kias: number; altFt: number; vsFpm: number; hdg: number; gsKt: number; mach: number; pitch: number; bank: number; throttle: number; n1: number; flapsIdx: number; flapsDet: number; gear: number; gearDown: boolean; brake: boolean; parking: boolean; reverse: boolean; spoilers: number;
   fuelPct: number; fuelKg: number; aglFt: number; distNm: number; brg: number; eteMin: number; warn: { text: string; level: 'caution' | 'warning'; acked?: boolean }[]; score: number; comfort: number; ap: { on: boolean; nav: boolean; appr: boolean; gsCaptured: boolean; hdg: number; alt: number; spd: number };
-  ils: { valid: boolean; locDots: number; gsDots: number; ident: string; dist: number } | null; timeScale: number; lights: { nav: boolean; strobe: boolean; land: boolean; beacon: boolean }; seatbelt: boolean; assist: boolean; hint: string; loadProgress: number; restartHold: number;
+  ils: { valid: boolean; locDots: number; gsDots: number; ident: string; dist: number } | null; timeScale: number; lat: number; lon: number; utcMs: number; sunEl: number; sunPhase: string; lights: { nav: boolean; strobe: boolean; land: boolean; beacon: boolean }; seatbelt: boolean; assist: boolean; hint: string; loadProgress: number; restartHold: number;
   wind: { dir: number; kt: number }; destId: string; fromId: string; aircraft: string; progress: number; onGround: boolean; stall: boolean; nz: number; depRwy: string; apprRwy: string; rwyHdg: number; rwyDistNm: number; vr: number; vapp: number; alphaFrac: number; offline: boolean; paxCount: number; cabinMsg: string; canWarp: boolean;
   flightPlan: FlightWaypoint[]; activeWpIdx: number; apPhase: string;
   // UI/UX Enhanced fields
@@ -637,10 +638,10 @@ export class Game {
     this.camera.updateProjectionMatrix();
   }
 
-  setTimeOfDay(tod: TimeOfDay) {
-    this.world?.setTimeOfDay(tod);
-    this.cfg.settings.tod = tod;
-    this.toast(`Time of Day: ${tod.toUpperCase()}`, 'info');
+  /** Time of day is not adjustable: the simulator is locked to the real-world UTC clock (see clock.ts). */
+  setTimeOfDay(_tod?: TimeOfDay) {
+    this.world?.updateSunFromClock(true);
+    this.toast('Time is synchronised with the real world (UTC) and cannot be changed', 'info');
   }
 
   setWeather(w: Weather) {
@@ -1169,10 +1170,10 @@ export class Game {
     this.audio.click();
     this.toast(this.ap.appr ? `APPR armed – ILS ${ils?.ident}` : 'Approach mode off', this.ap.appr ? 'good' : 'info');
   }
+  /** 1:1 real-time simulation: the simulation rate is fixed at 1x so in-game time always equals real time. */
   cycleWarp() {
-    const ok = this.ap.on && !this.fm.wow && this.fm.agl > 400 && this.distToDest() > 35000;
-    if (!ok) { this.timeScale = 1; this.toast('Time warp needs autopilot, 400 m+ AGL, and 20 nm+ from destination', 'warn'); return; }
-    this.timeScale = this.timeScale >= 8 ? 1 : this.timeScale * 2; this.toast(`Time warp ×${this.timeScale}`, 'info');
+    this.timeScale = 1;
+    this.toast('Time compression is disabled – the simulation runs 1:1 with real time', 'info');
   }
   cycleRunway() {
     if (this.cfg.from === this.cfg.to) return;
@@ -2128,10 +2129,10 @@ export class Game {
       fuelPct: fm.fuelFrac * 100, fuelKg: fm.fuel, aglFt: fm.agl / 0.3048, distNm: rem / M_PER_NM, brg: this.magHdg(brg), eteMin: rem / Math.max(0.5, fm.gs) / 60, warn: warnList,
       score: Math.round(this.score), comfort: this.comfort, ap: { on: this.ap.on, nav: this.ap.nav, appr: this.ap.appr, gsCaptured: this.ap.gsCaptured, hdg: this.magHdg(this.ap.hdg), alt: this.ap.altFt, spd: this.ap.spd },
       ils: ils ? { valid: ils.valid, locDots: ils.locDots, gsDots: ils.gsDots, ident: ils.ident, dist: ils.dist / M_PER_NM } : null,
-      timeScale: this.timeScale, lights: { ...this.lights }, seatbelt: this.seatbelt, assist: fm.ctl.assist, hint: this.coach(), loadProgress: loadP, restartHold: clamp(this.restartHold / 0.7, 0, 1),
+      timeScale: this.timeScale, lat: this.world ? this.world.proj.lat(fm.pos.z) : this.cfg.from.lat, lon: this.world ? this.world.proj.lon(fm.pos.x) : this.cfg.from.lon, utcMs: simNowMs(), sunEl: this.world?.sunElevation ?? 45, sunPhase: sunPhase(this.world?.sunElevation ?? 45), lights: { ...this.lights }, seatbelt: this.seatbelt, assist: fm.ctl.assist, hint: this.coach(), loadProgress: loadP, restartHold: clamp(this.restartHold / 0.7, 0, 1),
       wind: { dir: windDirection, kt: windSpeedKt }, destId: this.cfg.to.icao, fromId: this.cfg.from.icao, aircraft: s.name, progress: clamp(1 - rem / total, 0, 1), onGround: fm.wow, stall: fm.stalled || fm.stallWarn, nz: fm.nz,
       depRwy: this.depRwy, apprRwy: rwyIdent, rwyHdg, rwyDistNm, vr: s.vr, vapp: s.vapp, alphaFrac: fm.alpha / fm.alphaStall,
-      offline: !!this.world?.terrain.offline, paxCount: s.pax, cabinMsg: this.cabinMsg, canWarp: this.ap.on && !fm.wow && fm.agl > 400 && rem > 35000,
+      offline: !!this.world?.terrain.offline, paxCount: s.pax, cabinMsg: this.cabinMsg, canWarp: false,
       flightPlan: this.flightPlan, activeWpIdx: this.activeWpIdx, apPhase: this.ap.phase,
       flightPhase,
       track,

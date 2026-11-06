@@ -24,7 +24,8 @@ import {
 
 test('REPO_FACTS strictly match the repository dataset counts and architecture', () => {
   assert.equal(REPO_FACTS.totalAirports, AIRPORTS.length);
-  assert.equal(REPO_FACTS.totalAirports, 7134);
+  // the world runway rebuild widened the airport set (every large/medium airport + scheduled service); never fewer than the original 7,134
+  assert.ok(REPO_FACTS.totalAirports >= 7134);
   assert.equal(REPO_FACTS.indonesiaAirports, 676);
   assert.equal(REPO_FACTS.aircraftCount, 3);
   assert.ok(REPO_FACTS.terrainSource.includes('AWS'));

@@ -1,3 +1,4 @@
+import { ClockReadout } from './LiveClock';
 import React, { useState, useRef } from 'react';
 import type { Game, HudState, FlightPhase, WorldScreenMarker, CockpitTooltip } from '../sim/game';
 import { Settings } from '../sim/storage';
@@ -626,27 +627,16 @@ export function WeatherWindow({
       width={380}
     >
       <div className="space-y-3.5">
-        {/* Time of Day Presets */}
+        {/* Real-world time (locked): the sim clock is the system UTC clock */}
         <div>
           <span className="text-[9px] text-slate-400 uppercase tracking-widest font-bold block mb-1.5">
-            Time of Day Preset
+            Real-World Time · Synchronised
           </span>
-          <div className="grid grid-cols-2 gap-1.5">
-            <button
-              onClick={() => game.setTimeOfDay('day')}
-              className="p-2.5 rounded-xl bg-white/5 hover:bg-white/15 border border-white/10 text-center font-bold text-xs transition flex items-center justify-center gap-1.5"
-            >
-              <FlightIcon name="sun" size={13} className="text-amber-300" />
-              <span>Bright Daylight</span>
-            </button>
-            <button
-              onClick={() => game.setTimeOfDay('sunset')}
-              className="p-2.5 rounded-xl bg-white/5 hover:bg-white/15 border border-white/10 text-center font-bold text-xs transition flex items-center justify-center gap-1.5"
-            >
-              <FlightIcon name="sunset" size={13} className="text-orange-300" />
-              <span>Golden Sunset</span>
-            </button>
+          <div className="p-2.5 rounded-xl bg-white/5 border border-white/10 flex items-center gap-2.5">
+            <FlightIcon name="sun" size={16} className="text-amber-300" />
+            <ClockReadout lat={Number.isFinite(hud.lat) ? hud.lat : 0} lon={Number.isFinite(hud.lon) ? hud.lon : 0} />
           </div>
+          <p className="text-[9px] text-slate-500 mt-1">Sun position, sky and lighting follow the real UTC time at the aircraft's location.</p>
         </div>
 
         {/* Weather Conditions Presets */}
@@ -1243,7 +1233,7 @@ export function MsfsExternalHud({
 
           <div className="border-t border-white/10 pt-1 text-center">
             <span className="text-[8px] text-slate-400 block font-bold">SIM RATE</span>
-            <span className="font-mono text-[10px] text-emerald-300 font-bold">{hud.timeScale}X</span>
+            <span className="font-mono text-[10px] text-emerald-300 font-bold">1:1 LIVE</span>
           </div>
         </div>
       </div>

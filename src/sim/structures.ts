@@ -943,11 +943,12 @@ export class Structures {
     this.treeJobs.clear();
   }
 
-  setTimeOfDay(tod: 'day' | 'sunset') {
-    this.uniforms.uSunset.value = tod === 'sunset' ? 1.0 : 0.0;
+  /** `night` 0 (daylight) … 1 (dark): drives lit windows, sky reflection tint and street/city lights. */
+  setNight(night: number) {
+    this.uniforms.uSunset.value = night;
     // Sodium-vapour street glow only reads after sundown; by day the lamps are just dark poles.
-    const night = tod === 'sunset';
-    for (const t of this.tiles.values()) if (t.lights) t.lights.visible = night;
+    const on = night > 0.5;
+    for (const t of this.tiles.values()) if (t.lights) t.lights.visible = on;
   }
 
   private updateRunwayZones(airports: Airport[]) {

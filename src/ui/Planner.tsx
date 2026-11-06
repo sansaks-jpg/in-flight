@@ -21,6 +21,10 @@ import {
   MsfsTopRightBar,
 } from './PreGameVisuals';
 import { ControlsPanel, Modal, ScoresPanel, SettingsPanel } from './Screens';
+import { useSun, useUtcNow } from './LiveClock';
+import { onRunwaysRefined, refineAirportRunways, needsRefine } from '../data/runwayRefine';
+import { clearRunwayAnchors } from './PreGameVisuals';
+import { daylight, formatLocal, formatUtc, localLabel, sunPosition } from '../sim/clock';
 
 interface Props {
   settings: Settings;
@@ -162,6 +166,10 @@ export function Planner({
   scalePx = 80,
 }: Props) {
   const [hangarOpen, setHangarOpen] = useState(initialHangarOpen);
+  // Bumped whenever live OpenStreetMap data upgrades an airport's runway geometry
+  const [rwVer, setRwVer] = useState(0);
+  const [rwSurveying, setRwSurveying] = useState(false);
+  useEffect(() => onRunwaysRefined(() => { clearRunwayAnchors(); setRwVer((v) => v + 1); }), []);
   const [efbOpen, setEfbOpen] = useState(false);
   // Keep side panels closed by default so the 3D globe and map area are never obstructed
   const [favouritesOpen, setFavouritesOpen] = useState(false);
@@ -174,7 +182,15 @@ export function Planner({
   const selectedDepRwy = rwySel.dep, selectedArrRwy = rwySel.arr;
   const setSelectedDepRwy = (v: string) => setRwySel((r) => ({ ...r, dep: v }));
   const setSelectedArrRwy = (v: string) => setRwySel((r) => ({ ...r, arr: v }));
-  const [utcMinutes, setUtcMinutes] = useState<number>(14 * 60 + 47); // 14:47 UTC matching reference images
+  // Choosing a runway re-centres the map on that runway (not the airport centre).
+  useEffect(() => {
+    if (selectedDep && rwySel.dep) globeControlRef?.current?.focusRunway(selectedDep, rwySel.dep);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rwySel.dep, selectedDep?.id]);
+  useEffect(() => {
+    if (selectedArr && rwySel.arr) globeControlRef?.current?.focusRunway(selectedArr, rwySel.arr);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rwySel.arr, selectedArr?.id]);
   const [modal, setModal] = useState<null | 'scores' | 'settings' | 'controls' | 'credits'>(null);
   const [entered, setEntered] = useState(false);
   const [selectedVariantId, setSelectedVariantId] = useState<string>(() => {
@@ -217,17 +233,29 @@ export function Planner({
 
   const depRunways = useMemo(
     () => (selectedDep ? expandAirportRunways(selectedDep) : []),
-    [selectedDep]
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [selectedDep, rwVer]
   );
   const arrRunways = useMemo(
     () => (selectedArr ? expandAirportRunways(selectedArr) : []),
-    [selectedArr]
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [selectedArr, rwVer]
   );
   const depSpots = useMemo(() => (selectedDep ? startSpots(selectedDep) : []), [selectedDep]);
   const inspectedRunways = useMemo(
     () => expandAirportRunways(inspectedAirport),
-    [inspectedAirport]
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [inspectedAirport, rwVer]
   );
+
+  // Upgrade approximate / unsurveyed runways of the airports in play from live OpenStreetMap data.
+  useEffect(() => {
+    const list = [selectedDep, selectedArr, inspectedAirport].filter((a, i, arr): a is Airport => !!a && arr.indexOf(a) === i && needsRefine(a));
+    if (!list.length) { setRwSurveying(false); return; }
+    let alive = true; setRwSurveying(true);
+    Promise.all(list.map((a) => refineAirportRunways(a))).finally(() => { if (alive) setRwSurveying(false); });
+    return () => { alive = false; };
+  }, [selectedDep, selectedArr, inspectedAirport]);
 
   const canStartSelectedFlight = Boolean(selectedDep || selectedArr);
 
@@ -256,10 +284,23 @@ export function Planner({
 
   const set = (p: Partial<Settings>) => setSettings({ ...settings, ...p });
 
-  const formattedUtc = `${String(Math.floor(utcMinutes / 60)).padStart(2, '0')}:${String(
-    utcMinutes % 60
-  ).padStart(2, '0')} UTC`;
-  const sliderPercent = Math.max(8, Math.min(94, (utcMinutes / (24 * 60)) * 100));
+  // Real-world clock (identical to the in-game clock): the planner shows the live UTC time and the
+  // actual light condition at the departure airfield; it cannot be edited.
+  const nowMs = useUtcNow();
+  const depSun = useSun(effectiveFrom.lat, effectiveFrom.lon);
+  const formattedUtc = `${formatUtc(nowMs)} UTC`;
+  const utcDayStart = Math.floor(nowMs / 86400000) * 86400000;
+  const sliderPercent = ((nowMs - utcDayStart) / 86400000) * 100;
+  const dayBar = useMemo(() => {
+    const stops: string[] = [];
+    for (let h = 0; h <= 24; h += 1) {
+      const el = sunPosition(utcDayStart + h * 3600000, effectiveFrom.lat, effectiveFrom.lon).elevation;
+      const d = daylight(el);
+      const r = Math.round(14 + 70 * d), g = Math.round(24 + 120 * d), b = Math.round(60 + 150 * d);
+      stops.push(`rgb(${r},${g},${b}) ${((h / 24) * 100).toFixed(1)}%`);
+    }
+    return `linear-gradient(90deg, ${stops.join(', ')})`;
+  }, [utcDayStart, effectiveFrom.lat, effectiveFrom.lon]);
 
   return (
     <div className="fixed inset-0 bg-transparent text-white select-none overflow-hidden font-sans pointer-events-none">
@@ -494,9 +535,9 @@ export function Planner({
             </div>
           </div>
 
-          {/* Middle Row: 14:47 UTC + Custom */}
+          {/* Middle Row: live UTC time + Custom */}
           <div className="flex items-center justify-between text-xs font-bold text-white">
-            <span className="font-mono">{formattedUtc}</span>
+            <span className="font-mono tabular-nums" title="Real-world UTC time, shared with the in-game clock">{formattedUtc}</span>
             <button
               type="button"
               onClick={() => setConditionsPopoverOpen((o) => !o)}
@@ -506,28 +547,19 @@ export function Planner({
             </button>
           </div>
 
-          {/* Bottom Row: Horizontal Blue Time-of-Day Slider Bar (Matches reference images) */}
-          <div className="relative h-4 bg-[#142342] border border-white/10 flex items-center overflow-hidden">
+          {/* Bottom Row: read-only 24 h day/night bar for the departure airfield with a live "now" marker */}
+          <div
+            className="relative h-4 border border-white/10 overflow-hidden"
+            style={{ background: dayBar }}
+            title={`${effectiveFrom.icao}: ${depSun.label}, sun ${depSun.elevation.toFixed(1)}°. Time is locked to the real world.`}
+          >
             <div
-              className="h-full bg-[#2454a4]"
-              style={{ width: `${sliderPercent}%` }}
+              className="absolute top-0 h-full w-[3px] bg-[#ffd24e] shadow-[0_0_6px_rgba(255,210,78,0.9)]"
+              style={{ left: `calc(${sliderPercent}% - 1.5px)` }}
             />
-            <div
-              className="w-1.5 h-full bg-[#4ea8ff] shrink-0 shadow-[0_0_6px_rgba(78,168,255,0.9)]"
-            />
-            <input
-              type="range"
-              aria-label="Flight UTC Time Slider"
-              min={300}
-              max={1320}
-              value={utcMinutes}
-              onChange={(e) => {
-                const mins = Number(e.target.value);
-                setUtcMinutes(mins);
-                set({ tod: mins >= 1020 ? 'sunset' : 'day' });
-              }}
-              className="absolute inset-0 w-full h-full opacity-0 cursor-ew-resize"
-            />
+            <span className="absolute inset-0 flex items-center justify-center text-[9px] font-bold text-white/90 drop-shadow pointer-events-none">
+              {effectiveFrom.icao} · {depSun.label} · {formatLocal(nowMs, effectiveFrom.lon)} {localLabel(effectiveFrom.lon)}
+            </span>
           </div>
 
           {/* Optional Compact Custom Weather Popover when clicking 'Custom' */}
@@ -884,7 +916,7 @@ export function Planner({
                   </div>
                   <div className="flex items-center justify-between text-[10px] text-slate-400">
                     <span>
-                      {r.surface}{r.lit ? ' · lit' : ' · unlit'}{r.dispM > 0 ? ` · displaced ${r.dispM} m` : ''}{r.approx ? ' · position approx.' : ''}
+                      {r.surface}{r.lit ? ' · lit' : ' · unlit'}{r.dispM > 0 ? ` · displaced ${r.dispM} m` : ''}{r.approx ? (rwSurveying ? ' · surveying runway…' : ' · position approx.') : ''}
                     </span>
                     <span className="flex gap-1">
                       <button type="button" disabled={selectedDep?.id !== inspectedAirport.id} onClick={() => setSelectedDepRwy(r.ident)}

@@ -1,3 +1,4 @@
+import { formatUtc } from '../sim/clock';
 import './flight.css';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type Dispatch, type RefObject } from 'react';
 import type { Airport } from '../data/airports';
@@ -11,7 +12,7 @@ import type { NavigationMapView } from './MapPanel';
 import type { FlightTool, FlightWorkspace, WorkspaceAction } from './flightWorkspace';
 import { MiniMap, NavigationMap, type MapFocus } from './FlightMap';
 import { FlightToggle, IconButton, PanelHeader, RunwaySelect } from './FlightWidgets';
-import { FLIGHT_PHASE_LABELS, HUD_MODES, HUD_MODE_LABELS, flightUiScale, flightUnits, formatAltitude, formatSpeed, formatNumber, formatDistance, formatEte, formatHeading, primaryAlert } from './navigation';
+import { FLIGHT_PHASE_LABELS, HUD_MODES, HUD_MODE_LABELS, flightUiScale, flightUnits, formatAltitude, formatSpeed, formatDistance, formatEte, formatHeading, primaryAlert } from './navigation';
 
 function useFlightViewport() {
   const measure = () => ({ width: window.innerWidth, height: window.innerHeight, touch: matchMedia('(pointer: coarse)').matches });
@@ -144,8 +145,8 @@ function AutopilotPanel({ game, hud, to }: { game: Game; hud: HudState; to: Airp
     <p className="flight-panel-description">{managed ? 'Altitude and speed follow the route profile. Choose Heading to set your own targets.' : 'Selected targets use aviation units. Turn the heading selector to leave NAV mode.'}</p>
     <RunwaySelect airport={to} value={hud.apprRwy} onChange={(ident) => game.setArrRunway(ident)} />
     <p className="flight-panel-description">{formatHeading(hud.rwyHdg)} magnetic · {hud.ils?.valid ? `ILS ${hud.ils.ident} available` : 'ILS not available / out of range'}</p>
-    <div className="flight-rate-row"><span>Simulation rate<small>{hud.canWarp ? 'Autopilot cruise available' : 'Available in safe autopilot cruise'}</small></span>
-      <button disabled={!hud.canWarp && hud.timeScale === 1} onClick={() => game.action('warp')} aria-label="Cycle simulation rate">{hud.timeScale}×<FlightIcon name="chevron" size={12} /></button>
+    <div className="flight-rate-row"><span>Simulation rate<small>1:1 real time · UTC {formatUtc(hud.utcMs)}{hud.eteMin > 0 && hud.distNm > 1 ? ` · ETA ${formatUtc(hud.utcMs + hud.eteMin * 60000, false)}Z` : ''}</small></span>
+      <button disabled aria-label="Simulation rate is fixed to real time">1×</button>
     </div>
   </div>;
 }
@@ -378,7 +379,7 @@ export function Hud({ game, hud, toasts, settings, setSettings, onMap, mapOpen, 
     {edgeInstruments && <FlightEdgeInstruments hud={hud} metric={metric} showHeading={!miniMap} />}
     {pfd && <div className="flight-instruments" data-flight-ui><PrimaryFlightDisplay hud={hud} metric={metric} assisted={mode === 'assisted'} /></div>}
     {telemetry && <CompactTelemetry hud={hud} metric={metric} minimal={mode === 'minimal'} />}
-    <div className="flight-bottom-right"><span>{hud.ap.on ? `AUTOPILOT · ${hud.ap.appr ? 'APPR' : hud.ap.nav ? 'LNAV' : 'HDG'}` : 'MANUAL FLIGHT'}</span><span>{formatNumber(hud.timeScale, 1)}× SIM RATE</span></div>
+    <div className="flight-bottom-right"><span>{hud.ap.on ? `AUTOPILOT · ${hud.ap.appr ? 'APPR' : hud.ap.nav ? 'LNAV' : 'HDG'}` : 'MANUAL FLIGHT'}</span><span>{formatUtc(hud.utcMs)}Z · REAL TIME</span></div>
     {hud.offline && <div className="flight-scenery-status"><span className="flight-status-dot" />Limited scenery<span className="flight-scenery-detail">Navigation available</span></div>}
     {hud.restartHold > 0 && <div className="flight-restart" role="status"><span>Restarting flight</span><div><span style={{ width: `${hud.restartHold * 100}%` }} /></div><small>Release R to cancel</small></div>}
     {viewport.touch && <TouchControls game={game} hud={hud} />}

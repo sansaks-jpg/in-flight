@@ -71,6 +71,8 @@ To prevent garbage collection (GC) micro-stutters:
 | `src/sim/physics.ts` | Rigid-body flight dynamics, aerodynamic force vectors, lift/drag polars, ground effect, and landing gear physics. |
 | `src/sim/autopilot.ts` | Autopilot PID controllers for HDG, ALT, VS, LNAV waypoint sequencing, and ILS glideslope / localizer tracking. |
 | `src/sim/cockpit.ts` | 3D interactive cockpit models, analog gauges, interactive throttle/stick, PFD and MFD displays. |
+| `src/sim/clock.ts` | Single real-world (UTC) time source, NOAA solar position, twilight phases and clock formatting. Never use a separate game clock for time of day. |
+| `src/data/runwayRefine.ts` | Live OpenStreetMap runway survey upgrade (cached) for airports with approximate runways. |
 | `src/sim/specs.ts` | Aircraft performance data, engine configurations, aerodynamic coefficients, and weight balance profiles. |
 | `src/sim/terrain.ts` | Procedural and vector terrain elevation sampling, heightmaps, and terrain meshes. |
 | `src/sim/tiles.ts` | Tile streaming logic, LOD management, and bounding frustum culling. |
@@ -79,7 +81,7 @@ To prevent garbage collection (GC) micro-stutters:
 | `src/ui/CanvasMap.ts` | High-performance 2D HTML Canvas navigation moving map. |
 | `src/ui/Hud.tsx` | Glass HUD overlay, airspeed tape, altimeter tape, artificial horizon, and system annunciators. |
 | `src/ui/Planner.tsx` | Pre-flight route planner and airport database search interface. |
-| `src/data/airports.ts` | Pre-indexed airport database with 6,600+ real-world airfields and runway specifications. |
+| `src/data/airports.ts` | Pre-indexed airport database with 8,400+ real-world airfields and runway specifications. |
 
 ---
 

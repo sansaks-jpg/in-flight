@@ -6,8 +6,10 @@ import { Airport, Runway, Surface, airportsNear, getAirfield, isPaved } from '..
 import { buildAirfieldMeshes } from './airfieldMesh';
 import { QualityPreset } from './storage';
 import { QUALITY } from './quality';
+import { sunPosition, simNowMs, nightLights } from './clock';
 
-export type TimeOfDay = 'day' | 'sunset';
+/** The simulator always runs on real-world UTC time (see clock.ts); there is no manual time-of-day override. */
+export type TimeOfDay = 'live';
 export type Weather = 'clear' | 'scattered' | 'overcast';
 
 export interface RunwayGeom {
@@ -78,7 +80,54 @@ const SKY = {
     ground: new THREE.Color(0x2e241f),
     fog: 0.000042,
   },
+  // Civil/nautical twilight (sun about 5 degrees below the horizon): deep blue zenith, rose horizon band.
+  dusk: {
+    zen: new THREE.Color(0x14214a),
+    hor: new THREE.Color(0xb8708a),
+    haze: new THREE.Color(0x7d6585),
+    sunEl: -5,
+    sunAz: 260,
+    sun: new THREE.Color(0xff8a5a),
+    dir: 0.9,
+    hemi: 0.5,
+    ground: new THREE.Color(0x1a1820),
+    fog: 0.000044,
+  },
+  // Night: faint moonlight, near-black sky with stars.
+  night: {
+    zen: new THREE.Color(0x01030a),
+    hor: new THREE.Color(0x0a1424),
+    haze: new THREE.Color(0x0a1322),
+    sunEl: -30,
+    sunAz: 0,
+    sun: new THREE.Color(0x6f86b5),
+    dir: 0.32,
+    hemi: 0.36,
+    ground: new THREE.Color(0x090b10),
+    fog: 0.000032,
+  },
 };
+type SkyPal = typeof SKY.day;
+// Solar-elevation keyframes (degrees) -> palette. Blended continuously, so dawn/dusk/night are real.
+const SKY_KEYS: [number, SkyPal][] = [[-14, SKY.night], [-5, SKY.dusk], [2, SKY.sunset], [26, SKY.day]];
+const skyScratch: SkyPal = {
+  zen: new THREE.Color(), hor: new THREE.Color(), haze: new THREE.Color(), sunEl: 0, sunAz: 0, sun: new THREE.Color(), dir: 0, hemi: 0, ground: new THREE.Color(), fog: 0,
+};
+function blendSky(el: number): SkyPal {
+  const K = SKY_KEYS;
+  let a = K[0][1], b = K[0][1], t = 0;
+  if (el >= K[K.length - 1][0]) { a = b = K[K.length - 1][1]; }
+  else if (el > K[0][0]) {
+    for (let i = 0; i < K.length - 1; i++) {
+      if (el <= K[i + 1][0]) { a = K[i][1]; b = K[i + 1][1]; t = (el - K[i][0]) / (K[i + 1][0] - K[i][0]); break; }
+    }
+  }
+  const o = skyScratch;
+  o.zen.copy(a.zen).lerp(b.zen, t); o.hor.copy(a.hor).lerp(b.hor, t); o.haze.copy(a.haze).lerp(b.haze, t);
+  o.sun.copy(a.sun).lerp(b.sun, t); o.ground.copy(a.ground).lerp(b.ground, t);
+  o.dir = a.dir + (b.dir - a.dir) * t; o.hemi = a.hemi + (b.hemi - a.hemi) * t; o.fog = a.fog + (b.fog - a.fog) * t;
+  return o;
+}
 
 const hashN = (a: number, b: number, s = 0) => {
   const v = Math.sin(a * 127.1 + b * 311.7 + s * 74.7) * 43758.5453;
@@ -349,8 +398,16 @@ export class World {
   private cloudTarget = 40;
   airports = new Map<string, AirportScene>();
   runways: RunwayGeom[] = [];
-  tod: TimeOfDay = 'day';
+  tod: TimeOfDay = 'live';
+  /** Lighting direction (never below ~4 degrees: at night it acts as faint moonlight). */
   sunDir = new THREE.Vector3();
+  /** True solar position at the aircraft, from the real UTC clock. */
+  sunElevation = 45;
+  sunAzimuth = 180;
+  nightAmount = 0;
+  private cloudColor = new THREE.Color(0xffffff);
+  private lastSunClockMs = 0;
+  private sunFog = new THREE.FogExp2(0xffffff, 0.00003);
   private papiOn = new THREE.MeshBasicMaterial({ color: 0xffffff });
   private papiOff = new THREE.MeshBasicMaterial({ color: 0xff2200 });
   private strobeOn = new THREE.MeshBasicMaterial({ color: 0xffffff });
@@ -384,6 +441,7 @@ export class World {
         haze: { value: new THREE.Color() },
         sunDir: { value: new THREE.Vector3(0, 1, 0) },
         sunCol: { value: new THREE.Color() },
+        stars: { value: 0 },
       },
       vertexShader: 'varying vec3 vD; void main(){ vD = normalize(position); gl_Position = projectionMatrix*modelViewMatrix*vec4(position,1.0); gl_Position.z = gl_Position.w*0.9999; }',
       // Soft, continuous horizon:
@@ -393,7 +451,7 @@ export class World {
       // The final <colorspace_fragment> include is essential: without it these linear values were
       // written straight into an sRGB framebuffer, so the sky was darker than the fogged terrain
       // beneath it — the mismatch is what read as a sharp horizon line.
-      fragmentShader: `varying vec3 vD; uniform vec3 zen; uniform vec3 hor; uniform vec3 haze; uniform vec3 sunDir; uniform vec3 sunCol;
+      fragmentShader: `varying vec3 vD; uniform vec3 zen; uniform vec3 hor; uniform vec3 haze; uniform vec3 sunDir; uniform vec3 sunCol; uniform float stars;
         void main(){
           vec3 v = normalize(vD);
           float h = max(v.y, 0.0);
@@ -403,6 +461,12 @@ export class World {
           if (v.y < 0.0) c = mix(haze, hor, clamp(-v.y * 3.0, 0.0, 1.0));
           float s = max(dot(v, normalize(sunDir)), 0.0);
           c += sunCol * (pow(s, 900.0) * 2.2 + pow(s, 20.0) * 0.14 + pow(s, 3.0) * 0.06);
+          if (stars > 0.01 && v.y > 0.02) {
+            vec3 d = v * 140.0; vec3 id = floor(d); vec3 f = fract(d) - 0.5;
+            float h = fract(sin(dot(id, vec3(12.9898, 78.233, 37.719))) * 43758.5453);
+            float tw = step(0.978, h) * smoothstep(0.32, 0.0, length(f));
+            c += vec3(0.85, 0.9, 1.0) * tw * stars * smoothstep(0.02, 0.22, v.y) * (0.45 + 0.55 * fract(h * 91.7));
+          }
           gl_FragColor = vec4(c, 1.0);
           #include <colorspace_fragment>
         }`,
@@ -414,7 +478,7 @@ export class World {
 
     this.cloudTex = cloudTexture();
     this.setWeather(opts.weather);
-    this.setTimeOfDay(opts.tod);
+    this.updateSunFromClock(true);
     this.syncCloudBudget(QUALITY[opts.quality]?.clouds ?? 40);
   }
 
@@ -445,7 +509,7 @@ export class World {
     this.opts.quality = q;
     this.terrain.setQuality(q);
     this.structures.setQuality(q);
-    this.structures.setTimeOfDay(this.tod);
+    this.structures.setNight(this.nightAmount);
     this.syncCloudBudget(QUALITY[q].clouds);
     // Terminal detail / airport count is preset-specific. Rebuild the (small) airport set
     // around aircraft current position immediately so a quality change doesn't leave heavy meshes.
@@ -458,28 +522,49 @@ export class World {
     this.cloudCover = w === 'clear' ? 0.12 : w === 'scattered' ? 0.42 : 0.8;
   }
 
-  setTimeOfDay(t: TimeOfDay) {
-    this.tod = t;
-    const c = SKY[t];
-    const el = c.sunEl * D2R, az = c.sunAz * D2R;
-    this.sunDir.set(Math.sin(az) * Math.cos(el), Math.sin(el), -Math.cos(az) * Math.cos(el)).normalize();
+  /**
+   * Recomputes the sun from the real-world UTC clock at the aircraft's current position
+   * (or the departure airfield before the flight starts). Cheap; throttled by the caller.
+   */
+  updateSunFromClock(force = false) {
+    const now = simNowMs();
+    if (!force && now - this.lastSunClockMs < 15000) return;
+    this.lastSunClockMs = now;
+    const lat = this.lastAcLat || this.proj.lat(0), lon = this.lastAcLon || this.proj.lon(0);
+    const sp = sunPosition(now, lat, lon);
+    this.setSun(sp.elevation, sp.azimuth);
+  }
+
+  setSun(elDeg: number, azDeg: number) {
+    this.sunElevation = elDeg; this.sunAzimuth = azDeg;
+    const c = blendSky(elDeg);
+    const az = azDeg * D2R;
+    const trueEl = elDeg * D2R;
+    const skyDir = this.skyMat.uniforms.sunDir.value as THREE.Vector3;
+    skyDir.set(Math.sin(az) * Math.cos(trueEl), Math.sin(trueEl), -Math.cos(az) * Math.cos(trueEl)).normalize();
+    // Light direction: keep above the horizon so terrain is lit from above (moonlight at night).
+    const lel = Math.max(elDeg, 4) * D2R;
+    this.sunDir.set(Math.sin(az) * Math.cos(lel), Math.sin(lel), -Math.cos(az) * Math.cos(lel)).normalize();
     this.skyMat.uniforms.zen.value.copy(c.zen);
     this.skyMat.uniforms.hor.value.copy(c.hor);
     this.skyMat.uniforms.haze.value.copy(c.haze);
-    this.skyMat.uniforms.sunDir.value.copy(this.sunDir);
     this.skyMat.uniforms.sunCol.value.copy(c.sun);
+    this.skyMat.uniforms.stars.value = Math.max(0, Math.min(1, (-elDeg - 3) / 10));
     this.sunLight.color.copy(c.sun);
     this.sunLight.intensity = c.dir;
-    this.hemi.color.copy(c.zen).lerp(new THREE.Color(1, 1, 1), 0.5);
+    this.hemi.color.copy(c.zen).lerp(this.cloudColor.set(1, 1, 1), 0.5);
     this.hemi.groundColor.copy(c.ground);
     this.hemi.intensity = c.hemi;
-    // Exponential (not linear) fog: it fades every distance band by the same *fraction*, so there
-    // is no "fog starts here" band and no hard rim where the terrain mesh ends. The colour is the
-    // sky's own horizon haze, so the last visible ground melts into the sky with no seam at all.
-    this.scene.fog = new THREE.FogExp2(c.haze.clone(), c.fog);
+    // Exponential fog (see rationale in the original two-state version): same colour as the sky horizon haze.
+    this.sunFog.color.copy(c.haze); this.sunFog.density = c.fog;
+    this.scene.fog = this.sunFog;
     this.terrain.setEnvironment(c.haze, this.sunDir);
     this.detail.setEnvironment(c.haze, this.sunDir);
-    this.structures.setTimeOfDay(t);
+    this.nightAmount = nightLights(elDeg);
+    this.structures.setNight(this.nightAmount);
+    // Cloud tint: white by day, warm at sunset, dark grey-blue at night.
+    const dayL = Math.max(0, Math.min(1, (elDeg + 6) / 14));
+    this.cloudColor.setRGB(0.16, 0.19, 0.28).lerp(c.hor.clone().lerp(c.sun, 0.25).lerp(new THREE.Color(1, 1, 1), Math.min(1, Math.max(0, (elDeg - 2) / 20))), dayL);
   }
 
   setStyle(id: string) {
@@ -876,6 +961,7 @@ export class World {
       camPos = cameraOrPos as THREE.Vector3;
     }
 
+    this.updateSunFromClock();
     this.terrain.update(acPos.x, acPos.z, time, this.sunDir, frustum);
     this.detail.update(acPos.x, acPos.z, agl, time, this.sunDir);
     this.structures.update(acPos.x, acPos.z, agl, [...this.airports.values()].map((s) => s.ap), frustum);
@@ -937,7 +1023,7 @@ export class World {
         const m = sp.material as THREE.SpriteMaterial;
         m.opacity = clamp((d - 250) / 700, 0, 1) * 0.92;
         sp.visible = m.opacity > 0.02;
-        m.color.set(this.tod === 'sunset' ? 0xffdfc4 : 0xffffff);
+        m.color.copy(this.cloudColor);
       }
     }
 

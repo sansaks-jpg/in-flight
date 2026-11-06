@@ -2,6 +2,8 @@ import { useEffect, useRef, useState, type MutableRefObject } from 'react';
 import * as THREE from 'three';
 import { AIRPORTS, Airport } from '../data/airports';
 import { AIRCRAFT, specById } from '../sim/specs';
+import { Runway } from '../data/airports';
+import { bearing, destination, haversine } from '../sim/geo';
 import { Settings } from '../sim/storage';
 import { FlightIcon } from './FlightIcon';
 import {
@@ -556,6 +558,8 @@ function globeTileLevelFor(zoom: number, latDeg: number, viewH: number): number 
 export interface GlobeControlHandle {
   focusLocation: (lat: number, lon: number, targetZoom?: number) => void;
   focusRoute: (dep: Airport, arr: Airport) => void;
+  /** Centre the map on a specific runway (not the airport centre) and zoom so the whole runway is framed. */
+  focusRunway: (airport: Airport, ident: string) => void;
   zoomBy: (delta: number) => void;
   resetGlobeView: () => void;
 }
@@ -625,6 +629,52 @@ const GLOBE_SETTLEMENT_DOTS: GlobeSettlementDot[] = (() => {
 const ScratchVec = new THREE.Vector3();
 const ScratchVecB = new THREE.Vector3();
 
+/**
+ * Runway-anchored marker target. When a runway is chosen in the planner the DEP/ARR marker must end up
+ * on THAT runway (not on the airport reference point) once the map is zoomed in. The anchor is the
+ * threshold the aircraft actually uses: the physical runway end for take-off, the (displaced) landing
+ * threshold for arrival.
+ */
+export interface RunwayAnchor {
+  airportId: string; ident: string; lat: number; lon: number; ux: number; uy: number; uz: number;
+  /** Midpoint of the whole runway (camera focus) */
+  midLat: number; midLon: number; lengthM: number; rw: Runway; end: 'le' | 'he';
+}
+const anchorCache = new Map<string, RunwayAnchor | null>();
+/** Call after runway geometry changed (live survey upgrade) so markers re-anchor on the corrected runway. */
+export function clearRunwayAnchors() { anchorCache.clear(); }
+export function runwayEndAnchor(airport: Airport | null | undefined, ident: string | undefined, role: 'dep' | 'arr'): RunwayAnchor | null {
+  if (!airport || !ident) return null;
+  const key = `${airport.id}|${ident}|${role}|${airport.runways.length}`;
+  const hit = anchorCache.get(key);
+  if (hit !== undefined) return hit;
+  let out: RunwayAnchor | null = null;
+  for (const rw of airport.runways) {
+    const end: 'le' | 'he' | null = rw.le === ident ? 'le' : rw.he === ident ? 'he' : null;
+    if (!end) continue;
+    const le = end === 'le';
+    let lat = le ? rw.leLat : rw.heLat, lon = le ? rw.leLon : rw.heLon;
+    if (role === 'arr') {
+      const disp = Math.max(0, Math.min(le ? rw.dispLe : rw.dispHe, haversine(rw.leLat, rw.leLon, rw.heLat, rw.heLon) * 0.5));
+      if (disp > 0) [lat, lon] = destination(lat, lon, bearing(lat, lon, le ? rw.heLat : rw.leLat, le ? rw.heLon : rw.leLon), disp);
+    }
+    const [ux, uy, uz] = latLonToUnitSphere(lat, lon);
+    out = {
+      airportId: airport.id, ident, lat, lon, ux, uy, uz,
+      midLat: (rw.leLat + rw.heLat) / 2, midLon: (rw.leLon + rw.heLon) / 2,
+      lengthM: haversine(rw.leLat, rw.leLon, rw.heLat, rw.heLon), rw, end,
+    };
+    break;
+  }
+  anchorCache.set(key, out);
+  return out;
+}
+/** Marker blend: 0 = airport reference point (zoomed out) … 1 = selected runway threshold (zoomed in). */
+function anchorBlend(scaleKm: number): number {
+  const t = Math.max(0, Math.min(1, (45 - scaleKm) / 37)); // fully on the runway by an ~8 km scale bar
+  return t * t * (3 - 2 * t);
+}
+
 function drawFivePointStar(ctx: CanvasRenderingContext2D, cx: number, cy: number, outerR: number, innerR: number) {
   ctx.beginPath();
   for (let i = 0; i < 10; i++) {
@@ -645,6 +695,8 @@ export function InteractiveEarthGlobe({
   paused = false,
   selectedDep = null,
   selectedArr = null,
+  depRunway = '',
+  arrRunway = '',
   onSelectAirport,
   onFlyNow,
   onInspectAirport,
@@ -658,6 +710,9 @@ export function InteractiveEarthGlobe({
   paused?: boolean;
   selectedDep?: Airport | null;
   selectedArr?: Airport | null;
+  /** Runway ident chosen for departure / arrival ('' = automatic). The DEP / ARR marker snaps to it when zoomed in. */
+  depRunway?: string;
+  arrRunway?: string;
   onSelectAirport?: (airport: Airport, role: 'from' | 'to') => void;
   onFlyNow?: (airport: Airport) => void;
   onInspectAirport?: (airport: Airport) => void;
@@ -689,6 +744,8 @@ export function InteractiveEarthGlobe({
   selectedDepRef.current = selectedDep;
   const selectedArrRef = useRef<Airport | null>(selectedArr);
   selectedArrRef.current = selectedArr;
+  const depRunwayRef = useRef(depRunway); depRunwayRef.current = depRunway;
+  const arrRunwayRef = useRef(arrRunway); arrRunwayRef.current = arrRunway;
   const onScaleKmChangeRef = useRef(onScaleKmChange);
   onScaleKmChangeRef.current = onScaleKmChange;
 
@@ -765,6 +822,19 @@ export function InteractiveEarthGlobe({
         requestHighResTilesRef.current?.(view.lat, view.lon, view.zoom);
         requestHighResTilesRef.current?.(dep.lat, dep.lon, Math.max(view.zoom, 12));
         requestHighResTilesRef.current?.(arr.lat, arr.lon, Math.max(view.zoom, 12));
+      },
+      focusRunway: (airport: Airport, ident: string) => {
+        const a = runwayEndAnchor(airport, ident, 'dep');
+        if (!a) {
+          setShortestTargetLatLon(airport.lat, airport.lon, GLOBE_AIRPORT_FOCUS_ZOOM);
+          requestHighResTilesRef.current?.(airport.lat, airport.lon, GLOBE_AIRPORT_FOCUS_ZOOM);
+          return;
+        }
+        // Visible vertical span ≈ 7308 km / zoom (35° FOV): frame the runway in ~45% of the view height.
+        const visibleKm = Math.max(1.2, (a.lengthM / 1000) / 0.45);
+        const z = Math.max(GLOBE_AIRPORT_FOCUS_ZOOM, Math.min(MAX_GLOBE_ZOOM, (2 * GLOBE_BASE_ALT * EARTH_RADIUS_KM * GLOBE_TAN_HALF_FOV) / visibleKm));
+        setShortestTargetLatLon(a.midLat, a.midLon, z);
+        requestHighResTilesRef.current?.(a.midLat, a.midLon, z);
       },
       zoomBy: (delta: number) => {
         const factor = delta > 0 ? 1.55 : 1 / 1.55;
@@ -1229,6 +1299,9 @@ export function InteractiveEarthGlobe({
       }
 
       // 3. Project & spatially declutter 3D airport pins
+      const depAnchor = runwayEndAnchor(dep, depRunwayRef.current, 'dep');
+      const arrAnchor = runwayEndAnchor(arr, arrRunwayRef.current, 'arr');
+      const blendT = anchorBlend(scaleKm);
       const visiblePins: { airport: Airport; x: number; y: number; isStar: boolean; nz: number }[] = [];
       const minSpacingPx = scaleKm > 300 ? 55 : scaleKm > 80 ? 38 : scaleKm > 20 ? 24 : 8;
       const minSpacingSq = minSpacingPx * minSpacingPx;
@@ -1249,11 +1322,20 @@ export function InteractiveEarthGlobe({
           if (scaleKm > 100 && !m.isStar) continue;
         }
 
-        const approxNz = m.ux * camUx + m.uy * camUy + m.uz * camUz;
+        // Selected DEP / ARR endpoints slide from the airport reference point to the chosen runway as the map zooms in.
+        let pux = m.ux, puy = m.uy, puz = m.uz;
+        if (isSelected && blendT > 0) {
+          const an = dep?.id === m.airport.id ? depAnchor : arr?.id === m.airport.id ? arrAnchor : null;
+          if (an) {
+            pux = m.ux + (an.ux - m.ux) * blendT; puy = m.uy + (an.uy - m.uy) * blendT; puz = m.uz + (an.uz - m.uz) * blendT;
+            const inv = 1 / Math.hypot(pux, puy, puz); pux *= inv; puy *= inv; puz *= inv;
+          }
+        }
+        const approxNz = pux * camUx + puy * camUy + puz * camUz;
         if (!isSelected && approxNz <= minLimbNz) continue;
         if (isSelected && approxNz <= cosHorizon * 0.95) continue;
 
-        ScratchVec.set(m.ux, m.uy, m.uz).applyMatrix4(spinGroup.matrixWorld);
+        ScratchVec.set(pux, puy, puz).applyMatrix4(spinGroup.matrixWorld);
         const nz = ScratchVec.z / scale;
         if (!isSelected && nz <= minLimbNz) continue;
 
@@ -1332,6 +1414,20 @@ export function InteractiveEarthGlobe({
             const widthM = Math.max(25, rwy.width || 45);
             const rWidthPx = Math.max(4, Math.min(28, (widthM / 1000) / kmPerPx));
 
+            // Selected departure / arrival runway: coloured halo + direction chevron so it reads as THE chosen runway
+            const selDep = depAnchor && depAnchor.rw === rwy && dep?.id === p.airport.id;
+            const selArr = arrAnchor && arrAnchor.rw === rwy && arr?.id === p.airport.id;
+            if (selDep || selArr) {
+              ctx.beginPath();
+              ctx.moveTo(rx1, ry1);
+              ctx.lineTo(rx2, ry2);
+              ctx.strokeStyle = selDep ? 'rgba(34, 197, 94, 0.55)' : 'rgba(245, 158, 11, 0.55)';
+              ctx.lineWidth = rWidthPx + 9;
+              ctx.lineCap = 'round';
+              ctx.stroke();
+              ctx.lineCap = 'butt';
+            }
+
             // Runway shoulder / asphalt casing
             ctx.beginPath();
             ctx.moveTo(rx1, ry1);
@@ -1375,6 +1471,24 @@ export function InteractiveEarthGlobe({
               ctx.fillStyle = '#38bdf8';
               ctx.fillText(rwy.le, leX, leY + 0.5);
               ctx.fillText(rwy.he, heX, heY + 0.5);
+            }
+            if ((selDep || selArr) && rLenPx >= 30) {
+              // Chevron on the selected threshold pointing along the runway direction of use
+              const an = selDep ? depAnchor! : arrAnchor!;
+              const fromLe = an.end === 'le';
+              const sx = fromLe ? rx1 : rx2, sy = fromLe ? ry1 : ry2;
+              const dx = (fromLe ? rx2 - rx1 : rx1 - rx2) / rLenPx, dy = (fromLe ? ry2 - ry1 : ry1 - ry2) / rLenPx;
+              const cx = sx + dx * 12, cy = sy + dy * 12;
+              ctx.beginPath();
+              ctx.moveTo(cx + dx * 9, cy + dy * 9);
+              ctx.lineTo(cx - dx * 5 - dy * 7, cy - dy * 5 + dx * 7);
+              ctx.lineTo(cx - dx * 5 + dy * 7, cy - dy * 5 - dx * 7);
+              ctx.closePath();
+              ctx.fillStyle = selDep ? '#22c55e' : '#f59e0b';
+              ctx.fill();
+              ctx.strokeStyle = '#0b1220';
+              ctx.lineWidth = 1.2;
+              ctx.stroke();
             }
           }
         }
@@ -1487,7 +1601,8 @@ export function InteractiveEarthGlobe({
 
         // Draw DEP / ARR callout tag directly above selected endpoints
         if (isDep || isArr) {
-          const tagText = `${isDep ? 'DEP' : 'ARR'} ${p.airport.icao}`;
+          const selRwy = isDep ? depAnchor : arrAnchor;
+          const tagText = `${isDep ? 'DEP' : 'ARR'} ${p.airport.icao}${selRwy && blendT > 0.5 ? ` · RWY ${selRwy.ident}` : ''}`;
           ctx.font = '800 10px ui-monospace, SFMono-Regular, monospace';
           const tw = ctx.measureText(tagText).width;
           const bw = tw + 10;

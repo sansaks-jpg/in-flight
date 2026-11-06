@@ -4,6 +4,7 @@ import { AIRPORT_BY_ID, Airport, DEFAULT_FROM, DEFAULT_TO } from './data/airport
 import { Settings, loadSettings, saveSettings, loadRoute, saveRoute, loadScores } from './sim/storage';
 import { StartScreen } from './ui/Screens';
 import { Planner } from './ui/Planner';
+import { refineWithin } from './data/runwayRefine';
 import { GLOBE_AIRPORT_FOCUS_ZOOM, GlobeControlHandle, InteractiveEarthGlobe } from './ui/PreGameVisuals';
 import { nextHudMode } from './ui/navigation';
 import { flightWorkspaceReducer, INITIAL_WORKSPACE } from './ui/flightWorkspace';
@@ -95,8 +96,10 @@ export default function App() {
     }
   }, [cfgOf, menuBgMode]);
 
-  const startFlight = useCallback(() => {
+  const startFlight = useCallback(async () => {
     const g = gameRef.current; if (!g) return; const s = settingsRef.current;
+    // Make sure both airfields use surveyed (OpenStreetMap) runway geometry before the scenery is built.
+    await Promise.all([refineWithin(cur.current.from, 3500), refineWithin(cur.current.to, 3500)]);
     saveRoute({ from: cur.current.from.id, to: cur.current.to.id, aircraft: cur.current.aircraftId });
     setTransitioningMenuExit(false);
     g.suspended = false; mapView.current = null; setResult(null); setMapOpen(false); dispatchWorkspace({ type: 'close' }); setScreen('flight'); setToasts([]);
@@ -204,6 +207,8 @@ export default function App() {
             focusLon={115.0}
             selectedDep={selectedDep}
             selectedArr={selectedArr}
+            depRunway={rwySel.dep}
+            arrRunway={rwySel.arr}
             onSelectAirport={handleSelectAirport}
             onFlyNow={handleFlyNowFromGlobe}
             onScaleKmChange={(km, px) => setScaleInfo({ km, px })}

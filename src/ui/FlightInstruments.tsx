@@ -1,3 +1,4 @@
+import { formatUtc } from '../sim/clock';
 import { useEffect, useId, useRef, useState } from 'react';
 import type { Game, HudState } from '../sim/game';
 import { clamp } from '../sim/geo';
@@ -54,7 +55,7 @@ export function PrimaryFlightDisplay({ hud, metric = false, assisted = false }: 
     </div>
     <div className="flight-pfd-compass"><span>HDG <b>{formatHeading(hud.hdg)}</b></span><span>TRK {formatHeading(hud.track)}</span><span>{hud.activeWp?.name ?? hud.destId}</span></div>
     <footer><span>{hud.aglFt < 2500 || approach ? <>RA <b>{formatAltitude(hud.aglFt, units)}</b> {labels.altitude}</> : <>GS <b>{formatSpeed(hud.gsKt, units)}</b> {labels.speed}</>}</span>
-      <span title={approach ? `Arrival runway at ${hud.destId}; independent of the next flight-plan fix` : 'Simulation rate'}>{approach ? `ARR ${hud.destId} ${hud.apprRwy || '—'}` : `${formatNumber(hud.timeScale, 1)}× SIM`}</span></footer>
+      <span title={approach ? `Arrival runway at ${hud.destId}; independent of the next flight-plan fix` : 'Real-world UTC time (simulation runs 1:1)'}>{approach ? `ARR ${hud.destId} ${hud.apprRwy || '—'}` : `${formatUtc(hud.utcMs, false)}Z`}</span></footer>
     {approach && <div className="flight-pfd-ils"><span>{ils ? `ILS ${ils.ident}` : 'ILS · NO SIGNAL'}</span><span>{ils ? `LOC ${formatNumber(ils.locDots, 1)} · GS ${formatNumber(ils.gsDots, 1)}` : 'Use visual / published guidance'}</span></div>}
   </section>;
 }
