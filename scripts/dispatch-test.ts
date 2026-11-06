@@ -186,3 +186,20 @@ test('getCuratedRoutes returns valid routes grounded in the airport database', (
   assert.equal(idRoutes[0].fromIcao, 'WIII');
 });
 
+test('resolveRunwayAnchor auto-selects appropriate runway and snaps to threshold', async () => {
+  const { resolveRunwayAnchor } = await import('../src/ui/PreGameVisuals');
+  const wiii = AIRPORT_BY_ID.get('WIII')!;
+  const warr = AIRPORT_BY_ID.get('WARR')!;
+  // Auto departure towards East (WARR is east of WIII, course ~105 deg)
+  const depAuto = resolveRunwayAnchor(wiii, '', 'dep', warr);
+  assert.ok(depAuto);
+  assert.ok(depAuto.ident.startsWith('07'), `Expected 07 end towards East, got ${depAuto.ident}`);
+  assert.ok(depAuto.lat !== wiii.lat || depAuto.lon !== wiii.lon);
+
+  // Explicit runway selection
+  const dep25R = resolveRunwayAnchor(wiii, '25R', 'dep', warr);
+  assert.ok(dep25R);
+  assert.equal(dep25R.ident, '25R');
+});
+
+

@@ -159,6 +159,26 @@ export default function App() {
     else selectArr(airport);
   }, [selectDep, selectArr]);
 
+  const handleSelectRunway = useCallback((airport: Airport, rwyIdent: string, role?: 'dep' | 'arr') => {
+    if (role === 'arr' || (selectedArrRef.current?.id === airport.id && selectedDepRef.current?.id !== airport.id)) {
+      if (selectedArrRef.current?.id !== airport.id) {
+        setSelectedArr(airport);
+        setTo(airport);
+        cur.current.to = airport;
+        setSelectedDep((prev) => (prev && prev.id === airport.id ? null : prev));
+      }
+      setRwySel((r) => ({ ...r, arr: rwyIdent }));
+    } else {
+      if (selectedDepRef.current?.id !== airport.id) {
+        setSelectedDep(airport);
+        setFrom(airport);
+        cur.current.from = airport;
+        setSelectedArr((prev) => (prev && prev.id === airport.id ? null : prev));
+      }
+      setRwySel((r) => ({ ...r, dep: rwyIdent, spot: '' }));
+    }
+  }, []);
+
   const fallbackAirport = (avoid: Airport | null, preferred: string, alternate: string) =>
     avoid && avoid.id === preferred ? AIRPORT_BY_ID.get(alternate)! : AIRPORT_BY_ID.get(preferred)!;
 
@@ -210,6 +230,7 @@ export default function App() {
             depRunway={rwySel.dep}
             arrRunway={rwySel.arr}
             onSelectAirport={handleSelectAirport}
+            onSelectRunway={handleSelectRunway}
             onFlyNow={handleFlyNowFromGlobe}
             onScaleKmChange={(km, px) => setScaleInfo({ km, px })}
             controlRef={globeControlRef}

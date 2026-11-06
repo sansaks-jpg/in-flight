@@ -1,8 +1,7 @@
 import { useEffect, useRef, useState, type MutableRefObject } from 'react';
 import * as THREE from 'three';
-import { AIRPORTS, Airport } from '../data/airports';
+import { AIRPORTS, Airport, Runway, getAirfield } from '../data/airports';
 import { AIRCRAFT, specById } from '../sim/specs';
-import { Runway } from '../data/airports';
 import { bearing, destination, haversine } from '../sim/geo';
 import { Settings } from '../sim/storage';
 import { FlightIcon } from './FlightIcon';
@@ -669,9 +668,75 @@ export function runwayEndAnchor(airport: Airport | null | undefined, ident: stri
   anchorCache.set(key, out);
   return out;
 }
+
+/** Resolves an anchor for an explicit runway ident, or automatically picks the best runway towards/from the opposite airport. */
+export function resolveRunwayAnchor(
+  airport: Airport | null | undefined,
+  ident: string | undefined,
+  role: 'dep' | 'arr',
+  oppositeAirport?: Airport | null
+): RunwayAnchor | null {
+  if (!airport || !airport.runways || !airport.runways.length) return null;
+  if (ident) {
+    const direct = runwayEndAnchor(airport, ident, role);
+    if (direct) return direct;
+  }
+  let bestIdent = airport.runways[0].le;
+  if (oppositeAirport && oppositeAirport.id !== airport.id) {
+    if (role === 'dep') {
+      const targetBrg = bearing(airport.lat, airport.lon, oppositeAirport.lat, oppositeAirport.lon);
+      let bestScore = -1e9;
+      for (const rw of airport.runways) {
+        const leHdg = bearing(rw.leLat, rw.leLon, rw.heLat, rw.heLon);
+        const heHdg = bearing(rw.heLat, rw.heLon, rw.leLat, rw.leLon);
+        const len = haversine(rw.leLat, rw.leLon, rw.heLat, rw.heLon);
+        const leAlign = Math.cos(((targetBrg - leHdg) * Math.PI) / 180);
+        const heAlign = Math.cos(((targetBrg - heHdg) * Math.PI) / 180);
+        const leScore = leAlign * 10 + len / 1000;
+        const heScore = heAlign * 10 + len / 1000;
+        if (leScore > bestScore) { bestScore = leScore; bestIdent = rw.le; }
+        if (heScore > bestScore) { bestScore = heScore; bestIdent = rw.he; }
+      }
+    } else {
+      const incomingBrg = bearing(oppositeAirport.lat, oppositeAirport.lon, airport.lat, airport.lon);
+      let bestScore = -1e9;
+      for (const rw of airport.runways) {
+        const leHdg = bearing(rw.leLat, rw.leLon, rw.heLat, rw.heLon);
+        const heHdg = bearing(rw.heLat, rw.heLon, rw.leLat, rw.heLon);
+        const len = haversine(rw.leLat, rw.leLon, rw.heLat, rw.heLon);
+        const leAlign = Math.cos(((incomingBrg - leHdg) * Math.PI) / 180);
+        const heAlign = Math.cos(((incomingBrg - heHdg) * Math.PI) / 180);
+        const leScore = leAlign * 10 + len / 1000;
+        const heScore = heAlign * 10 + len / 1000;
+        if (leScore > bestScore) { bestScore = leScore; bestIdent = rw.le; }
+        if (heScore > bestScore) { bestScore = heScore; bestIdent = rw.he; }
+      }
+    }
+  } else {
+    let maxLen = -1;
+    for (const rw of airport.runways) {
+      const len = haversine(rw.leLat, rw.leLon, rw.heLat, rw.heLon);
+      if (len > maxLen) { maxLen = len; bestIdent = rw.le; }
+    }
+  }
+  return runwayEndAnchor(airport, bestIdent, role);
+}
+
+export interface ScreenRunway {
+  airport: Airport;
+  rw: Runway;
+  le: string;
+  he: string;
+  rx1: number;
+  ry1: number;
+  rx2: number;
+  ry2: number;
+  widthPx: number;
+}
+
 /** Marker blend: 0 = airport reference point (zoomed out) … 1 = selected runway threshold (zoomed in). */
 function anchorBlend(scaleKm: number): number {
-  const t = Math.max(0, Math.min(1, (45 - scaleKm) / 37)); // fully on the runway by an ~8 km scale bar
+  const t = Math.max(0, Math.min(1, (60 - scaleKm) / 35)); // fully snaps to the runway threshold by ~25 km scale bar
   return t * t * (3 - 2 * t);
 }
 
@@ -698,6 +763,7 @@ export function InteractiveEarthGlobe({
   depRunway = '',
   arrRunway = '',
   onSelectAirport,
+  onSelectRunway,
   onFlyNow,
   onInspectAirport,
   onScaleKmChange,
@@ -714,6 +780,7 @@ export function InteractiveEarthGlobe({
   depRunway?: string;
   arrRunway?: string;
   onSelectAirport?: (airport: Airport, role: 'from' | 'to') => void;
+  onSelectRunway?: (airport: Airport, ident: string, role?: 'dep' | 'arr') => void;
   onFlyNow?: (airport: Airport) => void;
   onInspectAirport?: (airport: Airport) => void;
   onScaleKmChange?: (scaleKm: number, scalePx: number) => void;
@@ -748,6 +815,16 @@ export function InteractiveEarthGlobe({
   const arrRunwayRef = useRef(arrRunway); arrRunwayRef.current = arrRunway;
   const onScaleKmChangeRef = useRef(onScaleKmChange);
   onScaleKmChangeRef.current = onScaleKmChange;
+  const onSelectRunwayRef = useRef(onSelectRunway);
+  onSelectRunwayRef.current = onSelectRunway;
+  const screenRunwaysRef = useRef<ScreenRunway[]>([]);
+  const hoveredRunwayRef = useRef<{
+    airport: Airport;
+    ident: string;
+    x: number;
+    y: number;
+    lengthM: number;
+  } | null>(null);
 
   const rotRef = useRef({
     lat: focusLat * (Math.PI / 180),
@@ -824,7 +901,7 @@ export function InteractiveEarthGlobe({
         requestHighResTilesRef.current?.(arr.lat, arr.lon, Math.max(view.zoom, 12));
       },
       focusRunway: (airport: Airport, ident: string) => {
-        const a = runwayEndAnchor(airport, ident, 'dep');
+        const a = resolveRunwayAnchor(airport, ident, 'dep');
         if (!a) {
           setShortestTargetLatLon(airport.lat, airport.lon, GLOBE_AIRPORT_FOCUS_ZOOM);
           requestHighResTilesRef.current?.(airport.lat, airport.lon, GLOBE_AIRPORT_FOCUS_ZOOM);
@@ -1210,24 +1287,75 @@ export function InteractiveEarthGlobe({
         }
       }
 
-      // 2. Great-circle route curve between selectedDep and selectedArr if both are selected
+      // 2. Navigation route line between selectedDep and selectedArr if both are selected
       const dep = selectedDepRef.current;
       const arr = selectedArrRef.current;
+      const depAnchor = resolveRunwayAnchor(dep, depRunwayRef.current, 'dep', arr);
+      const arrAnchor = resolveRunwayAnchor(arr, arrRunwayRef.current, 'arr', dep);
+
       if (dep && arr && dep.id !== arr.id) {
-        const [ux1, uy1, uz1] = latLonToUnitSphere(dep.lat, dep.lon);
-        const [ux2, uy2, uz2] = latLonToUnitSphere(arr.lat, arr.lon);
-        const routePts: { x: number; y: number }[] = [];
-        const steps = 64;
-        for (let s = 0; s <= steps; s++) {
+        const totalDist = haversine(dep.lat, dep.lon, arr.lat, arr.lon);
+        const geoPoints: [number, number, number][] = [];
+
+        // 1. Departure runway: start at threshold, follow runway heading through climb-out
+        let climbLat = dep.lat, climbLon = dep.lon;
+        if (depAnchor) {
+          geoPoints.push(latLonToUnitSphere(depAnchor.lat, depAnchor.lon));
+          const depHdg = depAnchor.end === 'le'
+            ? bearing(depAnchor.rw.leLat, depAnchor.rw.leLon, depAnchor.rw.heLat, depAnchor.rw.heLon)
+            : bearing(depAnchor.rw.heLat, depAnchor.rw.heLon, depAnchor.rw.leLat, depAnchor.rw.leLon);
+          // Rollout along the runway
+          const [depEndLat, depEndLon] = destination(depAnchor.lat, depAnchor.lon, depHdg, depAnchor.lengthM);
+          geoPoints.push(latLonToUnitSphere(depEndLat, depEndLon));
+          // Straight departure climb-out extension along runway heading
+          const climbExt = Math.min(totalDist * 0.1, 7500);
+          const [cLat, cLon] = destination(depAnchor.lat, depAnchor.lon, depHdg, depAnchor.lengthM + climbExt);
+          climbLat = cLat;
+          climbLon = cLon;
+          geoPoints.push(latLonToUnitSphere(climbLat, climbLon));
+        } else {
+          geoPoints.push(latLonToUnitSphere(dep.lat, dep.lon));
+        }
+
+        // 2. Arrival runway: final approach fix, threshold touchdown, rollout
+        const arrGeoPoints: [number, number, number][] = [];
+        let fafLat = arr.lat, fafLon = arr.lon;
+        if (arrAnchor) {
+          const arrHdg = arrAnchor.end === 'le'
+            ? bearing(arrAnchor.rw.leLat, arrAnchor.rw.leLon, arrAnchor.rw.heLat, arrAnchor.rw.heLon)
+            : bearing(arrAnchor.rw.heLat, arrAnchor.rw.heLon, arrAnchor.rw.leLat, arrAnchor.rw.leLon);
+          const fafDist = Math.min(totalDist * 0.12, 10000);
+          const [fLat, fLon] = destination(arrAnchor.lat, arrAnchor.lon, (arrHdg + 180) % 360, fafDist);
+          fafLat = fLat;
+          fafLon = fLon;
+          arrGeoPoints.push(latLonToUnitSphere(fafLat, fafLon));
+          arrGeoPoints.push(latLonToUnitSphere(arrAnchor.lat, arrAnchor.lon));
+          const [arrRollLat, arrRollLon] = destination(arrAnchor.lat, arrAnchor.lon, arrHdg, Math.min(1500, arrAnchor.lengthM * 0.7));
+          arrGeoPoints.push(latLonToUnitSphere(arrRollLat, arrRollLon));
+        } else {
+          arrGeoPoints.push(latLonToUnitSphere(arr.lat, arr.lon));
+        }
+
+        // 3. Great-circle interpolation between climb-out fix and final approach fix
+        const [ux1, uy1, uz1] = latLonToUnitSphere(climbLat, climbLon);
+        const [ux2, uy2, uz2] = latLonToUnitSphere(fafLat, fafLon);
+        const steps = 48;
+        for (let s = 1; s < steps; s++) {
           const t = s / steps;
           let ix = ux1 * (1 - t) + ux2 * t;
           let iy = uy1 * (1 - t) + uy2 * t;
           let iz = uz1 * (1 - t) + uz2 * t;
           const len = Math.hypot(ix, iy, iz) || 1;
-          ix /= len;
-          iy /= len;
-          iz /= len;
-          ScratchVec.set(ix, iy, iz).applyMatrix4(spinGroup.matrixWorld);
+          geoPoints.push([ix / len, iy / len, iz / len]);
+        }
+        for (let i = 0; i < arrGeoPoints.length; i++) {
+          geoPoints.push(arrGeoPoints[i]);
+        }
+
+        const routePts: { x: number; y: number }[] = [];
+        for (let i = 0; i < geoPoints.length; i++) {
+          const pt = geoPoints[i];
+          ScratchVec.set(pt[0], pt[1], pt[2]).applyMatrix4(spinGroup.matrixWorld);
           if (ScratchVec.z / scale <= cosHorizon * 0.98) continue;
           ScratchVec.project(camera);
           const sx = (ScratchVec.x * 0.5 + 0.5) * viewW;
@@ -1299,15 +1427,23 @@ export function InteractiveEarthGlobe({
       }
 
       // 3. Project & spatially declutter 3D airport pins
-      const depAnchor = runwayEndAnchor(dep, depRunwayRef.current, 'dep');
-      const arrAnchor = runwayEndAnchor(arr, arrRunwayRef.current, 'arr');
       const blendT = anchorBlend(scaleKm);
       const visiblePins: { airport: Airport; x: number; y: number; isStar: boolean; nz: number }[] = [];
       const minSpacingPx = scaleKm > 300 ? 55 : scaleKm > 80 ? 38 : scaleKm > 20 ? 24 : 8;
       const minSpacingSq = minSpacingPx * minSpacingPx;
 
-      for (let i = 0; i < GLOBE_AIRPORT_MARKERS.length; i++) {
-        const m = GLOBE_AIRPORT_MARKERS[i];
+      const allMarkers = [...GLOBE_AIRPORT_MARKERS];
+      const presentIds = new Set(allMarkers.map((m) => m.airport.id));
+      for (const a of [dep, arr, activeAirportRef.current?.airport]) {
+        if (a && !presentIds.has(a.id)) {
+          presentIds.add(a.id);
+          const [ux, uy, uz] = latLonToUnitSphere(a.lat, a.lon);
+          allMarkers.push({ airport: a, ux, uy, uz, isStar: false });
+        }
+      }
+
+      for (let i = 0; i < allMarkers.length; i++) {
+        const m = allMarkers[i];
         const isSelected =
           dep?.id === m.airport.id ||
           arr?.id === m.airport.id ||
@@ -1320,6 +1456,15 @@ export function InteractiveEarthGlobe({
           if (m.airport.size === 2) continue;
           if (m.airport.size === 1 && !m.isStar) continue;
           if (scaleKm > 100 && !m.isStar) continue;
+        }
+
+        // When zoomed in very close to an airfield (scaleKm <= 15), hide other unselected nearby pins (< 14 km)
+        // so the runway strips and taxiways of the airport are never obscured by marker clutter.
+        if (!isSelected && scaleKm <= 15) {
+          const targetAp = dep || arr || activeAirportRef.current?.airport;
+          if (targetAp && haversine(targetAp.lat, targetAp.lon, m.airport.lat, m.airport.lon) < 14000) {
+            continue;
+          }
         }
 
         // Selected DEP / ARR endpoints slide from the airport reference point to the chosen runway as the map zooms in.
@@ -1395,8 +1540,152 @@ export function InteractiveEarthGlobe({
         }
       }
 
-      // Draw actual oriented runway strips with threshold markings when zoomed in (<= 25 km scale)
-      if (scaleKm <= 25) {
+      // Helper to project a geographic coordinate onto the 2D overlay canvas (Zero GC)
+      const projectGeo = (lat: number, lon: number): [number, number] | null => {
+        const [ux, uy, uz] = latLonToUnitSphere(lat, lon);
+        ScratchVec.set(ux, uy, uz).applyMatrix4(spinGroup.matrixWorld);
+        if (ScratchVec.z / scale <= cosHorizon * 0.95) return null;
+        ScratchVec.project(camera);
+        return [(ScratchVec.x * 0.5 + 0.5) * viewW, (-ScratchVec.y * 0.5 + 0.5) * viewH];
+      };
+
+      // Reset live screen runways for pointer hit detection
+      screenRunwaysRef.current = [];
+
+      // 4. Draw surveyed airport ground layouts (OSM aprons, taxiways, terminals, stands) matching in-flight 'M' map
+      if (scaleKm <= 45) {
+        ctx.save();
+        const drawnAirfieldIds = new Set<string>();
+        const airfieldsToDraw: Airport[] = [];
+        for (const a of [dep, arr, activeAirportRef.current?.airport]) {
+          if (a && !drawnAirfieldIds.has(a.id)) {
+            drawnAirfieldIds.add(a.id);
+            airfieldsToDraw.push(a);
+          }
+        }
+        if (scaleKm <= 22) {
+          for (let i = 0; i < visiblePins.length; i++) {
+            const a = visiblePins[i].airport;
+            if (!drawnAirfieldIds.has(a.id)) {
+              drawnAirfieldIds.add(a.id);
+              airfieldsToDraw.push(a);
+            }
+          }
+        }
+
+        for (const a of airfieldsToDraw) {
+          const L = getAirfield(a);
+          if (!L) continue;
+
+          // A. Aprons
+          ctx.fillStyle = 'rgba(148, 163, 184, 0.32)';
+          ctx.strokeStyle = 'rgba(100, 116, 139, 0.45)';
+          ctx.lineWidth = 1.0;
+          for (let k = 0; k < L.aprons.length; k++) {
+            const ap = L.aprons[k];
+            ctx.beginPath();
+            let first = true;
+            for (let j = 0; j < ap.ring.length; j++) {
+              const pt = projectGeo(ap.ring[j][0], ap.ring[j][1]);
+              if (!pt) continue;
+              if (first) { ctx.moveTo(pt[0], pt[1]); first = false; }
+              else { ctx.lineTo(pt[0], pt[1]); }
+            }
+            if (!first) { ctx.closePath(); ctx.fill(); ctx.stroke(); }
+          }
+
+          // B. Taxiways with realistic dark asphalt casing & centerline
+          for (let k = 0; k < L.taxiways.length; k++) {
+            const tw = L.taxiways[k];
+            if (tw.pts.length < 2) continue;
+            const twWidth = Math.max(2.2, Math.min(18, (tw.width / 1000) / kmPerPx));
+            ctx.beginPath();
+            let first = true;
+            for (let j = 0; j < tw.pts.length; j++) {
+              const pt = projectGeo(tw.pts[j][0], tw.pts[j][1]);
+              if (!pt) continue;
+              if (first) { ctx.moveTo(pt[0], pt[1]); first = false; }
+              else { ctx.lineTo(pt[0], pt[1]); }
+            }
+            if (!first) {
+              ctx.lineCap = 'round';
+              ctx.lineJoin = 'round';
+              // Dark shoulder casing
+              ctx.strokeStyle = 'rgba(4, 10, 16, 0.88)';
+              ctx.lineWidth = twWidth + 2.4;
+              ctx.stroke();
+
+              // Asphalt surface
+              ctx.strokeStyle = '#64748b';
+              ctx.lineWidth = twWidth;
+              ctx.stroke();
+
+              // Taxiway yellow centerline when zoomed in
+              if (scaleKm <= 8) {
+                ctx.strokeStyle = '#eab308';
+                ctx.lineWidth = Math.max(1, twWidth * 0.16);
+                ctx.stroke();
+              }
+            }
+          }
+
+          // C. Hangars & Terminals (3D building footprints)
+          ctx.fillStyle = 'rgba(226, 232, 240, 0.58)';
+          ctx.strokeStyle = 'rgba(15, 23, 42, 0.88)';
+          ctx.lineWidth = 1.4;
+          const buildings = L.hangars.concat(L.terminals);
+          for (let k = 0; k < buildings.length; k++) {
+            const bld = buildings[k];
+            ctx.beginPath();
+            let first = true;
+            for (let j = 0; j < bld.ring.length; j++) {
+              const pt = projectGeo(bld.ring[j][0], bld.ring[j][1]);
+              if (!pt) continue;
+              if (first) { ctx.moveTo(pt[0], pt[1]); first = false; }
+              else { ctx.lineTo(pt[0], pt[1]); }
+            }
+            if (!first) { ctx.closePath(); ctx.fill(); ctx.stroke(); }
+          }
+
+          // D. Stands / Parking Gates
+          if (scaleKm <= 12) {
+            for (let k = 0; k < L.stands.length; k++) {
+              const st = L.stands[k];
+              const pt = projectGeo(st.lat, st.lon);
+              if (!pt || pt[0] < -10 || pt[0] > viewW + 10 || pt[1] < -10 || pt[1] > viewH + 10) continue;
+              ctx.beginPath();
+              ctx.arc(pt[0], pt[1], st.gate ? 4.0 : 3.0, 0, Math.PI * 2);
+              ctx.fillStyle = '#ffe08a';
+              ctx.fill();
+              ctx.strokeStyle = '#0f172a';
+              ctx.lineWidth = 1.2;
+              ctx.stroke();
+              if (scaleKm <= 4 && st.ref) {
+                ctx.font = '700 9px ui-monospace, SFMono-Regular, monospace';
+                ctx.fillStyle = '#ffe9a8';
+                ctx.textAlign = 'left';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(st.ref, pt[0] + 5, pt[1]);
+              }
+            }
+          }
+
+          // E. Hold-short points
+          if (scaleKm <= 10) {
+            ctx.fillStyle = '#f59e0b';
+            for (let k = 0; k < L.holds.length; k++) {
+              const hp = L.holds[k];
+              const pt = projectGeo(hp.lat, hp.lon);
+              if (!pt || pt[0] < -10 || pt[0] > viewW + 10 || pt[1] < -10 || pt[1] > viewH + 10) continue;
+              ctx.fillRect(pt[0] - 2.5, pt[1] - 2.5, 5, 5);
+            }
+          }
+        }
+        ctx.restore();
+      }
+
+      // 5. Draw actual oriented runway strips with threshold markings (zoomed in <= 40 km scale)
+      if (scaleKm <= 40) {
         ctx.save();
         for (let i = 0; i < visiblePins.length; i++) {
           const p = visiblePins[i];
@@ -1414,6 +1703,19 @@ export function InteractiveEarthGlobe({
             const widthM = Math.max(25, rwy.width || 45);
             const rWidthPx = Math.max(4, Math.min(28, (widthM / 1000) / kmPerPx));
 
+            // Record screen runway segment for mouse click & hover selection
+            screenRunwaysRef.current.push({
+              airport: p.airport,
+              rw: rwy,
+              le: rwy.le,
+              he: rwy.he,
+              rx1,
+              ry1,
+              rx2,
+              ry2,
+              widthPx: rWidthPx,
+            });
+
             // Selected departure / arrival runway: coloured halo + direction chevron so it reads as THE chosen runway
             const selDep = depAnchor && depAnchor.rw === rwy && dep?.id === p.airport.id;
             const selArr = arrAnchor && arrAnchor.rw === rwy && arr?.id === p.airport.id;
@@ -1421,8 +1723,8 @@ export function InteractiveEarthGlobe({
               ctx.beginPath();
               ctx.moveTo(rx1, ry1);
               ctx.lineTo(rx2, ry2);
-              ctx.strokeStyle = selDep ? 'rgba(34, 197, 94, 0.55)' : 'rgba(245, 158, 11, 0.55)';
-              ctx.lineWidth = rWidthPx + 9;
+              ctx.strokeStyle = selDep ? 'rgba(34, 197, 94, 0.65)' : 'rgba(245, 158, 11, 0.65)';
+              ctx.lineWidth = rWidthPx + 10;
               ctx.lineCap = 'round';
               ctx.stroke();
               ctx.lineCap = 'butt';
@@ -1432,8 +1734,8 @@ export function InteractiveEarthGlobe({
             ctx.beginPath();
             ctx.moveTo(rx1, ry1);
             ctx.lineTo(rx2, ry2);
-            ctx.strokeStyle = 'rgba(15, 23, 42, 0.92)';
-            ctx.lineWidth = rWidthPx + 3;
+            ctx.strokeStyle = 'rgba(15, 23, 42, 0.95)';
+            ctx.lineWidth = rWidthPx + 3.2;
             ctx.lineCap = 'butt';
             ctx.stroke();
 
@@ -1454,8 +1756,8 @@ export function InteractiveEarthGlobe({
             ctx.stroke();
             ctx.setLineDash([]);
 
-            // Runway threshold numbers when zoomed in close (<= 5 km scale)
-            if (scaleKm <= 5 && rLenPx >= 48) {
+            // Runway threshold numbers when zoomed in close (<= 6 km scale)
+            if (scaleKm <= 6 && rLenPx >= 45) {
               const ux = (rx2 - rx1) / rLenPx;
               const uy = (ry2 - ry1) / rLenPx;
               ctx.font = '800 10px ui-monospace, SFMono-Regular, monospace';
@@ -1465,14 +1767,14 @@ export function InteractiveEarthGlobe({
               const leY = ry1 - uy * 14;
               const heX = rx2 + ux * 14;
               const heY = ry2 + uy * 14;
-              ctx.fillStyle = 'rgba(2, 6, 23, 0.85)';
+              ctx.fillStyle = 'rgba(2, 6, 23, 0.88)';
               ctx.fillRect(leX - 13, leY - 7, 26, 14);
               ctx.fillRect(heX - 13, heY - 7, 26, 14);
               ctx.fillStyle = '#38bdf8';
               ctx.fillText(rwy.le, leX, leY + 0.5);
               ctx.fillText(rwy.he, heX, heY + 0.5);
             }
-            if ((selDep || selArr) && rLenPx >= 30) {
+            if ((selDep || selArr) && rLenPx >= 25) {
               // Chevron on the selected threshold pointing along the runway direction of use
               const an = selDep ? depAnchor! : arrAnchor!;
               const fromLe = an.end === 'le';
@@ -1493,6 +1795,27 @@ export function InteractiveEarthGlobe({
           }
         }
         ctx.restore();
+      }
+
+      // Draw hovered runway tooltip tag if cursor is over a runway
+      if (hoveredRunwayRef.current) {
+        const hr = hoveredRunwayRef.current;
+        const tipText = `RWY ${hr.ident} · ${Math.round(hr.lengthM).toLocaleString()}m · Click to select`;
+        ctx.font = '700 11px ui-monospace, SFMono-Regular, monospace';
+        const tw = ctx.measureText(tipText).width;
+        const bw = tw + 14;
+        const bh = 22;
+        const bx = Math.max(8, Math.min(viewW - bw - 8, hr.x - bw * 0.5));
+        const by = Math.max(8, hr.y - 28);
+        ctx.fillStyle = 'rgba(2, 6, 23, 0.94)';
+        ctx.fillRect(bx, by, bw, bh);
+        ctx.strokeStyle = '#38bdf8';
+        ctx.lineWidth = 1.2;
+        ctx.strokeRect(bx, by, bw, bh);
+        ctx.fillStyle = '#ffffff';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(tipText, bx + bw * 0.5, by + bh * 0.5 + 0.5);
       }
 
       // Determine hovered airport from pointer position
@@ -1908,7 +2231,29 @@ export function InteractiveEarthGlobe({
       onPointerMove={(e) => {
         const rect = containerRef.current?.getBoundingClientRect();
         if (rect) {
-          pointerPosRef.current = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+          const px = e.clientX - rect.left;
+          const py = e.clientY - rect.top;
+          pointerPosRef.current = { x: px, y: py };
+
+          // Check if hovering near a runway on the map
+          let hitRwy: { airport: Airport; ident: string; x: number; y: number; lengthM: number } | null = null;
+          for (let k = 0; k < screenRunwaysRef.current.length; k++) {
+            const sr = screenRunwaysRef.current[k];
+            const dx = sr.rx2 - sr.rx1, dy = sr.ry2 - sr.ry1;
+            const lenSq = dx * dx + dy * dy;
+            if (lenSq < 16) continue;
+            let t = ((px - sr.rx1) * dx + (py - sr.ry1) * dy) / lenSq;
+            t = Math.max(0, Math.min(1, t));
+            const cx = sr.rx1 + t * dx, cy = sr.ry1 + t * dy;
+            const distSq = (px - cx) * (px - cx) + (py - cy) * (py - cy);
+            const hitDist = Math.max(16, sr.widthPx * 0.5 + 8);
+            if (distSq <= hitDist * hitDist) {
+              const ident = t <= 0.5 ? sr.le : sr.he;
+              hitRwy = { airport: sr.airport, ident, x: cx, y: cy, lengthM: sr.rw.length };
+              break;
+            }
+          }
+          hoveredRunwayRef.current = hitRwy;
         }
         if (!dragRef.current.active) return;
         const dx = e.clientX - dragRef.current.x;
@@ -1943,6 +2288,53 @@ export function InteractiveEarthGlobe({
           if (!rect) return;
           const x = e.clientX - rect.left;
           const y = e.clientY - rect.top;
+
+          // 1. First priority: Check if user clicked directly on a runway
+          let clickedRunway: { airport: Airport; ident: string; rw: Runway } | null = null;
+          let bestRwyDistSq = Infinity;
+          for (let k = 0; k < screenRunwaysRef.current.length; k++) {
+            const sr = screenRunwaysRef.current[k];
+            const dx = sr.rx2 - sr.rx1, dy = sr.ry2 - sr.ry1;
+            const lenSq = dx * dx + dy * dy;
+            if (lenSq < 16) continue;
+            let t = ((x - sr.rx1) * dx + (y - sr.ry1) * dy) / lenSq;
+            t = Math.max(0, Math.min(1, t));
+            const cx = sr.rx1 + t * dx, cy = sr.ry1 + t * dy;
+            const distSq = (x - cx) * (x - cx) + (y - cy) * (y - cy);
+            const hitDist = Math.max(20, sr.widthPx * 0.5 + 10);
+            if (distSq <= hitDist * hitDist && distSq < bestRwyDistSq) {
+              bestRwyDistSq = distSq;
+              const ident = t <= 0.5 ? sr.le : sr.he;
+              clickedRunway = { airport: sr.airport, ident, rw: sr.rw };
+            }
+          }
+
+          if (clickedRunway) {
+            const { airport, ident } = clickedRunway;
+            let role: 'dep' | 'arr' = 'dep';
+            if (selectedArrRef.current?.id === airport.id && selectedDepRef.current?.id !== airport.id) {
+              role = 'arr';
+            } else if (selectedDepRef.current?.id === airport.id) {
+              role = 'dep';
+            } else if (selectedDepRef.current && !selectedArrRef.current) {
+              role = 'arr';
+            }
+
+            onSelectRunwayRef.current?.(airport, ident, role);
+            onInspectAirport?.(airport);
+            setActiveAirport({ airport, x, y });
+
+            const a = resolveRunwayAnchor(airport, ident, role);
+            if (a) {
+              const visibleKm = Math.max(1.2, (a.lengthM / 1000) / 0.45);
+              const z = Math.max(GLOBE_AIRPORT_FOCUS_ZOOM, Math.min(MAX_GLOBE_ZOOM, (2 * GLOBE_BASE_ALT * EARTH_RADIUS_KM * GLOBE_TAN_HALF_FOV) / visibleKm));
+              setShortestTargetLatLon(a.midLat, a.midLon, z);
+              requestHighResTilesRef.current?.(a.midLat, a.midLon, z);
+            }
+            return;
+          }
+
+          // 2. Second priority: Airport center markers
           let picked: { airport: Airport; x: number; y: number } | null = null;
           let bestDistSq = 22 * 22;
           for (const pin of screenPinsRef.current) {
@@ -2003,7 +2395,7 @@ export function InteractiveEarthGlobe({
           );
         }
       }}
-      className={`relative cursor-grab active:cursor-grabbing ${className}`}
+      className={`relative ${hoveredRunwayRef.current ? 'cursor-pointer' : 'cursor-grab active:cursor-grabbing'} ${className}`}
     >
       <div ref={glMountRef} className="absolute inset-0 w-full h-full pointer-events-none" />
       <canvas
@@ -2039,7 +2431,7 @@ export function InteractiveEarthGlobe({
               <FlightIcon name="close" size={10} />
             </button>
           </div>
-          <div className="w-48 bg-[#18202c]/98 border border-white/25 flex flex-col divide-y divide-white/10 shadow-2xl">
+          <div className="w-56 bg-[#18202c]/98 border border-white/25 flex flex-col divide-y divide-white/10 shadow-2xl">
             <button
               type="button"
               onClick={() => {
@@ -2089,6 +2481,67 @@ export function InteractiveEarthGlobe({
               <span>Fly Now</span>
               <FlightIcon name="plane" size={12} />
             </button>
+            {activeAirport.airport.runways.length > 0 && (
+              <div className="bg-[#0b1220] px-2.5 py-1.5 text-slate-300">
+                <div className="text-[9px] uppercase tracking-wider text-slate-400 font-extrabold mb-1">
+                  Select Runway ({activeAirport.airport.runways.length})
+                </div>
+                <div className="flex flex-col gap-1 max-h-36 overflow-y-auto pr-0.5">
+                  {activeAirport.airport.runways.map((rw) => (
+                    <div
+                      key={`${rw.le}-${rw.he}`}
+                      className="flex items-center justify-between text-[10px] font-mono bg-white/5 px-1.5 py-1 rounded border border-white/5"
+                    >
+                      <span className="font-bold text-slate-200">
+                        {rw.le}/{rw.he} <span className="text-slate-400 font-normal">({Math.round(rw.length)}m)</span>
+                      </span>
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onSelectRunwayRef.current?.(activeAirport.airport, rw.le, 'dep');
+                            setActiveAirport(null);
+                          }}
+                          className="px-1.5 py-0.5 bg-emerald-700 hover:bg-emerald-600 text-white font-extrabold rounded text-[9px] shadow"
+                        >
+                          {rw.le} DEP
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onSelectRunwayRef.current?.(activeAirport.airport, rw.he, 'dep');
+                            setActiveAirport(null);
+                          }}
+                          className="px-1.5 py-0.5 bg-emerald-700 hover:bg-emerald-600 text-white font-extrabold rounded text-[9px] shadow"
+                        >
+                          {rw.he} DEP
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onSelectRunwayRef.current?.(activeAirport.airport, rw.le, 'arr');
+                            setActiveAirport(null);
+                          }}
+                          className="px-1.5 py-0.5 bg-amber-700 hover:bg-amber-600 text-white font-extrabold rounded text-[9px] shadow"
+                        >
+                          {rw.le} ARR
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onSelectRunwayRef.current?.(activeAirport.airport, rw.he, 'arr');
+                            setActiveAirport(null);
+                          }}
+                          className="px-1.5 py-0.5 bg-amber-700 hover:bg-amber-600 text-white font-extrabold rounded text-[9px] shadow"
+                        >
+                          {rw.he} ARR
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}
