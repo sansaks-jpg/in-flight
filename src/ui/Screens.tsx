@@ -2,8 +2,8 @@ import { ReactNode, useState } from 'react';
 import { Settings, ScoreRecord, loadScores, clearScores } from '../sim/storage';
 import { QUALITY, QUALITY_ORDER } from '../sim/quality';
 import { FlightIcon } from './FlightIcon';
-import { AircraftArtworkSvg, InteractiveEarthGlobe, MsfsTopRightBar } from './PreGameVisuals';
-import { REPO_FACTS } from './flightDispatch';
+import { InteractiveEarthGlobe, MsfsTopRightBar } from './PreGameVisuals';
+import { MENU_BENTO_TILES, REPO_FACTS } from './flightDispatch';
 
 export function Modal({
   title,
@@ -18,7 +18,7 @@ export function Modal({
 }) {
   return (
     <div
-      className="fixed inset-0 z-50 grid place-items-center bg-slate-950/80 backdrop-blur-md p-3 select-none font-sans"
+      className="fixed inset-0 z-50 grid place-items-center bg-slate-950/85 p-3 select-none font-sans animate-[fadein_.15s_ease-out]"
       onPointerDown={(e) => e.stopPropagation()}
     >
       <div
@@ -351,41 +351,64 @@ export function ScoresPanel() {
 }
 
 /* =========================================================================
-   MSFS 2024 MAIN MENU HUB (Matches Reference Image 1: image_d1816216.png)
+   MSFS 2024 MAIN MENU HUB (Matches Reference Image 1: image_77d50b99.png)
    ========================================================================= */
 
 export function StartScreen({
   onStart,
+  onOpenHangar,
   onQuick,
   settings,
   set,
   bestScore,
   ready,
+  exiting = false,
+  hideGlobe = false,
+  bgMode: controlledBgMode,
+  onToggleBgMode,
 }: {
   onStart: () => void;
+  onOpenHangar?: () => void;
   onQuick: () => void;
   settings: Settings;
   set: (p: Partial<Settings>) => void;
   bestScore: number;
   ready: boolean;
+  exiting?: boolean;
+  hideGlobe?: boolean;
+  bgMode?: 'globe' | 'airport';
+  onToggleBgMode?: () => void;
 }) {
   const [modal, setModal] = useState<null | 'scores' | 'settings' | 'controls' | 'credits'>(null);
-  const [bgMode, setBgMode] = useState<'globe' | 'airport'>('globe');
+  const [localBgMode, setLocalBgMode] = useState<'globe' | 'airport'>('globe');
+  const bgMode = controlledBgMode ?? localBgMode;
+  const toggleBgMode = onToggleBgMode ?? (() => setLocalBgMode((m) => (m === 'globe' ? 'airport' : 'globe')));
   const scoresCount = loadScores().length;
+
+  const tileWorldPhoto = MENU_BENTO_TILES[0];
+  const tileChallenge = MENU_BENTO_TILES[1];
+  const tileActivities = MENU_BENTO_TILES[2];
+  const tileCareer = MENU_BENTO_TILES[3];
+  const tileFreeFlight = MENU_BENTO_TILES[4];
+  const tileMarketplace = MENU_BENTO_TILES[5];
 
   return (
     <div
-      className="fixed inset-0 text-white select-none overflow-hidden font-sans"
+      className={`fixed inset-0 text-white select-none overflow-hidden font-sans transition-opacity duration-300 ${
+        exiting ? 'opacity-0 pointer-events-none' : 'opacity-100'
+      }`}
       style={{
         background:
           bgMode === 'globe'
-            ? 'radial-gradient(circle at 68% 52%, #0a1936 0%, #040812 58%, #020409 100%)'
-            : 'linear-gradient(90deg, rgba(3,7,15,0.92) 0%, rgba(3,7,15,0.72) 44%, rgba(3,7,15,0.18) 100%)',
+            ? hideGlobe
+              ? 'transparent'
+              : 'radial-gradient(circle at 66% 50%, #091730 0%, #03060e 58%, #010307 100%)'
+            : 'linear-gradient(90deg, rgba(2,5,11,0.92) 0%, rgba(2,5,11,0.72) 44%, rgba(2,5,11,0.18) 100%)',
       }}
     >
-      {/* Interactive 3D Earth Globe on the Right Side (Matches Image 1) */}
-      {bgMode === 'globe' && (
-        <InteractiveEarthGlobe className="absolute inset-0 w-full h-full z-0" />
+      {/* Authentic 3D Satellite Earth Globe on the Right Side (No airports included) */}
+      {bgMode === 'globe' && !hideGlobe && (
+        <InteractiveEarthGlobe mode="menu" className="absolute inset-0 w-full h-full z-0" />
       )}
 
       {/* Left contrast vignette so the MSFS Bento Grid always has crisp contrast */}
@@ -393,13 +416,13 @@ export function StartScreen({
         className="absolute inset-y-0 left-0 w-full sm:w-[680px] pointer-events-none z-10"
         style={{
           background:
-            'linear-gradient(90deg, rgba(2,5,11,0.94) 0%, rgba(2,5,11,0.82) 68%, rgba(2,5,11,0) 100%)',
+            'linear-gradient(90deg, rgba(2,4,9,0.94) 0%, rgba(2,4,9,0.78) 65%, rgba(2,4,9,0) 100%)',
         }}
       />
 
-      {/* Top-Right Pilot Banner & Utility Bar (Matches Image 1) */}
+      {/* Top-Right Pilot Banner & Utility Bar */}
       <div className="absolute top-0 right-0 z-30 flex items-center gap-3">
-        <div className="hidden md:flex items-center gap-2 text-xs font-mono text-slate-300 bg-[#0b111b]/90 border-b border-l border-white/10 px-3 h-9">
+        <div className="hidden md:flex items-center gap-2 text-xs font-mono text-slate-300 bg-[#0b1018]/90 border-b border-l border-white/10 px-3 h-8">
           <span className="font-extrabold tracking-widest text-white">IN-FLIGHT</span>
           <span className="text-slate-600">|</span>
           <span className="text-sky-300">{REPO_FACTS.totalAirports.toLocaleString()} AIRPORTS</span>
@@ -410,54 +433,37 @@ export function StartScreen({
       </div>
 
       {/* Main Layout Container: Left Bento Grid + Bottom Bar */}
-      <div className="relative z-20 h-full flex flex-col justify-between px-5 sm:px-12 pt-11 pb-5 pointer-events-none">
-        {/* Left Asymmetric MSFS 2024 Bento Tile Grid (Matches Image 1) */}
-        <div className="w-full max-w-[540px] flex-1 flex flex-col justify-center gap-2.5 pointer-events-auto max-h-[82vh]">
-          {/* TILE 1 (Full-Width Top Banner): World Photographer / World Discovery */}
+      <div
+        className={`relative z-20 h-full flex flex-col justify-between px-5 sm:px-11 pt-10 pb-4 pointer-events-none transition-all duration-300 ease-out ${
+          exiting ? '-translate-x-10 opacity-0' : 'translate-x-0 opacity-100'
+        }`}
+      >
+        {/* Left Asymmetric MSFS 2024 Bento Tile Grid (Matches Reference Image 1) */}
+        <div className="w-full max-w-[530px] flex-1 flex flex-col justify-center gap-2.5 pointer-events-auto max-h-[83vh]">
+          {/* TILE 1 (Full-Width Top Banner): World Photographer */}
           <button
             type="button"
             onClick={onStart}
-            className="w-full h-24 sm:h-28 relative overflow-hidden border border-white/15 hover:border-white/60 text-left group transition shadow-2xl"
-            style={{
-              background:
-                'linear-gradient(135deg, #0ea5e9 0%, #38bdf8 35%, #f59e0b 78%, #b45309 100%)',
-            }}
+            className="w-full h-24 sm:h-28 relative overflow-hidden border border-white/20 hover:border-white/75 text-left group transition bg-[#0c131f] shadow-2xl"
           >
-            {/* Atmospheric Savannah / Archipelago Horizon SVG Art */}
-            <svg
-              viewBox="0 0 600 140"
-              preserveAspectRatio="none"
-              className="absolute inset-0 w-full h-full"
-              aria-hidden="true"
-            >
-              {/* Distant Mountain Volcano Silhouette */}
-              <path d="M220 110 L320 45 L365 45 L460 110 Z" fill="rgba(30,41,59,0.35)" />
-              <path d="M312 50 L368 50 L380 62 L300 62 Z" fill="rgba(255,255,255,0.45)" />
-              {/* Golden Terrain Foreground */}
-              <path d="M0 105 Q150 92 320 104 T600 98 L600 140 L0 140 Z" fill="rgba(120,53,15,0.75)" />
-              <path d="M0 118 Q220 108 450 118 T600 115 L600 140 L0 140 Z" fill="rgba(20,83,45,0.85)" />
-              {/* Canopy Tree Silhouette on Left */}
-              <path d="M48 122 L52 86 M32 88 L50 96 M68 90 L50 98" stroke="#1e293b" strokeWidth="3.5" />
-              <ellipse cx="52" cy="82" rx="34" ry="8" fill="#14532d" />
-              <ellipse cx="32" cy="88" rx="18" ry="5" fill="#166534" />
-            </svg>
-            <div className="absolute inset-0 bg-gradient-to-r from-slate-950/65 via-slate-950/20 to-transparent" />
+            <img
+              src={tileWorldPhoto.imageUrl}
+              alt={tileWorldPhoto.title}
+              referrerPolicy="no-referrer"
+              className="absolute inset-0 w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
+            />
+            <div className="absolute inset-0 bg-gradient-to-r from-slate-950/70 via-slate-950/20 to-transparent" />
             <div className="relative z-10 p-3 flex flex-col justify-between h-full">
-              <div>
-                <div className="font-bold text-base sm:text-lg text-white drop-shadow">
-                  World Explorer
-                </div>
-                <div className="text-[11px] text-amber-100 font-medium drop-shadow">
-                  {REPO_FACTS.totalAirports.toLocaleString()} Real Airports · {REPO_FACTS.indonesiaAirports} in Indonesia · Satellite &amp; DEM Relief
-                </div>
+              <div className="font-bold text-base sm:text-lg text-white drop-shadow-[0_2px_4px_rgba(0,0,0,0.85)]">
+                {tileWorldPhoto.title}
               </div>
-              <div className="text-[10px] font-mono font-bold uppercase tracking-wider text-white/90">
-                OpenStreetMap MVT · Esri World Imagery
+              <div className="text-[11px] text-slate-100/95 font-medium drop-shadow-[0_1px_3px_rgba(0,0,0,0.9)]">
+                {tileWorldPhoto.subtitle}
               </div>
             </div>
           </button>
 
-          {/* MIDDLE 2-COLUMN ASYMMETRIC BENTO GRID (Matches Image 1: Challenge League + Activities on left, Career + Free Flight on right) */}
+          {/* MIDDLE 2-COLUMN ASYMMETRIC BENTO GRID */}
           <div className="grid grid-cols-2 gap-2.5">
             {/* Left Column: Challenge League (short) + Activities (tall) */}
             <div className="flex flex-col gap-2.5">
@@ -468,22 +474,21 @@ export function StartScreen({
                   set({ startMode: 'final' });
                   onQuick();
                 }}
-                className="h-24 sm:h-28 relative overflow-hidden border border-white/15 hover:border-white/60 text-left group transition shadow-xl"
-                style={{
-                  background:
-                    'linear-gradient(145deg, #334155 0%, #475569 48%, #78350f 100%)',
-                }}
+                className="h-24 sm:h-28 relative overflow-hidden border border-white/20 hover:border-white/75 text-left group transition bg-[#111926] shadow-xl"
               >
-                <div className="absolute -right-4 top-3 w-36 h-24 opacity-90 group-hover:scale-105 transition-transform">
-                  <AircraftArtworkSvg aircraftId="sky" accentColor="#f97316" bellyColor="#0f172a" />
-                </div>
-                <div className="absolute inset-0 bg-gradient-to-t from-slate-950/80 via-slate-950/25 to-transparent" />
+                <img
+                  src={tileChallenge.imageUrl}
+                  alt={tileChallenge.title}
+                  referrerPolicy="no-referrer"
+                  className="absolute inset-0 w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
+                />
+                <div className="absolute inset-0 bg-gradient-to-t from-slate-950/75 via-transparent to-slate-950/45" />
                 <div className="relative z-10 p-3 flex flex-col justify-between h-full">
-                  <div className="font-bold text-sm sm:text-base text-white drop-shadow">
-                    Challenge League
+                  <div className="font-bold text-sm sm:text-base text-white drop-shadow-[0_2px_4px_rgba(0,0,0,0.85)]">
+                    {tileChallenge.title}
                   </div>
-                  <div className="text-[10px] font-mono text-amber-200 font-semibold">
-                    14 km ILS Final Approach
+                  <div className="text-[10px] font-mono text-amber-200 font-semibold drop-shadow">
+                    {tileChallenge.subtitle}
                   </div>
                 </div>
               </button>
@@ -492,39 +497,25 @@ export function StartScreen({
               <button
                 type="button"
                 onClick={onStart}
-                className="h-40 sm:h-44 relative overflow-hidden border border-white/15 hover:border-white/60 text-left group transition shadow-xl"
-                style={{
-                  background:
-                    'linear-gradient(165deg, #1d4ed8 0%, #0284c7 52%, #0f172a 100%)',
-                }}
+                className="h-40 sm:h-44 relative overflow-hidden border border-white/20 hover:border-white/75 text-left group transition bg-[#0d192b] shadow-xl"
               >
-                {/* Pylon & Coastal Bay Vector Backdrop */}
-                <svg
-                  viewBox="0 0 260 190"
-                  className="absolute inset-0 w-full h-full"
-                  aria-hidden="true"
-                >
-                  <path d="M110 150 Q155 85 190 150 Z" fill="rgba(15,23,42,0.45)" />
-                  <rect x="0" y="148" width="260" height="42" fill="rgba(3,105,161,0.75)" />
-                  {/* Air Race / Approach Pylon */}
-                  <path d="M202 155 L212 42 L222 42 L232 155 Z" fill="#f8fafc" />
-                  <path d="M208 65 L225 65 L227 88 L206 88 Z" fill="#ef4444" />
-                  <path d="M210 42 L222 42 L224 55 L209 55 Z" fill="#ef4444" />
-                </svg>
-                <div className="absolute inset-x-2 top-8 h-24 group-hover:-translate-y-1 transition-transform">
-                  <AircraftArtworkSvg aircraftId="swift" accentColor="#facc15" bellyColor="#1e3a8a" />
-                </div>
-                <div className="absolute inset-0 bg-gradient-to-t from-slate-950/90 via-transparent to-slate-950/30" />
+                <img
+                  src={tileActivities.imageUrl}
+                  alt={tileActivities.title}
+                  referrerPolicy="no-referrer"
+                  className="absolute inset-0 w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
+                />
+                <div className="absolute inset-0 bg-gradient-to-t from-slate-950/85 via-transparent to-slate-950/40" />
                 <div className="relative z-10 p-3 flex flex-col justify-between h-full">
-                  <div className="font-bold text-sm sm:text-base text-white drop-shadow">
-                    Activities
+                  <div className="font-bold text-sm sm:text-base text-white drop-shadow-[0_2px_4px_rgba(0,0,0,0.85)]">
+                    {tileActivities.title}
                   </div>
                   <div>
-                    <div className="text-xs font-extrabold tracking-wider uppercase text-amber-300">
-                      ARCHIPELAGO &amp; ALPS TOURS
+                    <div className="text-[11px] font-extrabold tracking-wider uppercase text-amber-300 drop-shadow">
+                      {tileActivities.badge}
                     </div>
-                    <div className="text-[10px] text-slate-200 mt-0.5">
-                      21 Curated Indonesia &amp; World Routes
+                    <div className="text-[10px] text-slate-100 mt-0.5 drop-shadow">
+                      {tileActivities.subtitle}
                     </div>
                   </div>
                 </div>
@@ -537,58 +528,50 @@ export function StartScreen({
               <button
                 type="button"
                 onClick={() => setModal('scores')}
-                className="h-40 sm:h-44 relative overflow-hidden border border-white/15 hover:border-white/60 text-left group transition shadow-xl"
-                style={{
-                  background:
-                    'linear-gradient(155deg, #334155 0%, #1e293b 55%, #0f172a 100%)',
-                }}
+                className="h-40 sm:h-44 relative overflow-hidden border border-white/20 hover:border-white/75 text-left group transition bg-[#121a26] shadow-xl"
               >
-                <div className="absolute inset-x-0 bottom-5 h-28 opacity-90 group-hover:scale-105 transition-transform">
-                  <AircraftArtworkSvg aircraftId="trek" accentColor="#ea580c" bellyColor="#0f172a" />
-                </div>
-                {/* Captain Shoulder Epaulette Bars Graphic */}
-                <div className="absolute bottom-3 right-3 w-9 h-12 bg-[#0f172a] border border-amber-400/40 p-1.5 flex flex-col justify-center gap-1">
-                  <span className="h-1 w-full bg-amber-400" />
-                  <span className="h-1 w-full bg-amber-400" />
-                  <span className="h-1 w-full bg-amber-400" />
-                  <span className="h-1 w-full bg-amber-400" />
-                </div>
-                <div className="absolute inset-0 bg-gradient-to-t from-slate-950/85 via-transparent to-slate-950/35" />
+                <img
+                  src={tileCareer.imageUrl}
+                  alt={tileCareer.title}
+                  referrerPolicy="no-referrer"
+                  className="absolute inset-0 w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
+                />
+                <div className="absolute inset-0 bg-gradient-to-t from-slate-950/85 via-transparent to-slate-950/40" />
                 <div className="relative z-10 p-3 flex flex-col justify-between h-full">
-                  <div className="font-bold text-sm sm:text-base text-white drop-shadow">
-                    Career
+                  <div className="font-bold text-sm sm:text-base text-white drop-shadow-[0_2px_4px_rgba(0,0,0,0.85)]">
+                    {tileCareer.title}
                   </div>
                   <div>
-                    <div className="text-xs font-bold text-white">
+                    <div className="text-xs font-bold text-white drop-shadow">
                       Pilot Logbook · {scoresCount} Flights
                     </div>
-                    <div className="text-[11px] font-mono text-amber-300 font-bold">
+                    <div className="text-[11px] font-mono text-amber-300 font-bold drop-shadow">
                       Best Score: {bestScore.toLocaleString()} pts
                     </div>
                   </div>
                 </div>
               </button>
 
-              {/* Free Flight Tile (Matches Image 1 primary selected tile) */}
+              {/* Free Flight Tile (Primary selected tile matching Image 1) */}
               <button
                 type="button"
                 data-start="true"
                 onClick={onStart}
-                className="h-24 sm:h-28 relative overflow-hidden border-2 border-white hover:border-sky-300 text-left group transition shadow-[0_0_25px_rgba(255,255,255,0.2)]"
-                style={{
-                  background:
-                    'linear-gradient(145deg, #93c5fd 0%, #60a5fa 48%, #1d4ed8 100%)',
-                }}
+                className="h-24 sm:h-28 relative overflow-hidden border-2 border-white hover:border-sky-300 text-left group transition bg-[#1e3a6e] shadow-[0_0_24px_rgba(255,255,255,0.22)]"
               >
-                <div className="absolute -right-2 top-2 w-48 h-24 group-hover:scale-105 transition-transform">
-                  <AircraftArtworkSvg aircraftId="sky" accentColor="#0284c7" bellyColor="#1e3a8a" />
-                </div>
+                <img
+                  src={tileFreeFlight.imageUrl}
+                  alt={tileFreeFlight.title}
+                  referrerPolicy="no-referrer"
+                  className="absolute inset-0 w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
+                />
+                <div className="absolute inset-0 bg-gradient-to-r from-white/20 via-transparent to-slate-950/25" />
                 <div className="relative z-10 p-3 flex flex-col justify-between h-full">
-                  <div className="font-extrabold text-sm sm:text-base text-slate-950 drop-shadow-sm">
-                    Free Flight
+                  <div className="font-extrabold text-sm sm:text-base text-slate-950 drop-shadow-[0_1px_2px_rgba(255,255,255,0.85)]">
+                    {tileFreeFlight.title}
                   </div>
                   <div className="inline-flex items-center gap-1 px-2 py-0.5 bg-slate-950/80 text-white text-[10px] font-bold uppercase tracking-wider w-fit">
-                    <span>World Map &amp; Dispatch</span>
+                    <span>{tileFreeFlight.subtitle}</span>
                     <FlightIcon name="chevron" size={11} />
                   </div>
                 </div>
@@ -597,51 +580,43 @@ export function StartScreen({
           </div>
 
           {/* TILE 6 (Full-Width Bottom Showcase Tile with Caption Footer, matching Marketplace in Image 1) */}
-          <div className="w-full border border-white/15 overflow-hidden bg-[#0b1018]/95 shadow-2xl">
+          <div className="w-full border border-white/20 overflow-hidden bg-[#0a0f17]/95 shadow-2xl">
             <button
               type="button"
-              onClick={onStart}
-              className="w-full h-24 sm:h-28 relative overflow-hidden text-left block group"
-              style={{
-                background:
-                  'linear-gradient(135deg, #1e293b 0%, #475569 45%, #b45309 85%, #78350f 100%)',
-              }}
+              onClick={onOpenHangar || onStart}
+              className="w-full h-24 sm:h-28 relative overflow-hidden text-left block group bg-[#121924]"
             >
-              {/* Green MSFS Chevron Accents on Left */}
-              <div
-                className="absolute inset-y-0 left-0 w-36 opacity-35"
-                style={{
-                  background:
-                    'linear-gradient(115deg, #16a34a 0%, #22c55e 45%, transparent 45%)',
-                }}
+              <img
+                src={tileMarketplace.imageUrl}
+                alt={tileMarketplace.title}
+                referrerPolicy="no-referrer"
+                className="absolute inset-0 w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
               />
-              <div className="absolute left-28 right-4 top-2 bottom-1 flex items-center justify-center group-hover:scale-105 transition-transform">
-                <AircraftArtworkSvg aircraftId="sky" accentColor="#eab308" bellyColor="#1e3a8a" />
-              </div>
+              <div className="absolute inset-0 bg-gradient-to-r from-slate-950/65 via-transparent to-slate-950/35" />
               <div className="absolute top-2.5 left-3.5 z-10">
-                <div className="font-bold text-sm sm:text-base text-white drop-shadow">
-                  Aircraft Hangar &amp; World Scenery
+                <div className="font-bold text-sm sm:text-base text-white drop-shadow-[0_2px_4px_rgba(0,0,0,0.9)]">
+                  {tileMarketplace.title}
                 </div>
-                <div className="text-[10px] font-semibold text-emerald-300 uppercase tracking-wider mt-0.5">
-                  3 Aircraft · 7 Liveries
+                <div className="text-[10px] font-semibold text-emerald-300 uppercase tracking-wider mt-0.5 drop-shadow">
+                  {tileMarketplace.subtitle}
                 </div>
               </div>
             </button>
-            <div className="px-3.5 py-2 bg-[#080c12] text-[11px] text-slate-300 leading-snug border-t border-white/10">
-              Fly 3 detailed aircraft (<b>Aero Swift RG</b>, <b>Aero Trek T2</b>, <b>Skyliner 320</b>) with glass PFD avionics, CAT-III ILS autoland, and procedural 3D cities across {REPO_FACTS.totalAirports.toLocaleString()} airports.
+            <div className="px-3.5 py-2 bg-[#070b11] text-[11px] text-slate-300 leading-snug border-t border-white/10">
+              Check out the Aircraft Hangar &amp; World Scenery to configure <b>Aero Swift RG</b>, <b>Aero Trek T2</b>, and <b>Skyliner 320</b> across {REPO_FACTS.totalAirports.toLocaleString()} airports.
             </div>
           </div>
         </div>
 
         {/* Bottom Action Bar (Matches Image 1 bottom-left action links + preserves QUICK FLIGHT for automated tests) */}
-        <div className="pt-3 flex flex-wrap items-center justify-between gap-3 pointer-events-auto">
+        <div className="pt-2.5 flex flex-wrap items-center justify-between gap-3 pointer-events-auto">
           <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
               onClick={onQuick}
-              className="px-4 py-2 bg-[#eab308] hover:bg-[#facc15] text-slate-950 font-extrabold text-xs tracking-wide transition flex items-center gap-1.5 shadow-lg"
+              className="px-4 py-1.5 bg-[#eab308] hover:bg-[#facc15] text-slate-950 font-extrabold text-xs tracking-wide transition flex items-center gap-1.5 shadow-lg"
             >
-              <FlightIcon name="bolt" size={14} />
+              <FlightIcon name="bolt" size={13} />
               <span>QUICK FLIGHT</span>
               {!ready && <span className="text-[10px] font-mono opacity-75">(Ready)</span>}
             </button>
@@ -649,16 +624,16 @@ export function StartScreen({
             <button
               type="button"
               onClick={onStart}
-              className="px-4 py-2 bg-[#1d6ae5] hover:bg-[#2572eb] text-white font-bold text-xs transition flex items-center gap-1.5 shadow-lg"
+              className="px-4 py-1.5 bg-[#1d6ae5] hover:bg-[#2572eb] text-white font-bold text-xs transition flex items-center gap-1.5 shadow-lg"
             >
-              <FlightIcon name="globe" size={14} />
+              <FlightIcon name="globe" size={13} />
               <span>World Flight Planner</span>
             </button>
 
             <button
               type="button"
               onClick={() => setModal('controls')}
-              className="px-3.5 py-2 bg-white/5 hover:bg-white/15 border border-white/15 text-xs font-bold text-slate-200 hover:text-white transition"
+              className="px-3 py-1.5 bg-transparent hover:bg-white/10 text-xs font-bold text-slate-200 hover:text-white transition"
             >
               Flight Controls
             </button>
@@ -666,7 +641,7 @@ export function StartScreen({
             <button
               type="button"
               onClick={() => setModal('settings')}
-              className="px-3.5 py-2 bg-white/5 hover:bg-white/15 border border-white/15 text-xs font-bold text-slate-200 hover:text-white transition"
+              className="px-3 py-1.5 bg-transparent hover:bg-white/10 text-xs font-bold text-slate-200 hover:text-white transition"
             >
               Settings
             </button>
@@ -674,7 +649,7 @@ export function StartScreen({
             <button
               type="button"
               onClick={() => setModal('credits')}
-              className="px-3.5 py-2 bg-white/5 hover:bg-white/15 border border-white/15 text-xs font-bold text-slate-200 hover:text-white transition"
+              className="px-3 py-1.5 bg-transparent hover:bg-white/10 text-xs font-bold text-slate-200 hover:text-white transition"
             >
               Release notes
             </button>
@@ -682,10 +657,10 @@ export function StartScreen({
 
           <button
             type="button"
-            onClick={() => setBgMode((m) => (m === 'globe' ? 'airport' : 'globe'))}
-            className="px-3.5 py-2 bg-[#0d131c]/90 hover:bg-white/15 border border-white/20 text-xs font-bold text-sky-300 flex items-center gap-1.5 transition"
+            onClick={toggleBgMode}
+            className="px-3.5 py-1.5 bg-[#0d131c]/90 hover:bg-white/15 border border-white/20 text-xs font-bold text-sky-300 flex items-center gap-1.5 transition"
           >
-            <FlightIcon name={bgMode === 'globe' ? 'camera' : 'globe'} size={14} />
+            <FlightIcon name={bgMode === 'globe' ? 'camera' : 'globe'} size={13} />
             <span>{bgMode === 'globe' ? 'Live 3D Airport Preview' : '3D Earth Globe View'}</span>
           </button>
         </div>
@@ -730,3 +705,4 @@ export function StartScreen({
     </div>
   );
 }
+

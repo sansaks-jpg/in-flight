@@ -4,6 +4,7 @@ import { Settings } from '../sim/storage';
 import { MapPanel } from './MapPanel';
 import { Airport } from '../data/airports';
 import { clamp } from '../sim/geo';
+import { FlightIcon, FlightIconName } from './FlightIcon';
 
 const fmtT = (min: number) =>
   isFinite(min) && min < 6000
@@ -23,7 +24,7 @@ export function MsfsFloatingWindow({
   headerExtras,
 }: {
   title: string;
-  icon: string;
+  icon: FlightIconName;
   onClose: () => void;
   initialPos: { x: number; y: number };
   width?: number;
@@ -79,7 +80,7 @@ export function MsfsFloatingWindow({
         className="flex items-center justify-between px-3.5 py-2.5 bg-white/10 border-b border-white/15 cursor-grab active:cursor-grabbing hover:bg-white/15 transition-colors"
       >
         <div className="flex items-center gap-2">
-          <span className="text-base">{icon}</span>
+          <FlightIcon name={icon} size={15} className="text-cyan-300" />
           <span className="text-xs font-black tracking-widest uppercase text-cyan-300 drop-shadow">
             {title}
           </span>
@@ -91,14 +92,14 @@ export function MsfsFloatingWindow({
             className="w-6 h-6 rounded-lg bg-white/10 hover:bg-white/20 grid place-items-center text-xs font-bold text-slate-300 hover:text-white transition"
             title={minimized ? 'Expand' : 'Minimize'}
           >
-            {minimized ? '□' : '–'}
+            <FlightIcon name={minimized ? 'expand' : 'minus'} size={12} />
           </button>
           <button
             onClick={onClose}
             className="w-6 h-6 rounded-lg bg-rose-500/20 hover:bg-rose-500/40 border border-rose-400/30 grid place-items-center text-xs font-bold text-rose-300 hover:text-white transition"
             title="Close Window"
           >
-            ✕
+            <FlightIcon name="close" size={12} />
           </button>
         </div>
       </div>
@@ -221,9 +222,9 @@ export function WorldMarkersOverlay({ markers }: { markers: WorldScreenMarker[] 
           >
             <span
               style={{ transform: `rotate(${m.angleDeg}deg)` }}
-              className="inline-block transition-transform text-xs"
+              className="inline-flex transition-transform"
             >
-              ➤
+              <FlightIcon name="arrowRight" size={11} />
             </span>
             <span>{m.label}</span>
             <span className="text-slate-300 font-normal">{m.distNm.toFixed(0)} NM</span>
@@ -253,7 +254,7 @@ export function AtcWindow({
   return (
     <MsfsFloatingWindow
       title="ATC Communications"
-      icon="📻"
+      icon="radio"
       onClose={onClose}
       initialPos={{ x: 20, y: 70 }}
       width={390}
@@ -369,7 +370,7 @@ export function CameraWindow({
   return (
     <MsfsFloatingWindow
       title="Camera & Showcase"
-      icon="🎥"
+      icon="camera"
       onClose={onClose}
       initialPos={{ x: 60, y: 70 }}
       width={360}
@@ -385,29 +386,29 @@ export function CameraWindow({
               onClick={() => game.setCockpitSubview('pilot')}
               className="p-2 rounded-xl bg-white/5 hover:bg-white/15 border border-white/10 text-left font-bold text-xs transition"
             >
-              👨‍✈️ Pilot Eye
+              Pilot Eye
               <span className="block text-[9px] text-slate-400 font-normal">Standard forward view</span>
             </button>
             <button
               onClick={() => game.setCockpitSubview('instruments')}
               className="p-2 rounded-xl bg-white/5 hover:bg-white/15 border border-white/10 text-left font-bold text-xs transition"
             >
-              🎛️ Close Instruments
+              Close Instruments
               <span className="block text-[9px] text-slate-400 font-normal">PFD / MFD zoom</span>
             </button>
             <button
               onClick={() => game.setCockpitSubview('copilot')}
               className="p-2 rounded-xl bg-white/5 hover:bg-white/15 border border-white/10 text-left font-bold text-xs transition"
             >
-              🧑‍✈️ Copilot Seat
+              Copilot Seat
               <span className="block text-[9px] text-slate-400 font-normal">Right chair view</span>
             </button>
             <button
               onClick={() => game.setCockpitSubview('overhead')}
               className="p-2 rounded-xl bg-white/5 hover:bg-white/15 border border-white/10 text-left font-bold text-xs transition"
             >
-              ⬆️ Overhead Panel
-              <span className="block text-[9px] text-slate-400 font-normal">Light & system switches</span>
+              Overhead Panel
+              <span className="block text-[9px] text-slate-400 font-normal">Light &amp; system switches</span>
             </button>
           </div>
         </div>
@@ -415,32 +416,35 @@ export function CameraWindow({
         {/* External & Cinematic Showcase */}
         <div>
           <span className="text-[9px] text-slate-400 uppercase tracking-widest font-bold block mb-1.5">
-            External & Cinematic Views
+            External &amp; Cinematic Views
           </span>
           <div className="grid grid-cols-3 gap-1.5">
             <button
               onClick={() => game.setView('chase')}
-              className={`p-2 rounded-xl border text-xs font-bold transition text-center ${
+              className={`p-2 rounded-xl border text-xs font-bold transition flex items-center justify-center gap-1.5 ${
                 hud.view === 'chase' ? 'bg-cyan-500/25 border-cyan-400 text-cyan-200' : 'bg-white/5 border-white/10 text-slate-300 hover:bg-white/15'
               }`}
             >
-              ✈️ Chase
+              <FlightIcon name="plane" size={12} />
+              <span>Chase</span>
             </button>
             <button
               onClick={() => game.setView('spotter')}
-              className={`p-2 rounded-xl border text-xs font-bold transition text-center ${
+              className={`p-2 rounded-xl border text-xs font-bold transition flex items-center justify-center gap-1.5 ${
                 hud.view === 'spotter' ? 'bg-cyan-500/25 border-cyan-400 text-cyan-200' : 'bg-white/5 border-white/10 text-slate-300 hover:bg-white/15'
               }`}
             >
-              🔭 Spotter
+              <FlightIcon name="camera" size={12} />
+              <span>Spotter</span>
             </button>
             <button
               onClick={() => game.setView('window')}
-              className={`p-2 rounded-xl border text-xs font-bold transition text-center ${
+              className={`p-2 rounded-xl border text-xs font-bold transition flex items-center justify-center gap-1.5 ${
                 hud.view === 'window' ? 'bg-cyan-500/25 border-cyan-400 text-cyan-200' : 'bg-white/5 border-white/10 text-slate-300 hover:bg-white/15'
               }`}
             >
-              🪟 Cabin
+              <FlightIcon name="display" size={12} />
+              <span>Cabin</span>
             </button>
           </div>
         </div>
@@ -469,7 +473,7 @@ export function CameraWindow({
 
         {/* Freelook Tip */}
         <div className="text-[10px] text-slate-400 bg-white/5 p-2 rounded-lg border border-white/10 flex items-center gap-2">
-          <span>💡</span>
+          <FlightIcon name="info" size={13} className="text-cyan-300 shrink-0" />
           <span>Hold right-click or drag to rotate view freely. Center dot aids orientation.</span>
         </div>
       </div>
@@ -508,7 +512,7 @@ export function ChecklistWindow({
   return (
     <MsfsFloatingWindow
       title="Checklist & Objectives"
-      icon="📋"
+      icon="list"
       onClose={onClose}
       initialPos={{ x: 100, y: 70 }}
       width={400}
@@ -547,9 +551,10 @@ export function ChecklistWindow({
         </div>
         <button
           onClick={() => game.autoCompletePhaseChecklist(selectedPhase)}
-          className="px-2.5 py-1 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/40 border border-emerald-400/40 text-emerald-300 text-xs font-bold transition"
+          className="px-2.5 py-1 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/40 border border-emerald-400/40 text-emerald-300 text-xs font-bold transition flex items-center gap-1"
         >
-          ✓ Complete All
+          <FlightIcon name="check" size={12} />
+          <span>Complete All</span>
         </button>
       </div>
 
@@ -576,7 +581,7 @@ export function ChecklistWindow({
                       : 'border-white/30 text-transparent'
                   }`}
                 >
-                  ✓
+                  <FlightIcon name="check" size={12} />
                 </div>
                 <div>
                   <div className={`text-xs font-bold ${it.done ? 'line-through text-slate-400' : 'text-white'}`}>
@@ -615,7 +620,7 @@ export function WeatherWindow({
   return (
     <MsfsFloatingWindow
       title="Weather & Time of Day"
-      icon="⛅"
+      icon="cloud"
       onClose={onClose}
       initialPos={{ x: 140, y: 70 }}
       width={380}
@@ -629,15 +634,17 @@ export function WeatherWindow({
           <div className="grid grid-cols-2 gap-1.5">
             <button
               onClick={() => game.setTimeOfDay('day')}
-              className="p-2.5 rounded-xl bg-white/5 hover:bg-white/15 border border-white/10 text-center font-bold text-xs transition"
+              className="p-2.5 rounded-xl bg-white/5 hover:bg-white/15 border border-white/10 text-center font-bold text-xs transition flex items-center justify-center gap-1.5"
             >
-              ☀️ Bright Daylight
+              <FlightIcon name="sun" size={13} className="text-amber-300" />
+              <span>Bright Daylight</span>
             </button>
             <button
               onClick={() => game.setTimeOfDay('sunset')}
-              className="p-2.5 rounded-xl bg-white/5 hover:bg-white/15 border border-white/10 text-center font-bold text-xs transition"
+              className="p-2.5 rounded-xl bg-white/5 hover:bg-white/15 border border-white/10 text-center font-bold text-xs transition flex items-center justify-center gap-1.5"
             >
-              🌇 Golden Sunset
+              <FlightIcon name="sunset" size={13} className="text-orange-300" />
+              <span>Golden Sunset</span>
             </button>
           </div>
         </div>
@@ -650,21 +657,24 @@ export function WeatherWindow({
           <div className="grid grid-cols-3 gap-1.5">
             <button
               onClick={() => game.setWeather('clear')}
-              className="p-2 rounded-xl bg-white/5 hover:bg-white/15 border border-white/10 text-center font-bold text-xs transition"
+              className="p-2 rounded-xl bg-white/5 hover:bg-white/15 border border-white/10 text-center font-bold text-xs transition flex items-center justify-center gap-1"
             >
-              ☀️ Clear
+              <FlightIcon name="sun" size={12} className="text-amber-300" />
+              <span>Clear</span>
             </button>
             <button
               onClick={() => game.setWeather('scattered')}
-              className="p-2 rounded-xl bg-white/5 hover:bg-white/15 border border-white/10 text-center font-bold text-xs transition"
+              className="p-2 rounded-xl bg-white/5 hover:bg-white/15 border border-white/10 text-center font-bold text-xs transition flex items-center justify-center gap-1"
             >
-              ⛅ Scattered
+              <FlightIcon name="cloud" size={12} className="text-sky-300" />
+              <span>Scattered</span>
             </button>
             <button
               onClick={() => game.setWeather('overcast')}
-              className="p-2 rounded-xl bg-white/5 hover:bg-white/15 border border-white/10 text-center font-bold text-xs transition"
+              className="p-2 rounded-xl bg-white/5 hover:bg-white/15 border border-white/10 text-center font-bold text-xs transition flex items-center justify-center gap-1"
             >
-              ☁️ Overcast
+              <FlightIcon name="cloud" size={12} className="text-slate-300" />
+              <span>Overcast</span>
             </button>
           </div>
         </div>
@@ -679,19 +689,19 @@ export function WeatherWindow({
               onClick={() => game.setWindPreset('calm')}
               className="p-2 rounded-xl bg-white/5 hover:bg-white/15 border border-white/10 text-center font-bold text-xs transition"
             >
-              🍃 Calm (0 kt)
+              Calm (0 kt)
             </button>
             <button
               onClick={() => game.setWindPreset('light')}
               className="p-2 rounded-xl bg-white/5 hover:bg-white/15 border border-white/10 text-center font-bold text-xs transition"
             >
-              💨 Breeze (8 kt)
+              Breeze (8 kt)
             </button>
             <button
               onClick={() => game.setWindPreset('strong')}
               className="p-2 rounded-xl bg-white/5 hover:bg-white/15 border border-white/10 text-center font-bold text-xs transition"
             >
-              🌪️ Cross (22 kt)
+              Cross (22 kt)
             </button>
           </div>
         </div>
@@ -738,13 +748,14 @@ export function EfbWindow({
   return (
     <MsfsFloatingWindow
       title="Electronic Flight Bag (EFB)"
-      icon="🗺️"
+      icon="map"
       onClose={onClose}
       initialPos={{ x: 180, y: 70 }}
       width={460}
       headerExtras={
         <div className="flex items-center gap-1 mr-2 text-[9px] font-mono text-emerald-300">
-          <span>● GPS 3D</span>
+          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block" />
+          <span>GPS 3D</span>
           <span>· 98% BAT</span>
         </div>
       }
@@ -943,7 +954,7 @@ export function CopilotWindow({
   return (
     <MsfsFloatingWindow
       title="AI Copilot & Assistances"
-      icon="🤖"
+      icon="autopilot"
       onClose={onClose}
       initialPos={{ x: 220, y: 70 }}
       width={360}
@@ -961,7 +972,10 @@ export function CopilotWindow({
                 hud.show3dGates ? 'bg-cyan-500/20 border-cyan-400 text-cyan-200' : 'bg-white/5 border-white/10 text-slate-300 hover:bg-white/15'
               }`}
             >
-              <span>🚪 3D Approach Corridor Gates</span>
+              <span className="flex items-center gap-1.5">
+                <FlightIcon name="target" size={13} />
+                <span>3D Approach Corridor Gates</span>
+              </span>
               <span className="font-mono text-[10px]">{hud.show3dGates ? 'ENABLED' : 'OFF'}</span>
             </button>
             <button
@@ -970,7 +984,10 @@ export function CopilotWindow({
                 hud.showTaxiRibbon ? 'bg-cyan-500/20 border-cyan-400 text-cyan-200' : 'bg-white/5 border-white/10 text-slate-300 hover:bg-white/15'
               }`}
             >
-              <span>🚕 3D Taxi Ribbon Chevrons</span>
+              <span className="flex items-center gap-1.5">
+                <FlightIcon name="route" size={13} />
+                <span>3D Taxi Ribbon Chevrons</span>
+              </span>
               <span className="font-mono text-[10px]">{hud.showTaxiRibbon ? 'ENABLED' : 'OFF'}</span>
             </button>
           </div>
@@ -983,7 +1000,7 @@ export function CopilotWindow({
           </span>
           <div className="p-2.5 rounded-xl bg-white/5 border border-white/10 space-y-2">
             <div className="flex items-center justify-between">
-              <span className="text-slate-300">Auto-Rudder & Coordination</span>
+              <span className="text-slate-300">Auto-Rudder &amp; Coordination</span>
               <span className="text-emerald-400 font-mono font-bold">ACTIVE</span>
             </div>
             <div className="flex items-center justify-between">
@@ -1001,19 +1018,21 @@ export function CopilotWindow({
         <div className="border-t border-white/10 pt-2.5 grid grid-cols-2 gap-1.5">
           <button
             onClick={() => game.action('ap')}
-            className={`p-2 rounded-xl border text-xs font-bold text-center transition ${
+            className={`p-2 rounded-xl border text-xs font-bold flex items-center justify-center gap-1.5 transition ${
               hud.ap.on ? 'bg-cyan-400 text-slate-950 border-cyan-300' : 'bg-white/10 border-white/15 text-slate-200'
             }`}
           >
-            {hud.ap.on ? '✓ AP DISENGAGE' : '🕹️ ENGAGE AP'}
+            <FlightIcon name={hud.ap.on ? 'check' : 'autopilot'} size={13} />
+            <span>{hud.ap.on ? 'AP DISENGAGE' : 'ENGAGE AP'}</span>
           </button>
           <button
             onClick={() => game.action('apnav')}
-            className={`p-2 rounded-xl border text-xs font-bold text-center transition ${
+            className={`p-2 rounded-xl border text-xs font-bold flex items-center justify-center gap-1.5 transition ${
               hud.ap.nav ? 'bg-emerald-400 text-slate-950 border-emerald-300' : 'bg-white/10 border-white/15 text-slate-200'
             }`}
           >
-            🧭 LNAV ROUTE
+            <FlightIcon name="compass" size={13} />
+            <span>LNAV ROUTE</span>
           </button>
         </div>
       </div>
@@ -1036,7 +1055,7 @@ export function SystemsWindow({
   return (
     <MsfsFloatingWindow
       title="Aircraft Systems & Fuel"
-      icon="⚙️"
+      icon="settings"
       onClose={onClose}
       initialPos={{ x: 260, y: 70 }}
       width={370}
@@ -1124,14 +1143,18 @@ export function SystemsWindow({
                 hud.seatbelt ? 'bg-amber-500/25 border-amber-400 text-amber-200' : 'bg-white/5 border-white/10 text-slate-300'
               }`}
             >
-              <span>💺 Fasten Belts</span>
+              <span className="flex items-center gap-1.5">
+                <FlightIcon name="bell" size={12} />
+                <span>Fasten Belts</span>
+              </span>
               <span className="font-mono text-[9px]">{hud.seatbelt ? 'ON' : 'OFF'}</span>
             </button>
             <button
               onClick={() => game.action('pa')}
-              className="p-2 rounded-xl bg-white/5 hover:bg-white/15 border border-white/10 text-xs font-bold transition text-left"
+              className="p-2 rounded-xl bg-white/5 hover:bg-white/15 border border-white/10 text-xs font-bold transition text-left flex items-center gap-1.5"
             >
-              📢 Captain PA
+              <FlightIcon name="volume" size={12} />
+              <span>Captain PA</span>
             </button>
           </div>
         </div>
@@ -1198,7 +1221,7 @@ export function MsfsExternalHud({
 
           {/* Wind readout */}
           <div className="mt-1.5 text-[9px] font-mono text-cyan-300 flex items-center gap-1">
-            <span>💨</span>
+            <FlightIcon name="wind" size={11} />
             <span>{hud.wind.kt} KT</span>
           </div>
         </div>

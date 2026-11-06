@@ -24,6 +24,175 @@ export const REPO_FACTS: RepoFacts = {
   vectorSource: 'OpenStreetMap & OpenFreeMap MVT',
 };
 
+export const AIRCRAFT_STUDIO_IMAGES: Record<string, string> = {
+  sky: '/src/assets/images/aircraft_sky_320_1793903495799.jpg',
+  trek: '/src/assets/images/aircraft_trek_turboprop_1793903495847.jpg',
+  swift: '/src/assets/images/aircraft_swift_piston_1793903496888.jpg',
+};
+
+export interface MenuBentoTile {
+  id: 'world_photographer' | 'challenge_league' | 'activities' | 'career' | 'free_flight' | 'marketplace';
+  title: string;
+  subtitle: string;
+  badge?: string;
+  imageUrl: string;
+  action: 'planner' | 'challenge' | 'career' | 'hangar';
+}
+
+export const MENU_BENTO_TILES: MenuBentoTile[] = [
+  {
+    id: 'world_photographer',
+    title: 'World Photographer',
+    subtitle: `${AIRPORTS.length.toLocaleString()} Real Airports · ${AIRPORTS.filter((a) => a.country === 'ID').length} in Indonesia · Satellite & DEM Relief`,
+    badge: 'Esri World Imagery · AWS Terrarium DEM',
+    imageUrl: '/src/assets/images/menu_world_photographer_1793903487903.jpg',
+    action: 'planner',
+  },
+  {
+    id: 'challenge_league',
+    title: 'Challenge League',
+    subtitle: '14 km ILS Final Approach',
+    imageUrl: '/src/assets/images/menu_challenge_league_1793903489548.jpg',
+    action: 'challenge',
+  },
+  {
+    id: 'activities',
+    title: 'Activities',
+    subtitle: '21 Curated Indonesia & World Routes',
+    badge: 'ARCHIPELAGO & ALPS TOURS',
+    imageUrl: '/src/assets/images/menu_activities_1793903490541.jpg',
+    action: 'planner',
+  },
+  {
+    id: 'career',
+    title: 'Career',
+    subtitle: 'Pilot Logbook & Flight Certifications',
+    imageUrl: '/src/assets/images/menu_career_1793903492122.jpg',
+    action: 'career',
+  },
+  {
+    id: 'free_flight',
+    title: 'Free Flight',
+    subtitle: 'World Map & Dispatch',
+    imageUrl: '/src/assets/images/menu_free_flight_1793903493342.jpg',
+    action: 'planner',
+  },
+  {
+    id: 'marketplace',
+    title: 'Marketplace',
+    subtitle: '3 Aircraft · 7 Liveries · Worldwide Scenery',
+    imageUrl: '/src/assets/images/menu_marketplace_1793903494323.jpg',
+    action: 'hangar',
+  },
+];
+
+/** Converts a Web Mercator tile Y index at zoom z to geodetic latitude in degrees (-85.0511..85.0511). */
+export function mercatorTileYToLatDeg(ty: number, z: number): number {
+  const n = Math.PI - (2 * Math.PI * ty) / Math.pow(2, z);
+  return (180 / Math.PI) * Math.atan(0.5 * (Math.exp(n) - Math.exp(-n)));
+}
+
+/** Maps a geodetic latitude (-90..90) to a vertical pixel row (0..height) on an equirectangular texture. */
+export function latDegToEquirectangularY(latDeg: number, height: number): number {
+  const clamped = Math.max(-90, Math.min(90, latDeg));
+  return ((90 - clamped) / 180) * height;
+}
+
+/** Converts geodetic (latDeg, lonDeg) to 3D unit-sphere coordinates matching Three.js SphereGeometry UV layout. */
+export function latLonToUnitSphere(latDeg: number, lonDeg: number): [number, number, number] {
+  const latRad = latDeg * (Math.PI / 180);
+  const lonRad = lonDeg * (Math.PI / 180);
+  return [
+    Math.cos(latRad) * Math.cos(lonRad),
+    Math.sin(latRad),
+    -Math.cos(latRad) * Math.sin(lonRad),
+  ];
+}
+
+/**
+ * Computes the Three.js Euler rotation (with order 'XYZ' so R = R_x(rx) * R_y(ry))
+ * that brings (latRad, lonRad) on the unit sphere to [0, 0, +1] facing the camera with North upright [0, +1, 0].
+ */
+export function computeGlobeEulerForLatLon(
+  latRad: number,
+  lonRad: number
+): { rx: number; ry: number; order: 'XYZ' } {
+  return {
+    rx: latRad,
+    ry: -lonRad - Math.PI * 0.5,
+    order: 'XYZ',
+  };
+}
+
+/**
+ * Returns a smooth continental camera target (latDeg, lonDeg) for the initial 3D Earth menu
+ * that sweeps across Eurasia, Africa, India, Southeast Asia, Indonesia, and Australia (28°E .. 122°E)
+ * so the globe always faces continents and never rotates into the empty Pacific or Atlantic oceans.
+ */
+export function computeMenuContinentalTarget(elapsedSec: number): { latDeg: number; lonDeg: number } {
+  // Smooth sinusoidal sweep with 90-second period across the Afro-Eurasian & Maritime Continent belt
+  const phase = elapsedSec * 0.07;
+  const lonDeg = 76.0 + Math.sin(phase) * 42.0; // Sweeps smoothly between 34°E (Africa/Europe/Middle East) and 118°E (Asia/Indonesia/Australia)
+  const latDeg = 14.0 + Math.cos(phase * 0.8) * 8.0; // Gently tilts between +6°N (Indonesia/Indian Ocean rim) and +22°N (India/Arabia/East Asia)
+  return { latDeg, lonDeg };
+}
+
+/** Converts (latDeg, lonDeg) to Web Mercator tile indices (tx, ty) at zoom level z. */
+export function latLonToMercatorTile(
+  latDeg: number,
+  lonDeg: number,
+  z: number
+): { tx: number; ty: number; n: number } {
+  const n = Math.pow(2, z);
+  const clampedLat = Math.max(-85.05, Math.min(85.05, latDeg));
+  const latRad = (clampedLat * Math.PI) / 180;
+  const rawTx = Math.floor(((lonDeg + 180) / 360) * n);
+  const tx = ((rawTx % n) + n) % n;
+  const rawTy = Math.floor(((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2) * n);
+  const ty = Math.max(0, Math.min(n - 1, rawTy));
+  return { tx, ty, n };
+}
+
+/**
+ * Computes the optimal 3D globe focus point (midpoint on the unit sphere) and zoom level
+ * to frame a great-circle flight route between two airports.
+ */
+export function computeRouteFocusView(
+  dep: Airport,
+  arr: Airport
+): { lat: number; lon: number; zoom: number } {
+  const [x1, y1, z1] = latLonToUnitSphere(dep.lat, dep.lon);
+  const [x2, y2, z2] = latLonToUnitSphere(arr.lat, arr.lon);
+  let mx = (x1 + x2) * 0.5;
+  let my = (y1 + y2) * 0.5;
+  let mz = (z1 + z2) * 0.5;
+  const len = Math.hypot(mx, my, mz);
+  if (len < 1e-5) {
+    return { lat: dep.lat, lon: dep.lon, zoom: 1.5 };
+  }
+  mx /= len;
+  my /= len;
+  mz /= len;
+  const lat = Math.asin(Math.max(-1, Math.min(1, my))) * (180 / Math.PI);
+  const lon = Math.atan2(-mz, mx) * (180 / Math.PI);
+  const distKm = haversine(dep.lat, dep.lon, arr.lat, arr.lon) / 1000;
+  // Choose zoom so both endpoints and the great-circle path fit comfortably in the viewport
+  const zoom =
+    distKm < 120
+      ? 11.5
+      : distKm < 300
+      ? 7.8
+      : distKm < 650
+      ? 5.2
+      : distKm < 1400
+      ? 3.4
+      : distKm < 3000
+      ? 2.1
+      : 1.35;
+  return { lat, lon, zoom };
+}
+
+
 export interface AircraftVariantInfo {
   variantId: string;
   aircraftId: string;
@@ -38,6 +207,7 @@ export interface AircraftVariantInfo {
   primaryColor: string;
   accentColor: string;
   bellyColor: string;
+  imageUrl: string;
 }
 
 export const AIRCRAFT_VARIANTS: AircraftVariantInfo[] = [
@@ -55,6 +225,7 @@ export const AIRCRAFT_VARIANTS: AircraftVariantInfo[] = [
     primaryColor: '#f8fafc',
     accentColor: '#2572eb',
     bellyColor: '#1e3a8a',
+    imageUrl: AIRCRAFT_STUDIO_IMAGES.sky,
   },
   {
     variantId: 'sky-iae-arch',
@@ -70,6 +241,7 @@ export const AIRCRAFT_VARIANTS: AircraftVariantInfo[] = [
     primaryColor: '#f8fafc',
     accentColor: '#0ea5e9',
     bellyColor: '#0c4a6e',
+    imageUrl: AIRCRAFT_STUDIO_IMAGES.sky,
   },
   {
     variantId: 'sky-cfm-euro',
@@ -85,6 +257,7 @@ export const AIRCRAFT_VARIANTS: AircraftVariantInfo[] = [
     primaryColor: '#f8fafc',
     accentColor: '#f97316',
     bellyColor: '#334155',
+    imageUrl: AIRCRAFT_STUDIO_IMAGES.sky,
   },
   {
     variantId: 'trek-pt6-stol',
@@ -100,6 +273,7 @@ export const AIRCRAFT_VARIANTS: AircraftVariantInfo[] = [
     primaryColor: '#f1f5f9',
     accentColor: '#ea580c',
     bellyColor: '#1e293b',
+    imageUrl: AIRCRAFT_STUDIO_IMAGES.trek,
   },
   {
     variantId: 'trek-pt6-cargo',
@@ -115,6 +289,7 @@ export const AIRCRAFT_VARIANTS: AircraftVariantInfo[] = [
     primaryColor: '#f8fafc',
     accentColor: '#10b981',
     bellyColor: '#064e3b',
+    imageUrl: AIRCRAFT_STUDIO_IMAGES.trek,
   },
   {
     variantId: 'swift-io360-std',
@@ -130,6 +305,7 @@ export const AIRCRAFT_VARIANTS: AircraftVariantInfo[] = [
     primaryColor: '#f8fafc',
     accentColor: '#3b82f6',
     bellyColor: '#1e3a8a',
+    imageUrl: AIRCRAFT_STUDIO_IMAGES.swift,
   },
   {
     variantId: 'swift-io360-exec',
@@ -145,6 +321,7 @@ export const AIRCRAFT_VARIANTS: AircraftVariantInfo[] = [
     primaryColor: '#f8fafc',
     accentColor: '#eab308',
     bellyColor: '#422006',
+    imageUrl: AIRCRAFT_STUDIO_IMAGES.swift,
   },
 ];
 

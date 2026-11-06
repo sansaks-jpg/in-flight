@@ -40,7 +40,7 @@ export function LoadingScreen({
         </div>
         <div className="mt-7 h-2 rounded-sm bg-white/10 overflow-hidden">
           <div
-            className="h-full bg-gradient-to-r from-[#1d5bd6] via-[#38bdf8] to-[#facc15] transition-all duration-150"
+            className="h-full bg-[#2572eb] transition-all duration-150"
             style={{ width: `${Math.max(8, p * 100)}%` }}
           />
         </div>

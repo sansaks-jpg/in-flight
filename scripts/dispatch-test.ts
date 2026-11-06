@@ -1,14 +1,24 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import * as THREE from 'three';
 import { AIRPORT_BY_ID, AIRPORTS } from '../src/data/airports';
 import { specById } from '../src/sim/specs';
 import {
+  AIRCRAFT_STUDIO_IMAGES,
   AIRCRAFT_VARIANTS,
+  computeGlobeEulerForLatLon,
+  computeMenuContinentalTarget,
   computeRouteDispatch,
+  computeRouteFocusView,
   expandAirportRunways,
   filterAircraftVariants,
   getAircraftStatsComparison,
   getCuratedRoutes,
+  latDegToEquirectangularY,
+  latLonToMercatorTile,
+  latLonToUnitSphere,
+  MENU_BENTO_TILES,
+  mercatorTileYToLatDeg,
   REPO_FACTS,
 } from '../src/ui/flightDispatch';
 
@@ -20,6 +30,97 @@ test('REPO_FACTS strictly match the repository dataset counts and architecture',
   assert.ok(REPO_FACTS.terrainSource.includes('AWS'));
   assert.ok(REPO_FACTS.imagerySource.includes('Esri'));
   assert.ok(REPO_FACTS.vectorSource.includes('OpenStreetMap'));
+});
+
+test('MENU_BENTO_TILES and AIRCRAFT_VARIANTS provide valid local photographic assets for every menu box and aircraft', () => {
+  assert.equal(MENU_BENTO_TILES.length, 6);
+  const expectedIds = [
+    'world_photographer',
+    'challenge_league',
+    'activities',
+    'career',
+    'free_flight',
+    'marketplace',
+  ];
+  assert.deepEqual(
+    MENU_BENTO_TILES.map((t) => t.id),
+    expectedIds
+  );
+  for (const tile of MENU_BENTO_TILES) {
+    assert.ok(tile.imageUrl.startsWith('/src/assets/images/menu_'));
+    assert.ok(tile.title.length > 0);
+    assert.ok(tile.subtitle.length > 0);
+  }
+
+  for (const variant of AIRCRAFT_VARIANTS) {
+    assert.equal(variant.imageUrl, AIRCRAFT_STUDIO_IMAGES[variant.aircraftId]);
+    assert.ok(variant.imageUrl.startsWith('/src/assets/images/aircraft_'));
+  }
+});
+
+test('mercatorTileYToLatDeg and latDegToEquirectangularY accurately reproject satellite tiles onto the 3D sphere', () => {
+  const latNorth = mercatorTileYToLatDeg(0, 2);
+  const latEq = mercatorTileYToLatDeg(2, 2);
+  const latSouth = mercatorTileYToLatDeg(4, 2);
+
+  assert.ok(Math.abs(latNorth - 85.0511) < 0.01);
+  assert.ok(Math.abs(latEq) < 1e-9);
+  assert.ok(Math.abs(latSouth + 85.0511) < 0.01);
+
+  assert.equal(latDegToEquirectangularY(90, 1024), 0);
+  assert.equal(latDegToEquirectangularY(0, 1024), 512);
+  assert.equal(latDegToEquirectangularY(-90, 1024), 1024);
+});
+
+test('computeGlobeEulerForLatLon with XYZ order centers any global airport at [0, 0, +1] with North upright', () => {
+  const sampleIcaos = ['WIII', 'WADD', 'WAHI', 'WAJJ', 'EGLL', 'KJFK', 'KSFO', 'YSSY', 'RJTT'];
+  for (const icao of sampleIcaos) {
+    const airport = AIRPORT_BY_ID.get(icao)!;
+    assert.ok(airport, `Airport ${icao} must exist`);
+    const [ux, uy, uz] = latLonToUnitSphere(airport.lat, airport.lon);
+    const latRad = airport.lat * (Math.PI / 180);
+    const lonRad = airport.lon * (Math.PI / 180);
+    const { rx, ry, order } = computeGlobeEulerForLatLon(latRad, lonRad);
+    assert.equal(order, 'XYZ');
+
+    const euler = new THREE.Euler(rx, ry, 0, order);
+    const vec = new THREE.Vector3(ux, uy, uz).applyEuler(euler);
+    assert.ok(Math.abs(vec.x) < 1e-6, `${icao} x=${vec.x} should be 0`);
+    assert.ok(Math.abs(vec.y) < 1e-6, `${icao} y=${vec.y} should be 0`);
+    assert.ok(Math.abs(vec.z - 1) < 1e-6, `${icao} z=${vec.z} should be +1`);
+
+    // Check local North tangent vector [-sin(lat)cos(lon), cos(lat), sin(lat)sin(lon)] points to [0, +1, 0]
+    const north = new THREE.Vector3(
+      -Math.sin(latRad) * Math.cos(lonRad),
+      Math.cos(latRad),
+      Math.sin(latRad) * Math.sin(lonRad)
+    ).applyEuler(euler);
+    assert.ok(Math.abs(north.x) < 1e-6);
+    assert.ok(Math.abs(north.y - 1) < 1e-6);
+    assert.ok(Math.abs(north.z) < 1e-6);
+  }
+});
+
+test('computeMenuContinentalTarget stays strictly over continental hemisphere longitudes', () => {
+  for (let t = 0; t <= 300; t += 5) {
+    const { latDeg, lonDeg } = computeMenuContinentalTarget(t);
+    assert.ok(lonDeg >= 30 && lonDeg <= 125, `Menu lon ${lonDeg} should stay over continents`);
+    assert.ok(latDeg >= 4 && latDeg <= 24, `Menu lat ${latDeg} should stay over low/mid northern continents`);
+  }
+});
+
+test('latLonToMercatorTile and computeRouteFocusView compute valid tile indices and route framing', () => {
+  const wiii = AIRPORT_BY_ID.get('WIII')!;
+  const wadd = AIRPORT_BY_ID.get('WADD')!;
+  const tile = latLonToMercatorTile(wiii.lat, wiii.lon, 6);
+  assert.equal(tile.n, 64);
+  assert.ok(tile.tx >= 48 && tile.tx <= 54);
+  assert.ok(tile.ty >= 32 && tile.ty <= 36);
+
+  const focus = computeRouteFocusView(wiii, wadd);
+  assert.ok(focus.lat > -9 && focus.lat < -6);
+  assert.ok(focus.lon > 106 && focus.lon < 116);
+  assert.ok(focus.zoom >= 3 && focus.zoom <= 6);
 });
 
 test('filterAircraftVariants filters by category, search query, and favourites', () => {
@@ -76,3 +177,4 @@ test('getCuratedRoutes returns valid routes grounded in the airport database', (
   assert.ok(idRoutes.length >= 10);
   assert.equal(idRoutes[0].fromIcao, 'WIII');
 });
+
