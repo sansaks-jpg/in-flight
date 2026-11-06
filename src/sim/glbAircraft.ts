@@ -28,12 +28,16 @@ interface ModelCfg {
 }
 
 const CFG: Record<string, ModelCfg> = {
-  // Cessna 172: NLM model (nose toward +Z, length 2.63m, span 3.69m). Rotate PI to face -Z. Scale to 8.28m x 11.0m.
-  swift: { url: c172Url, rotY: Math.PI, scale: [11.0 / 3.69, 11.0 / 3.69, 8.28 / 2.63], offset: [0, -0.05, 0.2], lights: { wing: [5.5, 0.96, 0.95], tail: [0, 1.45, 4.2], beacon: [0, 1.62, 3.8], landing: [0, -0.2, -4.1] } },
+  // Cessna 172: NLM re-export (nose toward +Z, span 3.69 m, length 3.69 m incl. spinner). Rotate PI to face -Z.
+  // Scale to the real 11.0 m span / 8.28 m length; the Tyre meshes bottom out at native y≈0, so the offset
+  // registers them exactly onto the -1.05 m gear contacts.
+  swift: { url: c172Url, rotY: Math.PI, scale: [11.0 / 3.69, 11.0 / 3.69, 8.28 / 3.69], offset: [0, -1.06, 0.2], lights: { wing: [5.5, 0.96, 0.95], tail: [0, 1.45, 4.2], beacon: [0, 1.62, 3.8], landing: [0, -0.2, -4.1] } },
   // ATR 72-600: metres, nose toward -X (27.2 x 26.87 x 7.62 m). Main gear at model x=-0.85, wheel bottoms y=-3.8.
   trek: { url: atr72Url, rotY: -Math.PI / 2, scale: [1, 1, 1], offset: [0, 1.75, 1.95], lights: { wing: [13.44, 1.43, 1.82], tail: [0, 5.3, 15.5], beacon: [0, 1.15, -2.5], landing: [0, -1.2, -10.8] } },
-  // A320: nose toward -Z; stretched to the real 34.10 m span / 37.57 m length / 11.76 m height.
-  sky: { url: a320Url, rotY: 0, scale: [34.1 / 135.5, 0.25164, 37.57 / 149.3], offset: [0, -1.956, -0.8], lights: { wing: [17.03, 0.83, 5.18], tail: [0, 1.8, 20.9], beacon: [0, 1.95, -6.0], landing: [0, -1.6, -11.2] } },
+  // A320: the current export stores the nose toward +Z, so it is rotated PI to face -Z. Per-axis scale to the
+  // real 34.10 m span / 37.57 m length / 11.76 m height; the fuselage belly registers ~1.8 m above the -3.3 m
+  // gear contact and the fuselage centre lands on the main-gear station (z≈+1.2).
+  sky: { url: a320Url, rotY: Math.PI, scale: [0.2283, 0.2272, 0.2332], offset: [0, -2.1, 29.0], lights: { wing: [17.03, 0.83, 5.18], tail: [0, 1.8, 20.9], beacon: [0, 1.95, -6.0], landing: [0, -1.6, -11.2] } },
 };
 
 const loader = new GLTFLoader();
@@ -128,6 +132,19 @@ export async function loadAircraftVisual(spec: AircraftSpec): Promise<AircraftVi
   const inv = new THREE.Matrix4().copy(scene.matrixWorld).invert();
   const sceneBox = (o: THREE.Object3D) => new THREE.Box3().setFromObject(o).applyMatrix4(inv);
   const discMat = () => new THREE.MeshBasicMaterial({ color: 0x1c2026, transparent: true, opacity: 0, side: THREE.DoubleSide, depthWrite: false });
+
+  // Sketchfab display-stand leftovers (thin pole + tripod feet) dip far below the gear line once the model is
+  // registered: hide any visible mesh whose geometry reaches more than 25 cm under the wheels' ground plane.
+  const contactY = Math.min(...spec.gear.map((g) => g.pos[1]));
+  const groundO = contactY - cfg.offset[1];
+  const invO = new THREE.Matrix4().copy(offsetG.matrixWorld).invert();
+  const buried = new THREE.Box3();
+  scene.traverse((o) => {
+    const m = o as THREE.Mesh;
+    if (!m.isMesh || !m.visible) return;
+    buried.setFromObject(m).applyMatrix4(invO);
+    if (buried.min.y < groundO - 0.25) m.visible = false;
+  });
 
   if (spec.id === 'swift') {
     // If c172 has Object_50 node (the propeller in NLM model)
