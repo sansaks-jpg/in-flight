@@ -7,6 +7,7 @@ import { FlightModel, G, atmosphere, airState } from './physics';
 import { LiveWx, OFFLINE_WX, fetchLiveWeather, windProfile, windVector, isaDeviation, wxSummary } from './liveWeather';
 import { Precip } from './precip';
 import { chooseSpawn, Spawn } from './departure';
+import { AtcRadio, buildExchange, RadioLine, RadioCtx } from './atc';
 import { Projection, haversine, bearing, wrap180, wrap360, D2R, R2D, clamp, M_PER_NM, MS_TO_KT, destination, greatCircle, FlightWaypoint } from './geo';
 import { World, Threshold, TimeOfDay, Weather } from './world';
 import { AircraftVisual } from './aircraftModel';
@@ -34,7 +35,7 @@ export interface ScenarioConfig {
   startSpot?: string;
 }
 export type FlightPhase = 'taxi' | 'takeoff' | 'climb' | 'cruise' | 'descent' | 'final' | 'rollout';
-export interface AtcMessage { id: number; sender: string; text: string; time: number; needsAck?: boolean; }
+export interface AtcMessage { id: number; sender: string; text: string; time: number; needsAck?: boolean; /** speaking station label (Tower, Ground, callsign…) */ label?: string; }
 export interface Toast { id: number; text: string; level: 'info' | 'good' | 'warn' | 'bad'; }
 export interface Breakdown { label: string; pts: number; }
 export interface LandingInfo { vsFpm: number; kias: number; offset: number; dist: number; bank: number; pitch: number; onRunway: boolean; airportId: string; rwy: string; }
@@ -90,6 +91,8 @@ export interface HudState {
   trim: number;
   atc: AtcMessage | null;
   atcLog: AtcMessage[];
+  /** the transmission currently on the air (subtitle), null when the frequency is quiet */
+  atcLive: AtcMessage | null;
   activeWp: { name: string; distNm: number; brg: number; etaMin: number } | null;
   // Optional presentation extensions are populated only when their simulation feature exists.
   cockpitTooltip?: CockpitTooltip | null;
@@ -310,6 +313,13 @@ export class Game {
   private prevKias = 0;
   private atcMessages: AtcMessage[] = [];
   private nextAtcId = 1;
+  /** Automatic, voiced ATC <-> pilot radio (see atc.ts). */
+  atcLive: AtcMessage | null = null; private atcLastCat = ''; private atisLetter = 'A';
+  radio = new AtcRadio({
+    onLine: (l) => this.logRadioLine(l),
+    onLive: (l) => { this.atcLive = l ? { id: l.id, sender: l.who, text: l.text, time: this.time, label: l.label } : null; },
+    voiceOn: () => this.audio.voiceOn && !this.audio.muted, volume: () => this.audio.volume, key: () => this.audio.chirp(),
+  });
   private atcReply: { due: number; text: string; sender: string } | null = null;
   private ackedWarnings = new Set<string>();
 
@@ -487,7 +497,7 @@ export class Game {
     this.currentFlightPhase = startMode === 'runway' ? 'taxi' : startMode === 'final' ? 'final' : 'cruise';
     this.speedTrendSmoothed = 0;
     this.prevKias = this.fm ? this.fm.ias / 0.514444 : 0;
-    this.atcMessages = []; this.atcReply = null;
+    this.radio.cancel(); this.atcMessages = []; this.atcReply = null; this.atcLastCat = '';
     const rwyInit = this.depRwy || '09';
     if (startMode === 'runway') {
       this.addAtc('ATIS', this.atisText(from, rwyInit), false);
@@ -529,6 +539,8 @@ export class Game {
     const w = this.world!, from = this.cfg.from;
     const sp = chooseSpawn(from, dep, this.spec, w.proj, w.runways, this.cfg.startSpot);
     this.spawn = sp; this.depStage = 0; this.depT = 0; this.pushback = { active: false, t: 0, done: false };
+    // no trees / mapped buildings may overlap the parked aircraft (ICAO 4.5 m stand clearance + margin)
+    w.setSpawnClear(sp.footprint);
     this.fm.placeOnRunway(sp.x, sp.z, sp.hdg, from.elev, true);
     this.lights = { nav: false, strobe: false, land: false, beacon: false };
     this.fm.ctl.parking = true;
@@ -694,7 +706,7 @@ export class Game {
     return best;
   }
   private disposeScenario() {
-    this.atcReply = null; this.mapOnly = false;
+    this.radio?.cancel(); this.atcReply = null; this.mapOnly = false;
     this.navAssistsGroup.clear();
     this.approachGatesGroup.clear();
     this.taxiRibbonGroup.clear();
@@ -1122,7 +1134,7 @@ export class Game {
       }
     }
   }
-  setPhase(p: Phase) { if (this.phase === p) return; this.phase = p; this.hooks.onPhase(p); }
+  setPhase(p: Phase) { if (this.phase === p) return; if (p === 'paused') this.radio.setPaused(true); else if (this.phase === 'paused') this.radio.setPaused(false); this.phase = p; this.hooks.onPhase(p); }
   pause() { if (this.phase !== 'playing') return; this.clearInput(); this.setPhase('paused'); this.audio.silence(); }
   resume() { if (this.phase !== 'paused') return; this.setPhase('playing'); this.last = performance.now(); }
   restart() {
@@ -1994,7 +2006,7 @@ export class Game {
   private updateCamera(dt: number) {
     const fm = this.fm, cam = this.camera, L = this.spec.length, view = VIEWS[this.viewIdx], t = this.time;
     // Dynamic near/far planes keep hardware Early-Z depth buffer 100% z-fight-free at all altitudes
-    cam.near = clamp(fm.agl * 0.055, 1.8, 85);
+    cam.near = clamp(fm.agl * 0.04, 0.6, 85);
     cam.far = clamp(180000 + fm.agl * 12, 180000, 320000);
     // shake
     const set = this.cfg.settings;
@@ -2141,60 +2153,30 @@ export class Game {
     }
   }
 
-  addAtc(sender: string, text: string, needsAck = false) {
-    const msg: AtcMessage = {
-      id: this.nextAtcId++,
-      sender,
-      text,
-      time: this.time,
-      needsAck,
-    };
+  /** Queue a controller message: it is voiced as a complete standard exchange (pilot call, instruction, readback). */
+  addAtc(sender: string, text: string, _needsAck = false) {
+    if (!this.cfg) return;
+    const cs = 'Aero 101', from = this.cfg.from, to = this.cfg.to;
+    const m = /information ([A-Z])\b/.exec(text); if (sender === 'ATIS' && m) this.atisLetter = m[1];
+    const atDest = !!this.landing || /welcome to|cleared to land|descend and maintain|rollout safe|expect ils|approach/i.test(text) || (this.currentFlightPhase !== 'taxi' && this.takeoffDone && this.distToDest() < this.distToOrigin());
+    const nm = (a: Airport) => (a.city || a.name || a.icao).replace(/\s*(international|intl|airport|airfield|regional|domestic).*$/i, '').trim() || a.icao;
+    const ctx: RadioCtx = { callsign: cs, fromIcao: from.icao, toIcao: to.icao, fromName: nm(from), toName: nm(to), letter: this.atisLetter, spot: this.spawn?.label ?? 'the apron', atDest, lastCat: this.atcLastCat, rwyFallback: (atDest ? this.apprKey : this.depRwy) || '' };
+    const { lines, cat } = buildExchange(sender, text, ctx, () => this.nextAtcId++);
+    this.atcLastCat = cat; this.radio.enqueue(lines);
+  }
+  /** A line goes on the air: it enters the transmission history (and the subtitle) exactly when it is spoken. */
+  private logRadioLine(l: RadioLine) {
+    const msg: AtcMessage = { id: l.id, sender: l.who, text: l.text, time: this.time, label: l.label };
     this.atcMessages.push(msg);
-    if (this.atcMessages.length > 25) this.atcMessages.shift();
+    if (this.atcMessages.length > 120) this.atcMessages.shift();
   }
+  private distToOrigin() { return haversine(this.lat(), this.lon(), this.cfg.from.lat, this.cfg.from.lon); }
 
-  get atcResponding() { return this.atcReply !== null; }
-
-  respondAtc(option: number) {
-    if (this.phase !== 'playing' || this.atcReply || !Number.isInteger(option) || option < 1 || option > 4) return;
-    const pending = this.atcMessages.find((m) => m.needsAck);
-    if (pending && option !== 4) pending.needsAck = false;
-
-    let pilotText = '';
-    let ackText = '', sender = pending?.sender ?? 'TOWER';
-    const toIcao = this.cfg.to.icao;
-    const fromIcao = this.cfg.from.icao;
-    const rwy = this.approachTh()?.ident || this.apprKey || 'active';
-
-    switch (option) {
-      case 1:
-        pilotText = `Aero 101: Wilco / Roger. Reading you 5 by 5.`;
-        ackText = `Roger, Aero 101. Report when ready.`;
-        break;
-      case 2:
-        sender = 'DEPARTURE';
-        pilotText = `Aero 101: Requesting departure clearance out of ${fromIcao}.`;
-        ackText = `Aero 101, cleared as filed. Squawk 4215, climb via SID.`;
-        break;
-      case 3:
-        sender = 'APPROACH';
-        pilotText = `Aero 101: Inbound for landing, request approach clearance to ${toIcao}.`;
-        ackText = `Aero 101, cleared ILS runway ${rwy} approach, maintain ${Math.round(this.spec.vapp)} knots on final.`;
-        break;
-      case 4: {
-        pilotText = `Aero 101: Say again transmissions.`;
-        const previous = [...this.atcMessages].reverse().find((m) => m.sender !== 'PILOT');
-        ackText = previous?.text || 'Aero 101, radio check. Reading you five by five.'; sender = previous?.sender ?? 'TOWER';
-        break;
-      }
-    }
-
-    this.audio.chirp();
-    this.addAtc('PILOT', pilotText, false);
-    // Simulation time owns the exchange: pause/resume is safe and a new flight cannot
-    // receive a delayed response left over from a previous scenario or repeated key press.
-    this.atcReply = { due: this.time + 1.5, text: ackText, sender };
-  }
+  /** True while the aircraft is still on its way from the hangar to the departure runway. */
+  get depStageActive() { return !!this.cfg && this.cfg.settings.startMode === 'runway' && !this.takeoffDone; }
+  get atcResponding() { return this.radio.pending > 0; }
+  /** Radio is fully automatic: there is nothing to answer manually. Kept so old key bindings are harmless. */
+  respondAtc(_option: number) { void _option; }
 
   private computeWorldMarkers(): WorldScreenMarker[] {
     if (!this.world || !this.fm) return [];
@@ -2314,6 +2296,7 @@ export class Game {
       pitchTarget,
       trim: fm.ctl.trim,
       atc: latestAtc,
+      atcLive: this.atcLive,
       atcLog: this.atcMessages,
       activeWp,
       cockpitTooltip: this.cockpitTooltip,

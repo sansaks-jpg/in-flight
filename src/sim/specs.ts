@@ -4,6 +4,7 @@
 //   ATR 72-600               : L 27.17 m, b 27.05 m, H 7.65 m, S 61 m2, MTOW 23 000 kg, 2x PW127M (2 475 shp), fuel 5 000 kg
 //   A320-200 (CFM56-5B)      : L 37.57 m, b 34.10 m, H 11.76 m, S 122.6 m2, MTOW 78 000 kg, OEW ~42 600 kg, wheelbase 12.64 m, track 7.59 m,
 //                              Mmo 0.82, 2x 120 kN, fuel 23 860 L (18 730 kg)
+// Pilot eye height above the ground (verified): C172 ≈ 1.7 m, ATR 72 ≈ 3.3 m, A320 ≈ 4.8 m (eye-to-wheel height ≈ 20 ft in the flare).
 // Body frame: +X right, +Y up, -Z forward, origin = centre of gravity. Gear / hull points are CG-relative.
 export interface GearSpec { pos: [number, number, number]; share: number; nose?: boolean; }
 export interface AircraftSpec {
@@ -47,7 +48,7 @@ export const AIRCRAFT: AircraftSpec[] = [
     gear: [{ pos: [0, -1.05, -1.18], share: 0.28, nose: true }, { pos: [-1.26, -1.05, 0.475], share: 0.36 }, { pos: [1.26, -1.05, 0.475], share: 0.36 }],
     hull: [[0, -0.74, -2.3], [0, 0.0, 5.4], [-5.5, 0.9, 0.1], [5.5, 0.9, 0.1], [0, -0.3, 0.6]], gearTravel: 0.22, maxSink: 3.8,
     pax: 3, cruiseAlt: 2400, cruiseKt: 122, rangeKm: 1185, hasSpeedbrake: false, hasReverse: false, hasGlass: false,
-    eye: [-0.33, 0.45, -0.55], color: 0xf4f6f8, accent: 0x1c6dd0, length: 8.28,
+    eye: [-0.33, 0.62, -0.55], color: 0xf4f6f8, accent: 0x1c6dd0, length: 8.28,
     icao: 'C172', realName: 'Cessna 172S Skyhawk SP', wingspan: 11.0, height: 2.72, toFlaps: 0, fixedGear: true, startSecs: 4, wheelR: [0.17, 0.15], mtow: 1157, mlw: 1157,
   },
   {

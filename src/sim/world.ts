@@ -4,6 +4,7 @@ import { Terrain, DetailLayer } from './terrain';
 import { Structures } from './structures';
 import { Airport, Runway, Surface, airportsNear, getAirfield, isPaved } from '../data/airports';
 import { buildAirfieldMeshes } from './airfieldMesh';
+import { synthGround, SynthGround, Rect } from './airportGround';
 import { QualityPreset } from './storage';
 import { QUALITY } from './quality';
 import { sunPosition, simNowMs, nightLights } from './clock';
@@ -798,21 +799,25 @@ export class World {
     // High-Detail Airport Complexes: Multi-bay Terminal, Jetways, Indonesian Livery Airliners & Windsock
     if (detailed && ap.runways.length > 0) {
       const g = this.runwayGeom(ap, ap.runways[0]);
-      const fx = Math.sin(g.hdg * D2R), fz = -Math.cos(g.hdg * D2R), rx = -fz, rz = fx;
-      const taxiDist = g.wid / 2 + 55;
-      const taxiLen = Math.max(400, g.len * 0.85);
+      // Airside layout is shared with the spawn logic (airportGround.ts): ICAO Annex 14 Table 3-1 taxiway separation,
+      // hangar apron + hangars on the side of the airport reference point, terminal block beside it.
+      const SG = synthGround(ap, this.proj)!;
+      const sgn0 = SG.side;
+      const fx = Math.sin(g.hdg * D2R), fz = -Math.cos(g.hdg * D2R), rx = -fz * sgn0, rz = fx * sgn0;
+      const sideRot = sgn0 === 1 ? 0 : Math.PI;
+      const taxiDist = SG.taxiLat;
+      const taxiLen = g.len + 80;
 
       const taxiMat = new THREE.MeshLambertMaterial({ color: 0x24282f, polygonOffset: true, polygonOffsetFactor: -3, polygonOffsetUnits: -3 });
       const apronMat = new THREE.MeshLambertMaterial({ color: 0x383e46, polygonOffset: true, polygonOffsetFactor: -3, polygonOffsetUnits: -3 });
       const terminalMat = new THREE.MeshLambertMaterial({ color: 0xe2e8f0 });
       const glassMat = new THREE.MeshPhongMaterial({ color: 0x1e293b, specular: 0x93c5fd, shininess: 85 });
       const steelMat = new THREE.MeshLambertMaterial({ color: 0x64748b });
-      const hangarMat = new THREE.MeshLambertMaterial({ color: 0x94a3b8 });
       const towerMat = new THREE.MeshLambertMaterial({ color: 0xf1f5f9 });
 
-      if (!layout) { // surveyed OSM ground layout replaces the generic placeholder apron/terminal
+      if (!layout && !SG.gaOnly) { // surveyed OSM ground layout replaces the generic placeholder apron/terminal
       // 1. Parallel Taxiway
-      const pTaxiGeo = new THREE.PlaneGeometry(22, taxiLen);
+      const pTaxiGeo = new THREE.PlaneGeometry(SG.taxiWidth, taxiLen);
       pTaxiGeo.rotateX(-Math.PI / 2);
       const pTaxi = new THREE.Mesh(pTaxiGeo, taxiMat);
       pTaxi.position.set(g.cx + rx * taxiDist, ap.elev + 0.06, g.cz + rz * taxiDist);
@@ -881,7 +886,7 @@ export class World {
 
         const jetway = createJetway(glassMat, steelMat);
         jetway.position.set(jx, ap.elev, jz);
-        jetway.rotation.y = -g.hdg * D2R - Math.PI / 2;
+        jetway.rotation.y = -g.hdg * D2R - Math.PI / 2 + sideRot;
         group.add(jetway);
 
         // Parked airliner at this gate
@@ -890,13 +895,13 @@ export class World {
         const acX = g.cx + rx * (termDist - termWid / 2 - 28) + fx * alongOffset;
         const acZ = g.cz + rz * (termDist - termWid / 2 - 28) + fz * alongOffset;
         airliner.position.set(acX, ap.elev, acZ);
-        airliner.rotation.y = -g.hdg * D2R + Math.PI / 2;
+        airliner.rotation.y = -g.hdg * D2R + Math.PI / 2 + sideRot;
         group.add(airliner);
 
         // Ground service vehicles (GSE) at gate
         const gse = createGseVehicles();
         gse.position.set(acX, ap.elev, acZ);
-        gse.rotation.y = -g.hdg * D2R + Math.PI / 2;
+        gse.rotation.y = -g.hdg * D2R + Math.PI / 2 + sideRot;
         group.add(gse);
       });
 
@@ -914,19 +919,26 @@ export class World {
       towerCab.position.set(towerX, ap.elev + towerBaseH + 3.2, towerZ);
       group.add(towerCab);
 
-      // 6. Maintenance Hangars
-      for (const sgn of [-1, 1]) {
-        const hDist = termDist + 8;
-        const hAlong = -termLen / 2 - 55 + sgn * 55;
-        const hx = g.cx + rx * hDist + fx * hAlong;
-        const hz = g.cz + rz * hDist + fz * hAlong;
-        const hangar = new THREE.Mesh(new THREE.CylinderGeometry(24, 24, 48, 16, 1, false, 0, Math.PI), hangarMat);
-        hangar.rotation.z = Math.PI / 2;
-        hangar.rotation.y = -g.hdg * D2R;
-        hangar.position.set(hx, ap.elev + 0.5, hz);
-        group.add(hangar);
-      }
+      // 6. Hangars + hangar apron (the aircraft starts outside the doors of these)
+      this.addSynthHangars(group, SG, ap.elev, taxiMat, apronMat);
 
+      }
+      if (!layout && SG.gaOnly) {
+        // Small airfield: parallel taxiway, tie-down / hangar apron, GA hangars and a modest terminal building
+        const tGeo = new THREE.PlaneGeometry(SG.taxiWidth, taxiLen); tGeo.rotateX(-Math.PI / 2);
+        const tx = new THREE.Mesh(tGeo, taxiMat); tx.position.set(g.cx + rx * taxiDist, ap.elev + 0.06, g.cz + rz * taxiDist); tx.rotation.y = -g.hdg * D2R; group.add(tx);
+        for (const along of [-g.len * 0.4, g.len * 0.4, SG.termAlong]) {
+          const cl = taxiDist - g.wid / 2; const cgeo = new THREE.PlaneGeometry(cl + 4, SG.taxiWidth * 0.8); cgeo.rotateX(-Math.PI / 2);
+          const c = new THREE.Mesh(cgeo, taxiMat); c.position.set(g.cx + fx * along + rx * (taxiDist / 2), ap.elev + 0.055, g.cz + fz * along + rz * (taxiDist / 2)); c.rotation.y = -g.hdg * D2R; group.add(c);
+        }
+        const tw = 26, td = 11, th = 5;
+        const term = new THREE.Mesh(new THREE.BoxGeometry(td, th, tw), terminalMat);
+        const tc = [g.cx + fx * SG.termAlong + rx * (taxiDist + 60), g.cz + fz * SG.termAlong + rz * (taxiDist + 60)];
+        term.position.set(tc[0], ap.elev + th / 2, tc[1]); term.rotation.y = -g.hdg * D2R; group.add(term);
+        const roof = new THREE.Mesh(new THREE.BoxGeometry(td + 1.5, 0.4, tw + 1.5), steelMat); roof.position.set(tc[0], ap.elev + th + 0.2, tc[1]); roof.rotation.y = -g.hdg * D2R; group.add(roof);
+        const tieApron = new THREE.Mesh(new THREE.PlaneGeometry(40, 90), apronMat); tieApron.rotateX(-Math.PI / 2);
+        tieApron.position.set(g.cx + fx * SG.termAlong + rx * (taxiDist + 28), ap.elev + 0.07, g.cz + fz * SG.termAlong + rz * (taxiDist + 28)); tieApron.rotation.y = -g.hdg * D2R; group.add(tieApron);
+        this.addSynthHangars(group, SG, ap.elev, taxiMat, apronMat);
       }
 
       // 7. Animated Windsock near runway primary threshold
@@ -942,6 +954,28 @@ export class World {
     this.scene.add(group);
     return { group, ap, papis, windsocks, strobes };
   }
+
+  /** Hangar buildings (box + barrel roof) and the concrete hangar apron in front of them. */
+  private addSynthHangars(group: THREE.Group, SG: SynthGround, elev: number, _taxiMat: THREE.Material, apronMat: THREE.Material) {
+    const wall = new THREE.MeshLambertMaterial({ color: 0xb4bcc6 }), roofM = new THREE.MeshLambertMaterial({ color: 0x7d8792 }), door = new THREE.MeshLambertMaterial({ color: 0x4a5560 });
+    const apr: Rect = SG.hangarApron;
+    const ag = new THREE.PlaneGeometry(apr.hw * 2, apr.hl * 2); ag.rotateX(-Math.PI / 2);
+    const am = new THREE.Mesh(ag, apronMat); am.position.set(apr.cx, elev + 0.075, apr.cz); am.rotation.y = -apr.hdg * D2R; group.add(am);
+    for (const h of SG.hangars) {
+      const r = h.rect, height = h.kind === 'maintenance' ? 15 : 6.5;
+      // rect: hl = depth/2 along the door normal, hw = width/2 across it
+      const body = new THREE.Mesh(new THREE.BoxGeometry(r.hw * 2, height, r.hl * 2), wall);
+      body.position.set(r.cx, elev + height / 2, r.cz); body.rotation.y = -r.hdg * D2R; group.add(body);
+      const cap = new THREE.Mesh(new THREE.BoxGeometry(r.hw * 2 + 0.6, 0.5, r.hl * 2 + 0.6), roofM);
+      cap.position.set(r.cx, elev + height + 0.25, r.cz); cap.rotation.y = -r.hdg * D2R; group.add(cap);
+      // sliding door panel on the taxiway-facing wall, flush with the apron side
+      const fx = Math.sin(r.hdg * D2R), fz = -Math.cos(r.hdg * D2R);
+      const dw = new THREE.Mesh(new THREE.BoxGeometry(r.hw * 2 * 0.86, height * 0.82, 0.3), door);
+      dw.position.set(r.cx + fx * (r.hl + 0.16), elev + height * 0.41, r.cz + fz * (r.hl + 0.16)); dw.rotation.y = -r.hdg * D2R; group.add(dw);
+    }
+  }
+
+  setSpawnClear(rect: Rect | null, extra: Rect[] = []) { this.structures.setSpawnClear(rect, extra); }
 
   rebuildAirports(lat: number, lon: number, force = false) {
     if (force) {

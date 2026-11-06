@@ -2,6 +2,7 @@
 // Powered by OpenFreeMap Cloudflare CDN (<80ms worldwide) vector tiles (.pbf) with zero rate limits,
 // instant procedural fallback, architectural facade shader, terracotta roofs, and 2.5D map footprints.
 import * as THREE from 'three';
+import { GroundClear, airportClearZones, Rect, rectCorners, XZ } from './airportGround';
 import { Airport } from '../data/airports';
 import { Projection, lonToTileXf, latToTileYf, tileXToLon, tileYToLat } from './geo';
 import { Terrain } from './terrain';
@@ -903,6 +904,10 @@ export class Structures {
   private focus = { x: 0, z: 0 };
   private activeAirports: Airport[] = [];
   private runwayZones: RunwayZone[] = [];
+  /** Taxiways, aprons, hangars, terminals: no woodland or procedural houses on the airfield. */
+  private groundClear = new GroundClear();
+  /** The parked aircraft's footprint: neither trees nor mapped buildings may overlap it. */
+  private spawnClear = new GroundClear(); private spawnKey = '';
   /** Decoded MVT areas waiting for a slice of main-thread time (one build per frame). */
   private buildQueue: { key: string; area: Area; x: number; z: number; bounds: TileBounds; tries: number; outer: boolean }[] = [];
   /** Deferred tree scatter/instance jobs, processed a few grid rows per frame. */
@@ -953,6 +958,8 @@ export class Structures {
 
   private updateRunwayZones(airports: Airport[]) {
     this.runwayZones.length = 0;
+    this.groundClear.clear();
+    for (const a of airports) airportClearZones(a, this.proj, this.groundClear);
     for (let i = 0; i < airports.length; i++) {
       const ap = airports[i];
       for (let j = 0; j < ap.runways.length; j++) {
@@ -976,6 +983,7 @@ export class Structures {
 
   /** Returns true when world (x, z) lies inside an active airport runway/taxiway/apron exclusion envelope. */
   private isNearRunway(x: number, z: number): boolean {
+    if (this.groundClear.contains(x, z) || this.spawnClear.contains(x, z)) return true;
     for (let i = 0; i < this.runwayZones.length; i++) {
       const r = this.runwayZones[i];
       const rx = x - r.ax, rz = z - r.az;
@@ -984,6 +992,22 @@ export class Structures {
       const nx = rx - r.dx * cl, nz = rz - r.dz * cl;
       if (nx * nx + nz * nz < r.rSq) return true;
     }
+    return false;
+  }
+
+  /** Keep the aircraft's parking footprint (plus a margin) free of scenery. Re-streams tiles only when it actually moves. */
+  setSpawnClear(rect: Rect | null, extra: Rect[] = []) {
+    const key = rect ? [rect, ...extra].map((r) => `${r.cx.toFixed(1)},${r.cz.toFixed(1)},${r.hdg.toFixed(0)}`).join('|') : '';
+    if (key === this.spawnKey) return;
+    this.spawnKey = key; this.spawnClear.clear();
+    if (rect) { this.spawnClear.addRect({ ...rect, hl: rect.hl + 6, hw: rect.hw + 6 }); for (const e of extra) this.spawnClear.addRect(e); }
+    this.clearTiles();
+  }
+  private blockedBySpawn(ring: [number, number][]): boolean {
+    if (!this.spawnClear.rects.length) return false;
+    const pts: XZ[] = ring.map(([la, lo]) => [this.proj.x(lo), this.proj.z(la)] as XZ);
+    if (this.spawnClear.hitsFootprint(pts)) return true;
+    for (const r of this.spawnClear.rects) for (const c of rectCorners(r)) { let inside = false; for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) { if ((pts[i][1] > c[1]) !== (pts[j][1] > c[1]) && c[0] < ((pts[j][0] - pts[i][0]) * (c[1] - pts[i][1])) / (pts[j][1] - pts[i][1] || 1e-9) + pts[i][0]) inside = !inside; } if (inside) return true; }
     return false;
   }
 
@@ -1236,6 +1260,7 @@ export class Structures {
         if (!ring || ring.length < 3) continue;
         const cls = classifyBuilding(b);
         if (qp.buildings === 'major' && cls.house) continue;
+        if (this.blockedBySpawn(ring)) continue;
         let cla = 0, clo = 0;
         for (const p of ring) { cla += p[0]; clo += p[1]; }
         cla /= ring.length; clo /= ring.length;
