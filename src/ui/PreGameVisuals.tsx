@@ -531,13 +531,18 @@ function globeKmPerPixel(zoom: number, viewH: number): number {
   return (2 * globeAltitudeForZoom(zoom) * EARTH_RADIUS_KM * GLOBE_TAN_HALF_FOV) / Math.max(200, viewH);
 }
 
-/** Picks a "nice" scale-bar distance (1 / 2 / 5 × 10ⁿ km) whose bar is at most ~90 px wide. */
+/** Picks a "nice" scale-bar distance (1 / 2 / 5 × 10ⁿ km) whose bar is dynamically sized to match reality 1:1. */
 function computeNiceScaleBar(kmPerPx: number): { km: number; px: number } {
-  const raw = kmPerPx * 90;
-  const pow = Math.pow(10, Math.floor(Math.log10(raw)));
+  const targetPx = 80;
+  const raw = kmPerPx * targetPx;
+  const pow = Math.pow(10, Math.floor(Math.log10(Math.max(1e-6, raw))));
   const norm = raw / pow;
-  const nice = (norm >= 5 ? 5 : norm >= 2 ? 2 : 1) * pow;
-  return { km: nice, px: nice / kmPerPx };
+  let nice = pow;
+  if (norm >= 7.0) nice = 10 * pow;
+  else if (norm >= 3.5) nice = 5 * pow;
+  else if (norm >= 1.6) nice = 2 * pow;
+  const px = Math.max(35, Math.min(130, nice / Math.max(1e-6, kmPerPx)));
+  return { km: nice, px };
 }
 
 /** Best Web Mercator tile level so a tile pixel roughly matches a screen pixel at the view center. */
@@ -656,7 +661,7 @@ export function InteractiveEarthGlobe({
   onSelectAirport?: (airport: Airport, role: 'from' | 'to') => void;
   onFlyNow?: (airport: Airport) => void;
   onInspectAirport?: (airport: Airport) => void;
-  onScaleKmChange?: (scaleKm: number) => void;
+  onScaleKmChange?: (scaleKm: number, scalePx: number) => void;
   controlRef?: MutableRefObject<GlobeControlHandle | null>;
   className?: string;
 }) {
@@ -1076,6 +1081,7 @@ export function InteractiveEarthGlobe({
     let lastAutoStreamTime = 0;
     let lastStreamKey = '';
     let lastReportedScale = -1;
+    let lastReportedScalePx = -1;
 
     const afterDraw = isSoftwareGl
       ? (cb: FrameRequestCallback) => {
@@ -1222,9 +1228,9 @@ export function InteractiveEarthGlobe({
         }
       }
 
-      // 3. Project & spatially declutter 3D airport pins (all regional/small airports appear by <= 50 km scale)
+      // 3. Project & spatially declutter 3D airport pins
       const visiblePins: { airport: Airport; x: number; y: number; isStar: boolean; nz: number }[] = [];
-      const minSpacingPx = scaleKm > 300 ? 20 : scaleKm > 80 ? 14 : scaleKm > 20 ? 10 : 4;
+      const minSpacingPx = scaleKm > 300 ? 55 : scaleKm > 80 ? 38 : scaleKm > 20 ? 24 : 8;
       const minSpacingSq = minSpacingPx * minSpacingPx;
 
       for (let i = 0; i < GLOBE_AIRPORT_MARKERS.length; i++) {
@@ -1234,9 +1240,14 @@ export function InteractiveEarthGlobe({
           arr?.id === m.airport.id ||
           activeAirportRef.current?.airport.id === m.airport.id;
 
-        // Show size-2 (regional/domestic) airports as soon as the user zooms to regional scales (~500 km or closer,
-        // and always at the 50 km zoom level); only thin them out at full-planet view when not in Indonesia.
-        if (!isSelected && scaleKm > 450 && m.airport.size === 2 && m.airport.country !== 'ID') continue;
+        // When zoom hasn't approached 20 km (scaleKm > 20):
+        // Keep the map clean by showing only selected endpoints and primary international star hubs.
+        // Minor domestic/regional airfields (size 1 and 2) only reveal themselves once zoomed in to <= 20 km.
+        if (!isSelected && scaleKm > 20) {
+          if (m.airport.size === 2) continue;
+          if (m.airport.size === 1 && !m.isStar) continue;
+          if (scaleKm > 100 && !m.isStar) continue;
+        }
 
         const approxNz = m.ux * camUx + m.uy * camUy + m.uz * camUz;
         if (!isSelected && approxNz <= minLimbNz) continue;
@@ -1581,12 +1592,13 @@ export function InteractiveEarthGlobe({
         cameraStateRef.current.camZ = camera.position.z;
         cameraStateRef.current.scale = nextScale;
 
-        // Report dynamic scale-bar distance in km (1000 km at planet view -> 0.05 km / 50 m at airport view)
+        // Report dynamic scale-bar distance in km and 1:1 true geodesic pixel width
         const kmPerPx = globeKmPerPixel(zoom, viewH);
-        const scaleKm = computeNiceScaleBar(kmPerPx).km;
-        if (scaleKm !== lastReportedScale) {
+        const { km: scaleKm, px: scalePx } = computeNiceScaleBar(kmPerPx);
+        if (scaleKm !== lastReportedScale || Math.abs(scalePx - lastReportedScalePx) >= 1) {
           lastReportedScale = scaleKm;
-          onScaleKmChangeRef.current?.(scaleKm);
+          lastReportedScalePx = scalePx;
+          onScaleKmChangeRef.current?.(scaleKm, scalePx);
         }
 
         if (!dragRef.current.active) {
@@ -1688,6 +1700,82 @@ export function InteractiveEarthGlobe({
     };
   }, []);
 
+  // Raycasts the mouse cursor onto the unit sphere and returns exact geographical coordinates (lat, lon) in radians
+  const raycastGlobePoint = (
+    clientX: number,
+    clientY: number
+  ): { lat: number; lon: number } | null => {
+    const rect = containerRef.current?.getBoundingClientRect();
+    if (!rect) return null;
+    const viewW = rect.width;
+    const viewH = rect.height;
+    if (viewW <= 0 || viewH <= 0) return null;
+
+    const mouseX = clientX - rect.left;
+    const mouseY = clientY - rect.top;
+
+    const ndcX = (mouseX / viewW) * 2 - 1;
+    const ndcY = -(mouseY / viewH) * 2 + 1;
+
+    const fovRad = (cameraStateRef.current.fov * Math.PI) / 180;
+    const tanHalfFov = Math.tan(fovRad * 0.5);
+    const aspect = viewW / viewH;
+
+    const camZ = cameraStateRef.current.camZ;
+    const scale = cameraStateRef.current.scale;
+
+    // Ray direction in camera space (camera looks along -Z)
+    const dirX = ndcX * tanHalfFov * aspect;
+    const dirY = ndcY * tanHalfFov;
+    const dirZ = -1.0;
+    const len = Math.hypot(dirX, dirY, dirZ);
+    const dx = dirX / len;
+    const dy = dirY / len;
+    const dz = dirZ / len;
+
+    // Ray-Sphere intersection with sphere of radius `scale` at (0, 0, 0)
+    const b = camZ * dz;
+    const c = camZ * camZ - scale * scale;
+    const disc = b * b - c;
+    if (disc < 0) return null; // Ray missed the globe
+
+    const t = -b - Math.sqrt(disc);
+    const px = t * dx;
+    const py = t * dy;
+    const pz = camZ + t * dz;
+
+    // Point on unit sphere in world space
+    const uxWorld = px / scale;
+    const uyWorld = py / scale;
+    const uzWorld = pz / scale;
+
+    // Inverse rotation of spinGroup (order 'XYZ', R = R_x(lat) * R_y(-lon - PI/2)):
+    // R_inv = R_y(lon + PI/2) * R_x(-lat)
+    const curLat = rotRef.current.lat;
+    const curLon = rotRef.current.lon;
+
+    // 1. Rotate by -curLat around X axis
+    const cosLat = Math.cos(-curLat);
+    const sinLat = Math.sin(-curLat);
+    const x1 = uxWorld;
+    const y1 = uyWorld * cosLat - uzWorld * sinLat;
+    const z1 = uyWorld * sinLat + uzWorld * cosLat;
+
+    // 2. Rotate by (curLon + PI/2) around Y axis
+    const angleY = curLon + Math.PI * 0.5;
+    const cosY = Math.cos(angleY);
+    const sinY = Math.sin(angleY);
+    const x2 = x1 * cosY + z1 * sinY;
+    const y2 = y1;
+    const z2 = -x1 * sinY + z1 * cosY;
+
+    const clampedY = Math.max(-0.999999, Math.min(0.999999, y2));
+    const geoLat = Math.asin(clampedY);
+    const geoLon = Math.atan2(-z2, x2);
+
+    return { lat: geoLat, lon: geoLon };
+  };
+
   return (
     <div
       ref={containerRef}
@@ -1768,13 +1856,34 @@ export function InteractiveEarthGlobe({
         const factor = e.deltaY < 0 ? 1.38 : 1 / 1.38;
         const nextZoom = Math.max(1.0, Math.min(MAX_GLOBE_ZOOM, rotRef.current.targetZoom * factor));
         rotRef.current.targetZoom = nextZoom;
-        // Anchor wheel zoom to the current screen center so the globe never drifts toward a corner
-        rotRef.current.targetLat = rotRef.current.lat;
-        rotRef.current.targetLon = rotRef.current.lon;
+
+        // Zoom directed towards the mouse cursor position on the globe
+        const hit = raycastGlobePoint(e.clientX, e.clientY);
+        if (hit) {
+          const twoPi = Math.PI * 2;
+          const dLon = (((hit.lon - rotRef.current.lon) % twoPi) + twoPi * 1.5) % twoPi - Math.PI;
+          const dLat = hit.lat - rotRef.current.lat;
+
+          if (factor > 1) {
+            // Zooming IN: pull target center towards the cursor point on the globe
+            const moveFrac = Math.min(0.5, 1 - 1 / factor);
+            rotRef.current.targetLat = Math.max(-1.42, Math.min(1.42, rotRef.current.targetLat + dLat * moveFrac));
+            rotRef.current.targetLon = rotRef.current.targetLon + dLon * moveFrac;
+          } else {
+            // Zooming OUT: gently center back to keep overview stable
+            const moveFrac = Math.min(0.2, 1 - factor);
+            rotRef.current.targetLat = Math.max(-1.42, Math.min(1.42, rotRef.current.targetLat - dLat * moveFrac));
+            rotRef.current.targetLon = rotRef.current.targetLon - dLon * moveFrac;
+          }
+        } else {
+          rotRef.current.targetLat = rotRef.current.lat;
+          rotRef.current.targetLon = rotRef.current.lon;
+        }
+
         if (nextZoom > 1.2) {
           requestHighResTilesRef.current?.(
-            rotRef.current.lat * (180 / Math.PI),
-            rotRef.current.lon * (180 / Math.PI),
+            rotRef.current.targetLat * (180 / Math.PI),
+            rotRef.current.targetLon * (180 / Math.PI),
             nextZoom
           );
         }

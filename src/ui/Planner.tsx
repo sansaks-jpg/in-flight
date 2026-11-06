@@ -38,6 +38,7 @@ interface Props {
   initialHangarOpen?: boolean;
   globeControlRef?: MutableRefObject<GlobeControlHandle | null>;
   scaleKm?: number;
+  scalePx?: number;
 }
 
 const INDONESIAN_REGIONS: { label: string; region: string; icao: string; zoom: number }[] = [
@@ -151,7 +152,8 @@ export function Planner({
   onBack,
   initialHangarOpen = false,
   globeControlRef,
-  scaleKm = 107.68,
+  scaleKm = 1000,
+  scalePx = 80,
 }: Props) {
   const [hangarOpen, setHangarOpen] = useState(initialHangarOpen);
   const [efbOpen, setEfbOpen] = useState(false);
@@ -1017,14 +1019,17 @@ export function Planner({
 
         {/* Bottom-Right: Scale Indicator + Blue 3-Icon Strip + Blue [T] EFB Bar + Start Flight Bar */}
         <div className="pointer-events-auto flex flex-col items-end gap-1.5 w-[250px] sm:w-[265px]">
-          {/* Scale Bar ("107.68 km" / "4.24 km") + Blue 3-Icon Pill */}
+          {/* Scale Bar ("1000 km", "20 km", "500 m") with 1:1 true geodesic pixel width */}
           <div className="w-full flex items-end justify-between pl-4">
             <div className="flex flex-col items-center text-[11px] font-semibold text-white drop-shadow">
-              <div className="w-8 h-1.5 border-l border-r border-b border-white/90 mb-0.5" />
+              <div
+                style={{ width: `${Math.round(scalePx)}px` }}
+                className="h-1.5 border-l border-r border-b border-white/90 mb-0.5 transition-[width] duration-150"
+              />
               <span>
                 {scaleKm < 1
-                  ? `${Math.round(scaleKm * 1000)} m (${scaleKm.toFixed(2)} km)`
-                  : `${Number.isInteger(scaleKm) ? scaleKm : scaleKm.toFixed(2)} km`}
+                  ? `${Math.round(scaleKm * 1000)} m`
+                  : `${scaleKm >= 10 ? Math.round(scaleKm) : scaleKm.toFixed(1)} km`}
               </span>
             </div>
 

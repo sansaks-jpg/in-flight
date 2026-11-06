@@ -31,7 +31,7 @@ export default function App() {
   const [selectedArr, setSelectedArr] = useState<Airport | null>(null);
   const selectedDepRef = useRef(selectedDep); selectedDepRef.current = selectedDep;
   const selectedArrRef = useRef(selectedArr); selectedArrRef.current = selectedArr;
-  const [scaleKm, setScaleKm] = useState<number>(1000);
+  const [scaleInfo, setScaleInfo] = useState<{ km: number; px: number }>({ km: 1000, px: 80 });
   const [hud, setHud] = useState<HudState | null>(null);
   const [phase, setPhase] = useState<Phase>('idle');
   const [toasts, setToasts] = useState<Toast[]>([]);
@@ -197,7 +197,7 @@ export default function App() {
             selectedArr={selectedArr}
             onSelectAirport={handleSelectAirport}
             onFlyNow={handleFlyNowFromGlobe}
-            onScaleKmChange={setScaleKm}
+            onScaleKmChange={(km, px) => setScaleInfo({ km, px })}
             controlRef={globeControlRef}
             className="w-full h-full pointer-events-auto"
           />
@@ -221,7 +221,8 @@ export default function App() {
           onBack={backFromPlanner}
           initialHangarOpen={openHangarOnEnter}
           globeControlRef={globeControlRef}
-          scaleKm={scaleKm}
+          scaleKm={scaleInfo.km}
+          scalePx={scaleInfo.px}
         />
       )}
       {(screen === 'start' || transitioningMenuExit) && (
