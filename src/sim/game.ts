@@ -763,9 +763,9 @@ export class Game {
         this.camera.fov = 65;
         break;
       case 'overhead':
-        this.cockpit.views.cockpit.pos.set(0, ey - 0.22, ez + 0.1);
+        this.cockpit.views.cockpit.pos.set(0, ey + 0.15, ez + 0.1);
         this.cockpit.views.cockpit.yaw = 0;
-        this.cockpit.views.cockpit.pitch = -0.65;
+        this.cockpit.views.cockpit.pitch = 0.65;
         this.camera.fov = 68;
         break;
     }
@@ -1110,7 +1110,18 @@ export class Game {
     this.viewIdx = VIEWS.indexOf(v); this.lookYaw = 0; this.lookPitch = 0; this.orbitYaw = 0; this.orbitPitch = 0.12;
     this.visual?.setInterior(this.isInterior());
   }
-  resetView() { this.lookYaw = this.lookPitch = this.orbitYaw = 0; this.orbitPitch = 0.12; this.zoom = 1; this.chaseInit = false; }
+  resetView() {
+    this.lookYaw = this.lookPitch = this.orbitYaw = 0;
+    this.orbitPitch = 0.12;
+    this.zoom = 1;
+    this.chaseInit = false;
+    if (this.cockpit) {
+      const [ex, ey, ez] = this.spec.eye;
+      this.cockpit.views.cockpit.pos.set(ex, ey, ez);
+      this.cockpit.views.cockpit.yaw = 0;
+      this.cockpit.views.cockpit.pitch = -0.1;
+    }
+  }
   cycleView() { this.setView(VIEWS[(this.viewIdx + 1) % VIEWS.length]); this.audio.click(); this.toast(`Camera: ${this.viewName()}`, 'info'); }
   viewName() { return { cockpit: 'Cockpit', chase: 'Chase', spotter: 'Spotter', aisle: 'Cabin – aisle', window: 'Cabin – window seat' }[VIEWS[this.viewIdx]]; }
   isInterior() { const v = VIEWS[this.viewIdx]; return v === 'cockpit' || v === 'aisle' || v === 'window'; }
@@ -2005,9 +2016,8 @@ export class Game {
   }
   private updateCamera(dt: number) {
     const fm = this.fm, cam = this.camera, L = this.spec.length, view = VIEWS[this.viewIdx], t = this.time;
-    // Dynamic near/far planes keep hardware Early-Z depth buffer 100% z-fight-free at all altitudes
-    cam.near = clamp(fm.agl * 0.04, 0.6, 85);
-    cam.far = clamp(180000 + fm.agl * 12, 180000, 320000);
+    // Dynamic far plane preserves distant horizon view across altitudes
+    cam.far = clamp(180000 + fm.agl * 12, 180000, 350000);
     // shake
     const set = this.cfg.settings;
     const flying = this.phase === 'playing';
@@ -2018,6 +2028,7 @@ export class Game {
     const sx = amp * (Math.sin(t * 23.1) + Math.sin(t * 41.7 + 1.3)), sy = amp * (Math.sin(t * 19.3 + 2) + Math.sin(t * 37.9)), sr = amp * 0.6 * Math.sin(t * 29.1);
     const gOff = flying ? clamp(-(fm.nz - 1) * 0.025, -0.06, 0.06) : 0;
     if (this.isInterior() && this.mode === 'play') {
+      cam.near = 0.25;
       const vw = this.cockpit!.views[view as 'cockpit' | 'aisle' | 'window'];
       tmpE.set(vw.pitch + this.lookPitch + sx, vw.yaw + this.lookYaw + sy, sr, 'YXZ');
       const local = tmpQ.setFromEuler(tmpE).clone();
@@ -2032,6 +2043,7 @@ export class Game {
         this.spotAnchor = fm.pos.clone().addScaledVector(vdir, 700 + fm.gs * 4).addScaledVector(side, 70 + L * 2);
         const gh = this.world!.terrain.heightAt(this.spotAnchor.x, this.spotAnchor.z); this.spotAnchor.y = Math.max(gh + 6, Math.min(fm.pos.y, gh + 150));
       }
+      cam.near = clamp(d * 0.02, 0.5, 10);
       cam.position.copy(this.spotAnchor); cam.lookAt(fm.pos); cam.fov = clamp(2 * Math.atan(L * 1.6 / Math.max(60, d)) * R2D, 8, 50); cam.updateProjectionMatrix();
     } else {
       // chase
@@ -2040,12 +2052,14 @@ export class Game {
       const e = new THREE.Euler().setFromQuaternion(this.chaseQ, 'YXZ'); e.z *= 0.35;
       const q = new THREE.Quaternion().setFromEuler(e);
       const off = new THREE.Vector3(0, L * 0.16 + 1.5, L * 0.95 + 5).multiplyScalar(this.zoom);
-      const orb = new THREE.Quaternion().setFromEuler(new THREE.Euler(this.orbitPitch * 0 - 0, this.orbitYaw, 0, 'YXZ'));
+      const orb = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, this.orbitYaw, 0, 'YXZ'));
       off.applyAxisAngle(new THREE.Vector3(1, 0, 0), -(this.orbitPitch - 0.12) * 1.2).applyQuaternion(orb).applyQuaternion(q);
       cam.position.copy(fm.pos).add(off);
       const gh = this.world!.terrain.heightAt(cam.position.x, cam.position.z); if (cam.position.y < gh + 2.5) cam.position.y = gh + 2.5;
+      const camDist = off.length();
+      cam.near = clamp(Math.min(0.5, (camDist - L * 0.4) * 0.4), 0.1, 1.5);
       cam.up.set(0, 1, 0).applyQuaternion(new THREE.Quaternion().setFromEuler(new THREE.Euler(0, 0, e.z * 0.6)));
-      cam.lookAt(fm.pos.x, fm.pos.y + L * 0.03, fm.pos.z); cam.up.set(0, 1, 0);
+      cam.lookAt(fm.pos.x, fm.pos.y + L * 0.03, fm.pos.z);
       cam.rotateX(sx); cam.rotateY(sy); cam.fov = this.fovFor(60 + Math.min(10, fm.gs / 40)); cam.updateProjectionMatrix();
     }
     if (this.phase === 'crashed') { cam.lookAt(this.crashPos); }
