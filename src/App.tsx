@@ -5,7 +5,7 @@ import { Settings, loadSettings, saveSettings, loadRoute, saveRoute, loadScores 
 import { StartScreen } from './ui/Screens';
 import { Planner } from './ui/Planner';
 import { refineWithin } from './data/runwayRefine';
-import { GLOBE_AIRPORT_FOCUS_ZOOM, GlobeControlHandle, InteractiveEarthGlobe } from './ui/PreGameVisuals';
+import { GlobeControlHandle, InteractiveEarthGlobe } from './ui/PreGameVisuals';
 import { nextHudMode } from './ui/navigation';
 import { flightWorkspaceReducer, INITIAL_WORKSPACE } from './ui/flightWorkspace';
 import type { NavigationMapView } from './ui/MapPanel';
@@ -141,7 +141,8 @@ export default function App() {
     setFrom(airport);
     cur.current.from = airport;
     setSelectedArr((prev) => (prev && prev.id === airport.id ? null : prev));
-    globeControlRef.current?.focusLocation(airport.lat, airport.lon, GLOBE_AIRPORT_FOCUS_ZOOM);
+    // Fly to the runway the aircraft will actually use (best runway towards the arrival), not the airport reference point.
+    globeControlRef.current?.focusRunway(airport, '', 'dep', selectedArrRef.current && selectedArrRef.current.id !== airport.id ? selectedArrRef.current : null);
   }, []);
 
   const selectArr = useCallback((airport: Airport | null) => {
@@ -151,7 +152,7 @@ export default function App() {
     setTo(airport);
     cur.current.to = airport;
     setSelectedDep((prev) => (prev && prev.id === airport.id ? null : prev));
-    globeControlRef.current?.focusLocation(airport.lat, airport.lon, GLOBE_AIRPORT_FOCUS_ZOOM);
+    globeControlRef.current?.focusRunway(airport, '', 'arr', selectedDepRef.current && selectedDepRef.current.id !== airport.id ? selectedDepRef.current : null);
   }, []);
 
   const handleSelectAirport = useCallback((airport: Airport, role: 'from' | 'to') => {

@@ -10,6 +10,7 @@ import { buildAircraftModel, AircraftVisual } from './aircraftModel';
 import { Cockpit } from './cockpit';
 import { PanelData } from './instruments';
 import { Autopilot, IlsData } from './autopilot';
+import { advanceWaypoint } from './lnav';
 import { AudioEngine, WarnSound } from './audio';
 import { Effects } from './effects';
 import { Settings, addScore, QualityPreset } from './storage';
@@ -1411,7 +1412,8 @@ export class Game {
     if (this.phase === 'playing') this.simulate(rdt);
     else if (this.phase === 'crashed' || this.phase === 'complete') this.postEnd(rdt);
     else if (this.phase === 'paused') { this.audio.update(this.audioState(true), rdt); }
-    this.hudT += rdt; if (this.hudT > 0.09) { this.hudT = 0; this.hooks.onHud(this.hud()); }
+    // While the full-screen chart covers the cockpit the HUD is invisible: 4 Hz is plenty and spares React ~7 re-renders/s.
+    this.hudT += rdt; if (this.hudT > (this.mapOnly ? 0.25 : 0.09)) { this.hudT = 0; this.hooks.onHud(this.hud()); }
     if (this.mapOnly) {
       this.updateCamera(rdt);
       if (this.phase === 'playing') this.audio.update(this.audioState(false), rdt);
@@ -1472,6 +1474,16 @@ export class Game {
     if (k.has('Insert')) c.trim = clamp(c.trim + 0.3 * dt, -1, 1); if (k.has('Delete')) c.trim = clamp(c.trim - 0.3 * dt, -1, 1);
     // brakes
     const brakeTgt = k.has(' ') || this.touch.brake ? 1 : 0; this.brakeAxis += clamp(brakeTgt - this.brakeAxis, -dt * 8, dt * 5); c.brake = this.brakeAxis;
+    // FMS waypoint sequencing (geometric fly-by logic, see lnav.ts). It runs whenever the aircraft is flying - with or
+    // without the autopilot - and never targets a fix behind the aircraft (the old capture-radius rule did, which sent the
+    // aircraft back to the departure runway when the autopilot was engaged after a manual take-off).
+    if (this.flightPlan.length > 0 && (!fm.wow || this.ap.on)) {
+      const next = advanceWaypoint(this.flightPlan, this.activeWpIdx, this.lat(), this.lon(), Math.max(20, fm.gs), !fm.wow);
+      if (next !== this.activeWpIdx) {
+        this.activeWpIdx = next;
+        if (this.ap.on && this.flightPlan[next]) this.toast(`WPT SEQ: ${this.flightPlan[next].name}`, 'info');
+      }
+    }
     // autopilot
     const manual = Math.abs(pitch) > 0.55 || Math.abs(roll) > 0.55;
     if (this.ap.on) {
@@ -1479,18 +1491,6 @@ export class Game {
       if (this.apOverride > 0.35) {
         this.toggleAp();
       } else if (this.ap.on) {
-        // Sequentially advance flight plan waypoints
-        if (this.flightPlan.length > 0 && this.activeWpIdx < this.flightPlan.length - 1) {
-          const curWp = this.flightPlan[this.activeWpIdx];
-          const d = haversine(this.lat(), this.lon(), curWp.lat, curWp.lon);
-          const captureR = curWp.type === 'touchdown' ? 600 : curWp.type === 'faf' ? 1400 : curWp.type === 'takeoff' ? 900 : 2500;
-          if (d < captureR) {
-            this.activeWpIdx++;
-            const nextWp = this.flightPlan[this.activeWpIdx];
-            this.toast(`WPT SEQ: ${nextWp.name}`, 'info');
-          }
-        }
-
         const ils = this.computeIls();
         const brg = this.navBearing();
         const cmd = this.ap.step(fm, dt, brg, ils, this.flightPlan, this.activeWpIdx, this.lat(), this.lon());

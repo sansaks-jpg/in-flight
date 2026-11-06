@@ -5,6 +5,9 @@ import { AIRCRAFT, specById } from '../sim/specs';
 import { bearing, destination, haversine } from '../sim/geo';
 import { Settings } from '../sim/storage';
 import { FlightIcon } from './FlightIcon';
+import { GlobeTiles } from './globeTiles';
+import { GlobeFlight, decayVelocity, wheelToLogZoom, wrapPi } from './globeCamera';
+import { drawRunwayMarkings, runwayAlpha } from './globeRunways';
 import {
   AIRCRAFT_VARIANTS,
   AircraftVariantInfo,
@@ -16,7 +19,6 @@ import {
   getAircraftStatsComparison,
   HangarCategory,
   latDegToEquirectangularY,
-  latLonToMercatorTile,
   latLonToUnitSphere,
   mercatorTileYToLatDeg,
   REPO_FACTS,
@@ -435,73 +437,6 @@ function drawMercatorTileToEquirectangular(
   }
 }
 
-/**
- * Builds a curved 3D spherical patch BufferGeometry on the unit sphere for a Web Mercator tile (z, tx, ty).
- * Allows native 256x256 Esri World Imagery satellite tiles at z = 4..19 to render with full crispness on the 3D globe.
- *
- * Vertices are stored relative to the patch center (RTC) and the mesh is positioned at that center, so float32
- * vertex precision stays sub-centimetre even when the camera hovers a few hundred metres above an airport.
- * All patches lie exactly on the unit sphere; layering is resolved by draw order (coarse → fine), not by
- * per-level radius offsets (those offsets caused visible parallax "squares" and z-fighting seams).
- */
-function createSphericalTileGeometry(
-  z: number,
-  tx: number,
-  ty: number
-): { geo: THREE.BufferGeometry; center: THREE.Vector3 } {
-  const grid = z <= 6 ? 16 : 8;
-  const nTiles = Math.pow(2, z);
-  const vertCount = (grid + 1) * (grid + 1);
-  const positions = new Float32Array(vertCount * 3);
-  const normals = new Float32Array(vertCount * 3);
-  const uvs = new Float32Array(vertCount * 2);
-  const indices: number[] = [];
-
-  const centerLat = mercatorTileYToLatDeg(ty + 0.5, z);
-  const centerLon = ((tx + 0.5) / nTiles) * 360 - 180;
-  const [cx, cy, cz] = latLonToUnitSphere(centerLat, centerLon);
-
-  let ptr3 = 0;
-  let ptr2 = 0;
-  for (let iy = 0; iy <= grid; iy++) {
-    const v = iy / grid;
-    const latDeg = mercatorTileYToLatDeg(ty + v, z);
-    for (let ix = 0; ix <= grid; ix++) {
-      const u = ix / grid;
-      const lonDeg = ((tx + u) / nTiles) * 360 - 180;
-      const [ux, uy, uz] = latLonToUnitSphere(latDeg, lonDeg);
-      positions[ptr3] = ux - cx;
-      positions[ptr3 + 1] = uy - cy;
-      positions[ptr3 + 2] = uz - cz;
-      normals[ptr3] = ux;
-      normals[ptr3 + 1] = uy;
-      normals[ptr3 + 2] = uz;
-      ptr3 += 3;
-      uvs[ptr2] = u;
-      uvs[ptr2 + 1] = 1 - v;
-      ptr2 += 2;
-    }
-  }
-
-  for (let iy = 0; iy < grid; iy++) {
-    for (let ix = 0; ix < grid; ix++) {
-      const a = iy * (grid + 1) + ix;
-      const b = a + 1;
-      const c = (iy + 1) * (grid + 1) + ix;
-      const d = c + 1;
-      indices.push(a, c, b, b, c, d);
-    }
-  }
-
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  geo.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
-  geo.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
-  geo.setIndex(indices);
-  geo.computeBoundingSphere();
-  return { geo, center: new THREE.Vector3(cx, cy, cz) };
-}
-
 /* ---------- Globe camera model (fixed FOV, altitude-based zoom like standard map apps) ---------- */
 
 const EARTH_RADIUS_KM = 6371;
@@ -554,11 +489,42 @@ function globeTileLevelFor(zoom: number, latDeg: number, viewH: number): number 
   return Math.max(2, Math.min(MAX_TILE_Z, z));
 }
 
+/** Camera view that frames a whole airfield (every runway) in ~55% of the view height, centred on the runways. */
+export function frameAirportView(airport: Airport): { lat: number; lon: number; zoom: number } {
+  let minLa = 90, maxLa = -90, minLo = 180, maxLo = -180;
+  for (const rw of airport.runways) {
+    for (const [la, lo] of [[rw.leLat, rw.leLon], [rw.heLat, rw.heLon]] as const) {
+      minLa = Math.min(minLa, la); maxLa = Math.max(maxLa, la); minLo = Math.min(minLo, lo); maxLo = Math.max(maxLo, lo);
+    }
+  }
+  if (minLa > maxLa) return { lat: airport.lat, lon: airport.lon, zoom: GLOBE_AIRPORT_DETAIL_ZOOM * 0.4 };
+  const lat = (minLa + maxLa) / 2, lon = (minLo + maxLo) / 2;
+  const extentKm = Math.max(1.6, haversine(minLa, minLo, maxLa, maxLo) / 1000);
+  const visibleKm = extentKm / 0.55;
+  const zoom = (2 * GLOBE_BASE_ALT * EARTH_RADIUS_KM * GLOBE_TAN_HALF_FOV) / visibleKm;
+  return { lat, lon, zoom: Math.max(GLOBE_AIRPORT_FOCUS_ZOOM, Math.min(MAX_GLOBE_ZOOM, zoom)) };
+}
+
+/** Camera view that frames one runway (both thresholds) – used when a runway, not just an airport, is chosen. */
+export function frameRunwayView(a: RunwayAnchor): { lat: number; lon: number; zoom: number } {
+  const hdg = bearing(a.rw.leLat, a.rw.leLon, a.rw.heLat, a.rw.heLon) * (Math.PI / 180);
+  const lenKm = a.lengthM / 1000, aspect = 1.6;
+  // Fit the runway's vertical and horizontal screen extents (north-up map) into ~50% of the view.
+  const visibleKm = Math.max(1.4, lenKm * Math.abs(Math.cos(hdg)) / 0.5, (lenKm * Math.abs(Math.sin(hdg))) / (0.5 * aspect));
+  const zoom = (2 * GLOBE_BASE_ALT * EARTH_RADIUS_KM * GLOBE_TAN_HALF_FOV) / visibleKm;
+  return { lat: a.midLat, lon: a.midLon, zoom: Math.max(GLOBE_AIRPORT_FOCUS_ZOOM, Math.min(MAX_GLOBE_ZOOM, zoom)) };
+}
+
 export interface GlobeControlHandle {
   focusLocation: (lat: number, lon: number, targetZoom?: number) => void;
   focusRoute: (dep: Airport, arr: Airport) => void;
-  /** Centre the map on a specific runway (not the airport centre) and zoom so the whole runway is framed. */
-  focusRunway: (airport: Airport, ident: string) => void;
+  /**
+   * Fly to a specific runway (its own coordinates, not the airport reference point). An empty ident resolves the best runway
+   * for `role` (towards / from `opposite`), exactly as the dispatcher does.
+   */
+  focusRunway: (airport: Airport, ident: string, role?: 'dep' | 'arr', opposite?: Airport | null) => void;
+  /** Fly to frame the whole airfield. */
+  focusAirport: (airport: Airport) => void;
   zoomBy: (delta: number) => void;
   resetGlobeView: () => void;
 }
@@ -602,6 +568,20 @@ const GLOBE_AIRPORT_MARKERS: GlobeAirportMarker[] = AIRPORTS.filter(
     };
   })
   .sort((a, b) => Number(b.isStar) - Number(a.isStar) || a.airport.size - b.airport.size);
+
+const GLOBE_MARKER_IDS = new Set(GLOBE_AIRPORT_MARKERS.map((m) => m.airport.id));
+const overlayExtraMarkers: GlobeAirportMarker[] = [];
+/** Unit vectors of a runway's two ends + its true length, cached per runway object (zero allocation in the frame loop). */
+const rwVec = new WeakMap<Runway, Float64Array>();
+function runwayVectors(rw: Runway): Float64Array {
+  let v = rwVec.get(rw);
+  if (v) return v;
+  const [ax, ay, az] = latLonToUnitSphere(rw.leLat, rw.leLon);
+  const [bx, by, bz] = latLonToUnitSphere(rw.heLat, rw.heLon);
+  v = new Float64Array([ax, ay, az, bx, by, bz, haversine(rw.leLat, rw.leLon, rw.heLat, rw.heLon)]);
+  rwVec.set(rw, v);
+  return v;
+}
 
 // Deterministic settlement light dots clustered around populated airfields
 const GLOBE_SETTLEMENT_DOTS: GlobeSettlementDot[] = (() => {
@@ -885,48 +865,51 @@ export function InteractiveEarthGlobe({
     }
   }, [mode, focusLat, focusLon]);
 
+  const flightRef = useRef(new GlobeFlight());
+  const tilesRef = useRef<GlobeTiles | null>(null);
+  /** Asks the render loop to repaint (the loop skips frames when nothing changed). */
+  const wakeRef = useRef<() => void>(() => {});
+  const inertiaRef = useRef({ lat: 0, lon: 0 });
+  const zoomAnchorRef = useRef<{ lat: number; lon: number; x: number; y: number } | null>(null);
+  const popupHoverRunwayRef = useRef<{ airportId: string; ident: string } | null>(null);
+
+  /** Eased Google-Earth-style flight (great-circle path, eased zoom with a pull-back arc on long hops). */
+  const flyTo = (latDeg: number, lonDeg: number, zoom: number) => {
+    const z = Math.max(1, Math.min(MAX_GLOBE_ZOOM, zoom));
+    const r = rotRef.current;
+    const lat = Math.max(-1.42, Math.min(1.42, latDeg * (Math.PI / 180))), lon = lonDeg * (Math.PI / 180);
+    if (modeRef.current !== 'planner') { setShortestTargetLatLon(latDeg, lonDeg, z); return; }
+    inertiaRef.current.lat = inertiaRef.current.lon = 0; zoomAnchorRef.current = null;
+    flightRef.current.start(performance.now(), { lat: r.lat, lon: r.lon, zoom: r.zoom }, { lat, lon, zoom: z });
+    r.targetLat = lat; r.targetLon = r.lon + ((((lon - r.lon) % (Math.PI * 2)) + Math.PI * 3) % (Math.PI * 2)) - Math.PI; r.targetZoom = z;
+    tilesRef.current?.prefetch(latDeg, lonDeg, globeTileLevelFor(z, latDeg, cameraStateRef.current.viewH), performance.now());
+    wakeRef.current();
+  };
+
   useEffect(() => {
     if (!controlRef) return;
     controlRef.current = {
-      focusLocation: (lat: number, lon: number, targetZoom = GLOBE_AIRPORT_FOCUS_ZOOM) => {
-        const clampedZoom = Math.max(1.0, Math.min(MAX_GLOBE_ZOOM, targetZoom));
-        setShortestTargetLatLon(lat, lon, clampedZoom);
-        requestHighResTilesRef.current?.(lat, lon, clampedZoom);
-      },
+      focusLocation: (lat: number, lon: number, targetZoom = GLOBE_AIRPORT_FOCUS_ZOOM) => flyTo(lat, lon, targetZoom),
       focusRoute: (dep: Airport, arr: Airport) => {
         const view = computeRouteFocusView(dep, arr);
-        setShortestTargetLatLon(view.lat, view.lon, view.zoom);
-        requestHighResTilesRef.current?.(view.lat, view.lon, view.zoom);
-        requestHighResTilesRef.current?.(dep.lat, dep.lon, Math.max(view.zoom, 12));
-        requestHighResTilesRef.current?.(arr.lat, arr.lon, Math.max(view.zoom, 12));
+        flyTo(view.lat, view.lon, view.zoom);
+        for (const a of [dep, arr]) tilesRef.current?.prefetch(a.lat, a.lon, 12, performance.now());
       },
-      focusRunway: (airport: Airport, ident: string) => {
-        const a = resolveRunwayAnchor(airport, ident, 'dep');
-        if (!a) {
-          setShortestTargetLatLon(airport.lat, airport.lon, GLOBE_AIRPORT_FOCUS_ZOOM);
-          requestHighResTilesRef.current?.(airport.lat, airport.lon, GLOBE_AIRPORT_FOCUS_ZOOM);
-          return;
-        }
-        // Visible vertical span ≈ 7308 km / zoom (35° FOV): frame the runway in ~45% of the view height.
-        const visibleKm = Math.max(1.2, (a.lengthM / 1000) / 0.45);
-        const z = Math.max(GLOBE_AIRPORT_FOCUS_ZOOM, Math.min(MAX_GLOBE_ZOOM, (2 * GLOBE_BASE_ALT * EARTH_RADIUS_KM * GLOBE_TAN_HALF_FOV) / visibleKm));
-        setShortestTargetLatLon(a.midLat, a.midLon, z);
-        requestHighResTilesRef.current?.(a.midLat, a.midLon, z);
+      focusRunway: (airport: Airport, ident: string, role: 'dep' | 'arr' = 'dep', opposite?: Airport | null) => {
+        const a = resolveRunwayAnchor(airport, ident, role, opposite);
+        if (!a) { const v = frameAirportView(airport); flyTo(v.lat, v.lon, v.zoom); return; }
+        const v = frameRunwayView(a);
+        flyTo(v.lat, v.lon, v.zoom);
       },
+      focusAirport: (airport: Airport) => { const v = frameAirportView(airport); flyTo(v.lat, v.lon, v.zoom); },
       zoomBy: (delta: number) => {
-        const factor = delta > 0 ? 1.55 : 1 / 1.55;
-        const nextZoom = Math.max(1.0, Math.min(MAX_GLOBE_ZOOM, rotRef.current.targetZoom * factor));
-        rotRef.current.targetZoom = nextZoom;
-        if (nextZoom > 1.2) {
-          requestHighResTilesRef.current?.(
-            rotRef.current.targetLat * (180 / Math.PI),
-            rotRef.current.targetLon * (180 / Math.PI),
-            nextZoom
-          );
-        }
+        const factor = delta > 0 ? 1.8 : 1 / 1.8;
+        flightRef.current.cancel(); zoomAnchorRef.current = null;
+        rotRef.current.targetZoom = Math.max(1.0, Math.min(MAX_GLOBE_ZOOM, rotRef.current.targetZoom * factor));
+        wakeRef.current();
       },
       resetGlobeView: () => {
-        setShortestTargetLatLon(-2.5, 115.0, 1.0);
+        flyTo(-2.5, 115.0, 1.0);
         setActiveAirport(null);
       },
     };
@@ -969,10 +952,11 @@ export function InteractiveEarthGlobe({
       paintInitialSatelliteBase(texCtx, texCanvas.width, texCanvas.height);
     }
 
-    renderer.setPixelRatio(isSoftwareGl ? 1 : Math.min(window.devicePixelRatio || 1, 2));
+    renderer.setPixelRatio(isSoftwareGl ? 1 : Math.min(window.devicePixelRatio || 1, 1.75));
     renderer.outputColorSpace = THREE.SRGBColorSpace;
-    renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.12;
+    // Satellite imagery is shown unlit and un-tonemapped: true colours, and every tile / the base globe match exactly
+    // (lighting differences between coplanar patches were one cause of the visible "boxes").
+    renderer.toneMapping = THREE.NoToneMapping;
 
     const domCanvas = renderer.domElement;
     domCanvas.setAttribute('aria-label', 'Interactive 3D Earth Globe');
@@ -983,18 +967,6 @@ export function InteractiveEarthGlobe({
     const scene = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera(GLOBE_FOV_DEG, 1, 0.0001, 50);
     camera.position.set(0, 0, 2.65);
-
-    // Balanced 3-point studio lighting rig for a solid, glossy globe (zero edge transparency or holes, locked 60 FPS)
-    const hemiLight = new THREE.HemisphereLight(0xf1f5f9, 0x102347, 1.65);
-    scene.add(hemiLight);
-
-    const sunLight = new THREE.DirectionalLight(0xfffbeb, 1.45);
-    sunLight.position.set(-2.0, 1.8, 3.4);
-    scene.add(sunLight);
-
-    const rimLight = new THREE.DirectionalLight(0x93c5fd, 0.65);
-    rimLight.position.set(2.4, -1.2, 2.2);
-    scene.add(rimLight);
 
     // Root group positioned on the right in 'menu' mode and centered in 'planner' mode
     const earthGroup = new THREE.Group();
@@ -1022,95 +994,42 @@ export function InteractiveEarthGlobe({
     earthTexture.magFilter = THREE.LinearFilter;
     earthTexture.anisotropy = isSoftwareGl ? 1 : maxAniso;
 
-    const segs = isSoftwareGl ? 64 : 112;
+    const segs = isSoftwareGl ? 64 : 96;
     const earthGeo = new THREE.SphereGeometry(1.0, segs, segs);
     // 100% solid, opaque, high-gloss material (zero transparency, zero holes on the edges, 60 FPS)
-    const earthMat = new THREE.MeshPhongMaterial({
+    const earthMat = new THREE.MeshBasicMaterial({
       map: earthTexture,
-      transparent: false,
-      opacity: 1.0,
       depthWrite: true,
       depthTest: true,
       side: THREE.FrontSide,
-      specular: new THREE.Color(0x4a6b94),
-      shininess: 38,
+      toneMapped: false,
     });
     const earthMesh = new THREE.Mesh(earthGeo, earthMat);
     earthMesh.renderOrder = 0;
     spinGroup.add(earthMesh);
 
-    // Group holding native 256x256 curved 3D spherical tile patches for sharp multi-zoom (z = 4..19)
+    // Level-of-detail satellite tiles (screen-space-error quadtree, cross-fading, parent fallback, 404-aware).
     const highResTileGroup = new THREE.Group();
     spinGroup.add(highResTileGroup);
+    const tiles = new GlobeTiles(highResTileGroup, maxAniso, () => wakeRef.current());
+    tiles.maxZ = isSoftwareGl ? 15 : MAX_TILE_Z;
+    tiles.maxTextures = isSoftwareGl ? 280 : 560;
+    tilesRef.current = tiles;
 
-    interface SphericalTileEntry {
-      key: string;
-      z: number;
-      mesh: THREE.Mesh;
-      geo: THREE.BufferGeometry;
-      mat: THREE.MeshPhongMaterial;
-      tex: THREE.Texture;
-      lastUsed: number;
-    }
-    const sphericalTiles = new Map<string, SphericalTileEntry>();
+    // Thin atmospheric rim (fades out as the camera descends towards the surface).
+    const atmoMat = new THREE.ShaderMaterial({
+      uniforms: { uStrength: { value: 1 } },
+      vertexShader: 'varying vec3 vN; void main(){ vN = normalize(normalMatrix * normal); gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }',
+      fragmentShader: 'varying vec3 vN; uniform float uStrength; void main(){ float i = pow(max(0.0, 0.66 - dot(vN, vec3(0.0,0.0,1.0))), 3.2); gl_FragColor = vec4(0.30,0.58,1.0,1.0) * i * 1.35 * uStrength; }',
+      side: THREE.BackSide, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, depthTest: true,
+    });
+    const atmo = new THREE.Mesh(new THREE.SphereGeometry(1.09, 64, 40), atmoMat);
+    atmo.renderOrder = -1;
+    earthGroup.add(atmo);
 
-    const addSphericalPatchTile = (img: HTMLImageElement, z: number, tx: number, ty: number) => {
-      const key = `${z}/${tx}/${ty}`;
-      if (sphericalTiles.has(key)) return;
-
-      // Evict oldest unused patches if cache exceeds 240 tiles to maintain 60 FPS and bounded VRAM
-      if (sphericalTiles.size >= 240) {
-        let oldestKey = '';
-        let oldestTime = Infinity;
-        for (const [k, v] of sphericalTiles) {
-          if (v.lastUsed < oldestTime) {
-            oldestTime = v.lastUsed;
-            oldestKey = k;
-          }
-        }
-        if (oldestKey) {
-          const old = sphericalTiles.get(oldestKey)!;
-          highResTileGroup.remove(old.mesh);
-          old.geo.dispose();
-          old.mat.dispose();
-          old.tex.dispose();
-          sphericalTiles.delete(oldestKey);
-        }
-      }
-
-      const tex = new THREE.Texture(img);
-      tex.colorSpace = THREE.SRGBColorSpace;
-      tex.wrapS = THREE.ClampToEdgeWrapping;
-      tex.wrapT = THREE.ClampToEdgeWrapping;
-      tex.minFilter = THREE.LinearFilter;
-      tex.magFilter = THREE.LinearFilter;
-      tex.anisotropy = isSoftwareGl ? 1 : maxAniso;
-      tex.needsUpdate = true;
-
-      const { geo, center } = createSphericalTileGeometry(z, tx, ty);
-      // Patches lie on the front hemisphere and are sorted coarse→fine via renderOrder = z.
-      // Disabling depthTest/depthWrite between coplanar spherical layers completely eliminates
-      // depth-buffer z-fighting squares and parallax seams while backface culling hides the far side.
-      const mat = new THREE.MeshPhongMaterial({
-        map: tex,
-        transparent: false,
-        opacity: 1.0,
-        depthWrite: false,
-        depthTest: false,
-        side: THREE.FrontSide,
-        specular: new THREE.Color(0x4a6b94),
-        shininess: 38,
-      });
-      const mesh = new THREE.Mesh(geo, mat);
-      mesh.position.copy(center);
-      mesh.renderOrder = z;
-      highResTileGroup.add(mesh);
-      sphericalTiles.set(key, { key, z, mesh, geo, mat, tex, lastUsed: performance.now() });
-    };
-
-    // Stream authentic Esri World Imagery satellite tiles
+    // Stream authentic Esri World Imagery satellite tiles (blankTile=false returns 404 instead of grey placeholders)
     const esriUrl = (z: number, x: number, y: number) =>
-      `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${z}/${y}/${x}`;
+      `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${z}/${y}/${x}?blankTile=false`;
 
     const loadedTiles = new Set<string>();
     let texNeedsUpload = false;
@@ -1161,49 +1080,19 @@ export function InteractiveEarthGlobe({
       };
       setTimeout(pumpZ3, 120);
 
-      // Multi-resolution spherical tile streaming (z = 4 up to z = 19) so zooming in to runways/taxiways is sharp
+      // Pre-warm the tile pyramid for a view about to be shown (fly-to destinations, hover/selection).
       requestHighResTilesRef.current = (latDeg: number, lonDeg: number, zoomLevel: number) => {
-        if (disposed || !texCtx) return;
-        const targetZ = Math.max(4, globeTileLevelFor(zoomLevel, latDeg, cameraStateRef.current.viewH));
-        // Progressive ancestor pyramid so lower-zoom patches always cover the area while finer tiles stream in
-        const levels = new Set<number>([4]);
-        if (targetZ >= 6) levels.add(6);
-        if (targetZ >= 9) levels.add(9);
-        if (targetZ >= 12) levels.add(12);
-        if (targetZ >= 15) levels.add(15);
-        if (targetZ >= 5) levels.add(targetZ - 1);
-        levels.add(targetZ);
-
-        const nowPerf = performance.now();
-        for (const z of levels) {
-          const { tx: centerTx, ty: centerTy, n } = latLonToMercatorTile(latDeg, lonDeg, z);
-          const radius = z === targetZ ? 2 : 1;
-          for (let dy = -radius; dy <= radius; dy++) {
-            for (let dx = -radius; dx <= radius; dx++) {
-              const tx = (centerTx + dx + n) % n;
-              const ty = Math.max(0, Math.min(n - 1, centerTy + dy));
-              const key = `${z}/${tx}/${ty}`;
-              const existing = sphericalTiles.get(key);
-              if (existing) {
-                existing.lastUsed = nowPerf;
-                continue;
-              }
-              if (loadedTiles.has(key)) continue;
-              loadedTiles.add(key);
-              loadGlobeTile(esriUrl(z, tx, ty)).then((img) => {
-                if (disposed || !img) return;
-                // Only z=2 and z=3 are painted onto the shared equirectangular base canvas.
-                // Drawing sparse z=4/5 tiles onto the base canvas left sharp rectangular patch borders at low zoom.
-                addSphericalPatchTile(img, z, tx, ty);
-              });
-            }
-          }
-        }
+        if (disposed) return;
+        tiles.prefetch(latDeg, lonDeg, globeTileLevelFor(zoomLevel, latDeg, cameraStateRef.current.viewH), performance.now());
+        wakeRef.current();
       };
     }
 
     let viewW = 1280;
     let viewH = 800;
+    // The loop only renders when something changed (camera, tiles, hover, selection…): an idle planner costs ~0 GPU.
+    let forceRender = true;
+    wakeRef.current = () => { forceRender = true; };
 
     const resize = () => {
       if (!renderer || !container) return;
@@ -1216,6 +1105,7 @@ export function InteractiveEarthGlobe({
       overlayCanvas.height = viewH;
       camera.aspect = viewW / viewH;
       camera.updateProjectionMatrix();
+      forceRender = true;
     };
     resize();
     const ro = new ResizeObserver(resize);
@@ -1225,8 +1115,6 @@ export function InteractiveEarthGlobe({
     let timeoutId = 0;
     let lastTime = performance.now();
     let lastTexUploadTime = 0;
-    let lastAutoStreamTime = 0;
-    let lastStreamKey = '';
     let lastReportedScale = -1;
     let lastReportedScalePx = -1;
 
@@ -1432,18 +1320,19 @@ export function InteractiveEarthGlobe({
       const minSpacingPx = scaleKm > 300 ? 55 : scaleKm > 80 ? 38 : scaleKm > 20 ? 24 : 8;
       const minSpacingSq = minSpacingPx * minSpacingPx;
 
-      const allMarkers = [...GLOBE_AIRPORT_MARKERS];
-      const presentIds = new Set(allMarkers.map((m) => m.airport.id));
+      const extraMarkers = overlayExtraMarkers;
+      extraMarkers.length = 0;
       for (const a of [dep, arr, activeAirportRef.current?.airport]) {
-        if (a && !presentIds.has(a.id)) {
-          presentIds.add(a.id);
+        if (a && !GLOBE_MARKER_IDS.has(a.id) && !extraMarkers.some((m) => m.airport.id === a.id)) {
           const [ux, uy, uz] = latLonToUnitSphere(a.lat, a.lon);
-          allMarkers.push({ airport: a, ux, uy, uz, isStar: false });
+          extraMarkers.push({ airport: a, ux, uy, uz, isStar: false });
         }
       }
+      const baseMarkerCount = GLOBE_AIRPORT_MARKERS.length;
+      const markerTotal = baseMarkerCount + extraMarkers.length;
 
-      for (let i = 0; i < allMarkers.length; i++) {
-        const m = allMarkers[i];
+      for (let i = 0; i < markerTotal; i++) {
+        const m = i < baseMarkerCount ? GLOBE_AIRPORT_MARKERS[i] : extraMarkers[i - baseMarkerCount];
         const isSelected =
           dep?.id === m.airport.id ||
           arr?.id === m.airport.id ||
@@ -1550,11 +1439,15 @@ export function InteractiveEarthGlobe({
       };
 
       // Reset live screen runways for pointer hit detection
-      screenRunwaysRef.current = [];
+      screenRunwaysRef.current.length = 0;
 
       // 4. Draw surveyed airport ground layouts (OSM aprons, taxiways, terminals, stands) matching in-flight 'M' map
-      if (scaleKm <= 45) {
+      // Ground resolution (m/px). Airfield artwork and runway markings only exist when the map is close enough to show them.
+      const mpp = kmPerPx * 1000;
+      const layoutAlpha = Math.max(0, Math.min(1, (36 - mpp) / 20));
+      if (layoutAlpha > 0.02) {
         ctx.save();
+        ctx.globalAlpha = alpha * layoutAlpha;
         const drawnAirfieldIds = new Set<string>();
         const airfieldsToDraw: Airport[] = [];
         for (const a of [dep, arr, activeAirportRef.current?.airport]) {
@@ -1578,8 +1471,8 @@ export function InteractiveEarthGlobe({
           if (!L) continue;
 
           // A. Aprons
-          ctx.fillStyle = 'rgba(148, 163, 184, 0.32)';
-          ctx.strokeStyle = 'rgba(100, 116, 139, 0.45)';
+          ctx.fillStyle = 'rgba(148, 163, 184, 0.22)';
+          ctx.strokeStyle = 'rgba(100, 116, 139, 0.32)';
           ctx.lineWidth = 1.0;
           for (let k = 0; k < L.aprons.length; k++) {
             const ap = L.aprons[k];
@@ -1611,17 +1504,17 @@ export function InteractiveEarthGlobe({
               ctx.lineCap = 'round';
               ctx.lineJoin = 'round';
               // Dark shoulder casing
-              ctx.strokeStyle = 'rgba(4, 10, 16, 0.88)';
-              ctx.lineWidth = twWidth + 2.4;
+              ctx.strokeStyle = 'rgba(4, 10, 16, 0.34)';
+              ctx.lineWidth = twWidth + 1.6;
               ctx.stroke();
 
               // Asphalt surface
-              ctx.strokeStyle = '#64748b';
+              ctx.strokeStyle = 'rgba(100, 116, 139, 0.8)';
               ctx.lineWidth = twWidth;
               ctx.stroke();
 
               // Taxiway yellow centerline when zoomed in
-              if (scaleKm <= 8) {
+              if (mpp <= 6) {
                 ctx.strokeStyle = '#eab308';
                 ctx.lineWidth = Math.max(1, twWidth * 0.16);
                 ctx.stroke();
@@ -1684,114 +1577,44 @@ export function InteractiveEarthGlobe({
         ctx.restore();
       }
 
-      // 5. Draw actual oriented runway strips with threshold markings (zoomed in <= 40 km scale)
-      if (scaleKm <= 40) {
+      // 5. Runway markings: true-scale (metres), blended into the imagery, and only drawn once the map is close enough
+      //    for a runway to be a few pixels wide. Smooth fade-in; nothing at all (and no work) when zoomed out.
+      const rwAlpha = runwayAlpha(mpp);
+      if (rwAlpha > 0.02) {
         ctx.save();
+        const popupHover = popupHoverRunwayRef.current;
+        const hv = hoveredRunwayRef.current;
         for (let i = 0; i < visiblePins.length; i++) {
           const p = visiblePins[i];
-          for (const rwy of p.airport.runways) {
-            const [lx1, ly1, lz1] = latLonToUnitSphere(rwy.leLat, rwy.leLon);
-            const [lx2, ly2, lz2] = latLonToUnitSphere(rwy.heLat, rwy.heLon);
-            ScratchVec.set(lx1, ly1, lz1).applyMatrix4(spinGroup.matrixWorld).project(camera);
-            ScratchVecB.set(lx2, ly2, lz2).applyMatrix4(spinGroup.matrixWorld).project(camera);
+          const rws = p.airport.runways;
+          for (let q = 0; q < rws.length; q++) {
+            const rwy = rws[q];
+            const rv = runwayVectors(rwy);
+            ScratchVec.set(rv[0], rv[1], rv[2]).applyMatrix4(spinGroup.matrixWorld).project(camera);
+            ScratchVecB.set(rv[3], rv[4], rv[5]).applyMatrix4(spinGroup.matrixWorld).project(camera);
             const rx1 = (ScratchVec.x * 0.5 + 0.5) * viewW;
             const ry1 = (-ScratchVec.y * 0.5 + 0.5) * viewH;
             const rx2 = (ScratchVecB.x * 0.5 + 0.5) * viewW;
             const ry2 = (-ScratchVecB.y * 0.5 + 0.5) * viewH;
+            if (Math.max(rx1, rx2) < -60 || Math.min(rx1, rx2) > viewW + 60 || Math.max(ry1, ry2) < -60 || Math.min(ry1, ry2) > viewH + 60) continue;
             const rLenPx = Math.hypot(rx2 - rx1, ry2 - ry1);
-            if (rLenPx < 5) continue;
-            const widthM = Math.max(25, rwy.width || 45);
-            const rWidthPx = Math.max(4, Math.min(28, (widthM / 1000) / kmPerPx));
-
-            // Record screen runway segment for mouse click & hover selection
-            screenRunwaysRef.current.push({
-              airport: p.airport,
-              rw: rwy,
-              le: rwy.le,
-              he: rwy.he,
-              rx1,
-              ry1,
-              rx2,
-              ry2,
-              widthPx: rWidthPx,
+            if (rLenPx < 10) continue;
+            const wPx = Math.max(18, Math.min(75, rwy.width || 45)) * (rLenPx / rv[6]);
+            // Only runways that are actually visible are clickable (record for pointer hit-testing).
+            if (rwAlpha > 0.3) {
+              screenRunwaysRef.current.push({ airport: p.airport, rw: rwy, le: rwy.le, he: rwy.he, rx1, ry1, rx2, ry2, widthPx: wPx });
+            }
+            const selDep = !!depAnchor && depAnchor.rw === rwy && dep?.id === p.airport.id;
+            const selArr = !!arrAnchor && arrAnchor.rw === rwy && arr?.id === p.airport.id;
+            const hovered =
+              (!!hv && hv.airport.id === p.airport.id && (hv.ident === rwy.le || hv.ident === rwy.he)) ||
+              (!!popupHover && popupHover.airportId === p.airport.id && (popupHover.ident === rwy.le || popupHover.ident === rwy.he));
+            drawRunwayMarkings(ctx, rwy, rx1, ry1, rx2, ry2, rv[6], {
+              alpha: rwAlpha,
+              role: selDep ? 'dep' : selArr ? 'arr' : null,
+              end: selDep ? depAnchor!.end : selArr ? arrAnchor!.end : null,
+              hovered,
             });
-
-            // Selected departure / arrival runway: coloured halo + direction chevron so it reads as THE chosen runway
-            const selDep = depAnchor && depAnchor.rw === rwy && dep?.id === p.airport.id;
-            const selArr = arrAnchor && arrAnchor.rw === rwy && arr?.id === p.airport.id;
-            if (selDep || selArr) {
-              ctx.beginPath();
-              ctx.moveTo(rx1, ry1);
-              ctx.lineTo(rx2, ry2);
-              ctx.strokeStyle = selDep ? 'rgba(34, 197, 94, 0.65)' : 'rgba(245, 158, 11, 0.65)';
-              ctx.lineWidth = rWidthPx + 10;
-              ctx.lineCap = 'round';
-              ctx.stroke();
-              ctx.lineCap = 'butt';
-            }
-
-            // Runway shoulder / asphalt casing
-            ctx.beginPath();
-            ctx.moveTo(rx1, ry1);
-            ctx.lineTo(rx2, ry2);
-            ctx.strokeStyle = 'rgba(15, 23, 42, 0.95)';
-            ctx.lineWidth = rWidthPx + 3.2;
-            ctx.lineCap = 'butt';
-            ctx.stroke();
-
-            ctx.beginPath();
-            ctx.moveTo(rx1, ry1);
-            ctx.lineTo(rx2, ry2);
-            ctx.strokeStyle = '#334155';
-            ctx.lineWidth = rWidthPx;
-            ctx.stroke();
-
-            // Centerline dashes
-            ctx.beginPath();
-            ctx.moveTo(rx1, ry1);
-            ctx.lineTo(rx2, ry2);
-            ctx.strokeStyle = '#f8fafc';
-            ctx.lineWidth = Math.max(1.2, rWidthPx * 0.18);
-            ctx.setLineDash([Math.max(4, rWidthPx * 0.9), Math.max(3, rWidthPx * 0.65)]);
-            ctx.stroke();
-            ctx.setLineDash([]);
-
-            // Runway threshold numbers when zoomed in close (<= 6 km scale)
-            if (scaleKm <= 6 && rLenPx >= 45) {
-              const ux = (rx2 - rx1) / rLenPx;
-              const uy = (ry2 - ry1) / rLenPx;
-              ctx.font = '800 10px ui-monospace, SFMono-Regular, monospace';
-              ctx.textAlign = 'center';
-              ctx.textBaseline = 'middle';
-              const leX = rx1 - ux * 14;
-              const leY = ry1 - uy * 14;
-              const heX = rx2 + ux * 14;
-              const heY = ry2 + uy * 14;
-              ctx.fillStyle = 'rgba(2, 6, 23, 0.88)';
-              ctx.fillRect(leX - 13, leY - 7, 26, 14);
-              ctx.fillRect(heX - 13, heY - 7, 26, 14);
-              ctx.fillStyle = '#38bdf8';
-              ctx.fillText(rwy.le, leX, leY + 0.5);
-              ctx.fillText(rwy.he, heX, heY + 0.5);
-            }
-            if ((selDep || selArr) && rLenPx >= 25) {
-              // Chevron on the selected threshold pointing along the runway direction of use
-              const an = selDep ? depAnchor! : arrAnchor!;
-              const fromLe = an.end === 'le';
-              const sx = fromLe ? rx1 : rx2, sy = fromLe ? ry1 : ry2;
-              const dx = (fromLe ? rx2 - rx1 : rx1 - rx2) / rLenPx, dy = (fromLe ? ry2 - ry1 : ry1 - ry2) / rLenPx;
-              const cx = sx + dx * 12, cy = sy + dy * 12;
-              ctx.beginPath();
-              ctx.moveTo(cx + dx * 9, cy + dy * 9);
-              ctx.lineTo(cx - dx * 5 - dy * 7, cy - dy * 5 + dx * 7);
-              ctx.lineTo(cx - dx * 5 + dy * 7, cy - dy * 5 - dx * 7);
-              ctx.closePath();
-              ctx.fillStyle = selDep ? '#22c55e' : '#f59e0b';
-              ctx.fill();
-              ctx.strokeStyle = '#0b1220';
-              ctx.lineWidth = 1.2;
-              ctx.stroke();
-            }
           }
         }
         ctx.restore();
@@ -1800,7 +1623,7 @@ export function InteractiveEarthGlobe({
       // Draw hovered runway tooltip tag if cursor is over a runway
       if (hoveredRunwayRef.current) {
         const hr = hoveredRunwayRef.current;
-        const tipText = `RWY ${hr.ident} · ${Math.round(hr.lengthM).toLocaleString()}m · Click to select`;
+        const tipText = `RWY ${hr.ident} · ${Math.round(hr.lengthM).toLocaleString()} m · click to select`;
         ctx.font = '700 11px ui-monospace, SFMono-Regular, monospace';
         const tw = ctx.measureText(tipText).width;
         const bw = tw + 14;
@@ -1977,6 +1800,11 @@ export function InteractiveEarthGlobe({
       ctx.restore();
     };
 
+    let lastSig = NaN;
+    let lastTileUpdate = 0;
+    const flightOut = { lat: 0, lon: 0, zoom: 1 };
+    const settle = (cur: number, target: number, eps: number) => (Math.abs(cur - target) < eps ? target : cur);
+
     const animate = (now: number) => {
       if (disposed || !renderer) return;
       const dt = Math.min(0.05, Math.max(0.001, (now - lastTime) * 0.001));
@@ -1987,33 +1815,51 @@ export function InteractiveEarthGlobe({
         earthTexture.needsUpdate = true;
         texNeedsUpload = false;
         lastTexUploadTime = now;
+        forceRender = true;
       }
 
       if (!pausedRef.current && !(window as any).__hangarModalOpen) {
+        const r = rotRef.current;
         const isMenu = modeRef.current === 'menu';
+        const flight = flightRef.current;
+        const dragging = dragRef.current.active;
+        if (isMenu && flight.active) flight.cancel();
         const targetX = isMenu ? 0.56 : 0.0;
         const targetPlannerAlpha = isMenu ? 0.0 : 1.0;
 
-        rotRef.current.plannerAlpha = THREE.MathUtils.damp(
-          rotRef.current.plannerAlpha,
-          targetPlannerAlpha,
-          6.5,
-          dt
-        );
-        // Interpolate zoom in log-space so zooming from 1x to 20 000x feels uniform at every scale
-        const desiredZoom = isMenu ? GLOBE_MENU_ZOOM : rotRef.current.targetZoom;
-        const nextLogZoom = THREE.MathUtils.damp(
-          Math.log(Math.max(1, rotRef.current.zoom)),
-          Math.log(Math.max(1, desiredZoom)),
-          8.5,
-          dt
-        );
-        rotRef.current.zoom = Math.exp(nextLogZoom);
+        r.plannerAlpha = settle(THREE.MathUtils.damp(r.plannerAlpha, targetPlannerAlpha, 6.5, dt), targetPlannerAlpha, 0.002);
 
-        const zoom = rotRef.current.zoom;
+        // ---- camera motion: timed fly-to, or damped pan / log-zoom with drag inertia ----
+        if (flight.active) {
+          flight.sample(now, flightOut);
+          r.lat = flightOut.lat; r.lon = flightOut.lon; r.zoom = flightOut.zoom;
+          r.targetLat = r.lat; r.targetLon = r.lon; r.targetZoom = r.zoom;
+        } else {
+          // Zoom interpolates in log-space so 1x -> 20 000x feels uniform at every scale
+          const desiredZoom = isMenu ? GLOBE_MENU_ZOOM : r.targetZoom;
+          const lz = THREE.MathUtils.damp(Math.log(Math.max(1, r.zoom)), Math.log(Math.max(1, desiredZoom)), isMenu ? 8.5 : 6.5, dt);
+          r.zoom = Math.exp(settle(lz, Math.log(Math.max(1, desiredZoom)), 2e-4));
+          const iv = inertiaRef.current;
+          if (!isMenu && !dragging && (iv.lat !== 0 || iv.lon !== 0)) {
+            r.targetLat = Math.max(-1.42, Math.min(1.42, r.targetLat + iv.lat * dt));
+            r.targetLon += iv.lon * dt;
+            iv.lat = decayVelocity(iv.lat, dt); iv.lon = decayVelocity(iv.lon, dt);
+          }
+          if (isMenu && !dragging) {
+            // Standard, continuous global rotation starting over Indonesia (not locked to a single continent)
+            r.menuElapsed += dt;
+            const cont = computeMenuContinentalTarget(r.menuElapsed);
+            setShortestTargetLatLon(cont.latDeg, cont.lonDeg);
+          }
+          const rate = isMenu ? (dragging ? 26 : 2.5) : dragging ? 28 : 10.5;
+          r.lat = settle(THREE.MathUtils.damp(r.lat, r.targetLat, rate, dt), r.targetLat, 3e-9);
+          r.lon = settle(THREE.MathUtils.damp(r.lon, r.targetLon, rate, dt), r.targetLon, 3e-9);
+        }
+
+        const zoom = r.zoom;
         const targetScale = isMenu ? GLOBE_MENU_SCALE : GLOBE_PLANNER_SCALE;
-        earthGroup.position.x = THREE.MathUtils.damp(earthGroup.position.x, targetX, 7.0, dt);
-        const nextScale = THREE.MathUtils.damp(earthGroup.scale.x, targetScale, 7.0, dt);
+        earthGroup.position.x = settle(THREE.MathUtils.damp(earthGroup.position.x, targetX, 7.0, dt), targetX, 1e-4);
+        const nextScale = settle(THREE.MathUtils.damp(earthGroup.scale.x, targetScale, 7.0, dt), targetScale, 1e-4);
         earthGroup.scale.setScalar(nextScale);
 
         // Fixed 35° FOV — zoom is achieved purely by bringing the camera closer to the surface
@@ -2025,7 +1871,6 @@ export function InteractiveEarthGlobe({
           camera.near = nearPlane;
           camera.updateProjectionMatrix();
         }
-
         cameraStateRef.current.fov = GLOBE_FOV_DEG;
         cameraStateRef.current.camZ = camera.position.z;
         cameraStateRef.current.scale = nextScale;
@@ -2039,81 +1884,52 @@ export function InteractiveEarthGlobe({
           onScaleKmChangeRef.current?.(scaleKm, scalePx);
         }
 
-        if (!dragRef.current.active) {
-          if (isMenu) {
-            // Standard, continuous global rotation starting over Indonesia (not locked to a single continent)
-            rotRef.current.menuElapsed += dt;
-            const cont = computeMenuContinentalTarget(rotRef.current.menuElapsed);
-            setShortestTargetLatLon(cont.latDeg, cont.lonDeg);
-            rotRef.current.lat = THREE.MathUtils.damp(
-              rotRef.current.lat,
-              rotRef.current.targetLat,
-              2.5,
-              dt
-            );
-            rotRef.current.lon = THREE.MathUtils.damp(
-              rotRef.current.lon,
-              rotRef.current.targetLon,
-              2.5,
-              dt
-            );
-          } else {
-            rotRef.current.lat = THREE.MathUtils.damp(
-              rotRef.current.lat,
-              rotRef.current.targetLat,
-              9.0,
-              dt
-            );
-            rotRef.current.lon = THREE.MathUtils.damp(
-              rotRef.current.lon,
-              rotRef.current.targetLon,
-              9.0,
-              dt
-            );
+        // Cursor-anchored zoom: the geographic point under the cursor stays under the cursor while the zoom eases.
+        const anchor = zoomAnchorRef.current;
+        if (anchor) {
+          if (zoom < 1.12 || flight.active || Math.abs(Math.log(r.targetZoom) - Math.log(zoom)) < 0.002) zoomAnchorRef.current = null;
+          else {
+            const hit = raycastGlobePoint(anchor.x, anchor.y);
+            if (hit) {
+              const dLat = anchor.lat - hit.lat, dLon = wrapPi(anchor.lon - hit.lon);
+              r.lat = Math.max(-1.42, Math.min(1.42, r.lat + dLat)); r.lon += dLon;
+              r.targetLat = Math.max(-1.42, Math.min(1.42, r.targetLat + dLat)); r.targetLon += dLon;
+            }
           }
         }
 
         // Apply exact XYZ Euler angles directly from (rotRef.current.lat, rotRef.current.lon)
-        const euler = computeGlobeEulerForLatLon(rotRef.current.lat, rotRef.current.lon);
+        const euler = computeGlobeEulerForLatLon(r.lat, r.lon);
         spinGroup.rotation.x = euler.rx;
         spinGroup.rotation.y = euler.ry;
 
-        const curLatDeg = rotRef.current.lat * (180 / Math.PI);
-        const curLonDeg = rotRef.current.lon * (180 / Math.PI);
-        const activeTargetZ = globeTileLevelFor(zoom, curLatDeg, viewH);
+        const curLatDeg = r.lat * (180 / Math.PI);
+        const curLonDeg = r.lon * (180 / Math.PI);
+        const strength = Math.max(0, Math.min(1, 1 - Math.log(zoom) / Math.log(35)));
+        atmoMat.uniforms.uStrength.value = strength;
+        atmo.visible = strength > 0.01;
 
-        // Automatically stream high-resolution satellite tiles for the active view center as the user pans/zooms
-        if (!isMenu && zoom > 1.2 && now - lastAutoStreamTime > 160) {
-          lastAutoStreamTime = now;
-          const bucketDeg = Math.max(0.002, 45 / Math.pow(2, Math.max(0, activeTargetZ - 3)));
-          const latBucket = Math.round(curLatDeg / bucketDeg);
-          const lonBucket = Math.round(curLonDeg / bucketDeg);
-          const streamKey = `${activeTargetZ}:${latBucket}:${lonBucket}`;
-          if (streamKey !== lastStreamKey) {
-            lastStreamKey = streamKey;
-            requestHighResTilesRef.current?.(curLatDeg, curLonDeg, Math.max(zoom, rotRef.current.targetZoom));
+        // Satellite LOD tiles (planner only). Selection runs ~10 Hz and immediately whenever new textures decode.
+        const showTiles = !isMenu && zoom >= 1.0;
+        highResTileGroup.visible = showTiles;
+        let tilesBusy = false;
+        if (showTiles) {
+          tiles.tick(dt);
+          if (tiles.needsSelection || now - lastTileUpdate >= 90) {
+            lastTileUpdate = now;
+            const [dx, dy, dz] = latLonToUnitSphere(curLatDeg, curLonDeg);
+            tiles.update({ dirX: dx, dirY: dy, dirZ: dz, dist: camera.position.z / nextScale, viewW, viewH, tanHalfFov: GLOBE_TAN_HALF_FOV }, now);
           }
+          tilesBusy = tiles.busy;
         }
 
-        // Only display spherical patch levels up to activeTargetZ + 1 and lying on the visible hemisphere
-        const [camUx, camUy, camUz] = latLonToUnitSphere(curLatDeg, curLonDeg);
-        const showPatches = !isMenu && zoom >= 1.35;
-        highResTileGroup.visible = showPatches;
-        if (showPatches) {
-          for (const [, entry] of sphericalTiles) {
-            if (entry.z > activeTargetZ + 1) {
-              entry.mesh.visible = false;
-              continue;
-            }
-            const c = entry.mesh.position;
-            const dot = c.x * camUx + c.y * camUy + c.z * camUz;
-            // Patch angular half-diagonal is ~π / 2^z; keep visible if any corner can face the camera
-            const minDot = -Math.min(0.85, 4.5 / Math.pow(2, entry.z));
-            entry.mesh.visible = dot > minDot;
-          }
+        const sig = r.lat * 1.3 + r.lon * 0.7 + zoom * 3.7 + nextScale * 11 + earthGroup.position.x * 5 + r.plannerAlpha * 13;
+        if (isMenu || forceRender || sig !== lastSig || flight.active || tilesBusy || dragging || zoomAnchorRef.current) {
+          lastSig = sig;
+          forceRender = false;
+          renderer.render(scene, camera);
+          drawOverlay();
         }
-        renderer.render(scene, camera);
-        drawOverlay();
       }
       afterDraw(animate);
     };
@@ -2125,12 +1941,12 @@ export function InteractiveEarthGlobe({
       cancelAnimationFrame(rafId);
       clearTimeout(timeoutId);
       ro.disconnect();
-      for (const [, entry] of sphericalTiles) {
-        entry.geo.dispose();
-        entry.mat.dispose();
-        entry.tex.dispose();
-      }
-      sphericalTiles.clear();
+      tiles.dispose();
+      tilesRef.current = null;
+      requestHighResTilesRef.current = null;
+      wakeRef.current = () => {};
+      atmoMat.dispose();
+      atmo.geometry.dispose();
       earthGeo.dispose();
       earthMat.dispose();
       earthTexture.dispose();
@@ -2141,7 +1957,8 @@ export function InteractiveEarthGlobe({
   // Raycasts the mouse cursor onto the unit sphere and returns exact geographical coordinates (lat, lon) in radians
   const raycastGlobePoint = (
     clientX: number,
-    clientY: number
+    clientY: number,
+    minDiscFrac = 0
   ): { lat: number; lon: number } | null => {
     const rect = containerRef.current?.getBoundingClientRect();
     if (!rect) return null;
@@ -2175,7 +1992,7 @@ export function InteractiveEarthGlobe({
     const b = camZ * dz;
     const c = camZ * camZ - scale * scale;
     const disc = b * b - c;
-    if (disc < 0) return null; // Ray missed the globe
+    if (disc < minDiscFrac * scale * scale) return null; // Ray missed the globe or grazed the outer limb
 
     const t = -b - Math.sqrt(disc);
     const px = t * dx;
@@ -2214,187 +2031,216 @@ export function InteractiveEarthGlobe({
     return { lat: geoLat, lon: geoLon };
   };
 
+  const pointersRef = useRef(new Map<number, { x: number; y: number }>());
+  const pinchRef = useRef(0);
+  const lastMoveRef = useRef({ t: 0, vLat: 0, vLon: 0 });
+
+  /** Grabbing the globe stops any running fly-to / inertia / zoom easing at the current view (like Google Earth). */
+  const freezeCamera = () => {
+    const r = rotRef.current;
+    flightRef.current.cancel();
+    inertiaRef.current.lat = inertiaRef.current.lon = 0;
+    zoomAnchorRef.current = null;
+    r.targetLat = r.lat; r.targetLon = r.lon; r.targetZoom = r.zoom;
+  };
+
+  const hitTestRunways = (px: number, py: number, extra: number) => {
+    let best: { airport: Airport; ident: string; x: number; y: number; lengthM: number; rw: Runway } | null = null;
+    let bestD = Infinity;
+    for (let k = 0; k < screenRunwaysRef.current.length; k++) {
+      const sr = screenRunwaysRef.current[k];
+      const dx = sr.rx2 - sr.rx1, dy = sr.ry2 - sr.ry1;
+      const lenSq = dx * dx + dy * dy;
+      if (lenSq < 16) continue;
+      let t = ((px - sr.rx1) * dx + (py - sr.ry1) * dy) / lenSq;
+      t = Math.max(0, Math.min(1, t));
+      const cx = sr.rx1 + t * dx, cy = sr.ry1 + t * dy;
+      const distSq = (px - cx) * (px - cx) + (py - cy) * (py - cy);
+      const hitDist = Math.max(extra, sr.widthPx * 0.5 + extra * 0.5);
+      if (distSq <= hitDist * hitDist && distSq < bestD) {
+        bestD = distSq;
+        best = { airport: sr.airport, ident: t <= 0.5 ? sr.le : sr.he, x: cx, y: cy, lengthM: sr.rw.length, rw: sr.rw };
+      }
+    }
+    return best;
+  };
+
+  const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    try { containerRef.current?.setPointerCapture(e.pointerId); } catch { /* not capturable */ }
+    pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pointersRef.current.size === 1) {
+      freezeCamera();
+      dragRef.current = { active: true, moved: false, startX: e.clientX, startY: e.clientY, x: e.clientX, y: e.clientY };
+      lastMoveRef.current = { t: performance.now(), vLat: 0, vLon: 0 };
+    } else if (pointersRef.current.size === 2) {
+      const [a, b] = [...pointersRef.current.values()];
+      pinchRef.current = Math.hypot(a.x - b.x, a.y - b.y);
+      dragRef.current.active = false; dragRef.current.moved = true;
+    }
+    wakeRef.current();
+  };
+
+  const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const rect = containerRef.current?.getBoundingClientRect();
+    if (rect) {
+      const px = e.clientX - rect.left, py = e.clientY - rect.top;
+      pointerPosRef.current = { x: px, y: py };
+      const hit = hitTestRunways(px, py, 16);
+      hoveredRunwayRef.current = hit ? { airport: hit.airport, ident: hit.ident, x: hit.x, y: hit.y, lengthM: hit.rw.length } : null;
+    }
+    wakeRef.current();
+    if (pointersRef.current.has(e.pointerId)) pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pointersRef.current.size === 2 && modeRef.current === 'planner') {
+      // Two-finger pinch: zoom anchored at the midpoint.
+      const [a, b] = [...pointersRef.current.values()];
+      const d = Math.hypot(a.x - b.x, a.y - b.y);
+      if (pinchRef.current > 0 && d > 0) {
+        const r = rotRef.current;
+        const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+        r.targetZoom = Math.max(1, Math.min(MAX_GLOBE_ZOOM, r.targetZoom * (d / pinchRef.current)));
+        const hit = raycastGlobePoint(mx, my);
+        if (hit) zoomAnchorRef.current = { lat: hit.lat, lon: hit.lon, x: mx, y: my };
+      }
+      pinchRef.current = d;
+      return;
+    }
+    if (!dragRef.current.active) return;
+    const dx = e.clientX - dragRef.current.x;
+    const dy = e.clientY - dragRef.current.y;
+    if (Math.hypot(e.clientX - dragRef.current.startX, e.clientY - dragRef.current.startY) > 6) {
+      dragRef.current.moved = true;
+      zoomAnchorRef.current = null;
+    }
+    dragRef.current.x = e.clientX;
+    dragRef.current.y = e.clientY;
+
+    // Exact 1:1 projective surface-locked drag sensitivity across all zoom levels (1x .. 21 000x). The camera then eases
+    // towards the dragged target (a few ms of smoothing) instead of snapping to every raw pointer sample.
+    const { fov, camZ, scale, viewH } = cameraStateRef.current;
+    const fovRad = (fov * Math.PI) / 180;
+    const surfDist = Math.max(0.00005, camZ - scale);
+    const radPerPixel = (2 * surfDist * Math.tan(fovRad * 0.5)) / (Math.max(300, viewH) * scale);
+    const r = rotRef.current;
+    const cosLat = Math.max(0.25, Math.cos(r.lat));
+    const dLon = -(dx * radPerPixel) / cosLat;
+    const dLat = dy * radPerPixel;
+    r.targetLon += dLon;
+    r.targetLat = Math.max(-1.42, Math.min(1.42, r.targetLat + dLat));
+    // Release velocity (rad/s, low-passed) for inertia.
+    const now = performance.now(), lm = lastMoveRef.current, dtv = Math.max(8, now - lm.t) / 1000;
+    lm.vLon += (dLon / dtv - lm.vLon) * 0.35; lm.vLat += (dLat / dtv - lm.vLat) * 0.35; lm.t = now;
+  };
+
+  const handlePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    pointersRef.current.delete(e.pointerId);
+    try { containerRef.current?.releasePointerCapture(e.pointerId); } catch { /* already released */ }
+    if (pointersRef.current.size > 0) { pinchRef.current = 0; return; }
+    if (!dragRef.current.active) return;
+    const wasClick = !dragRef.current.moved;
+    dragRef.current.active = false;
+    if (!wasClick) {
+      // Glide on with the release velocity when the gesture ended while moving (not after holding still).
+      const lm = lastMoveRef.current;
+      if (modeRef.current === 'planner' && performance.now() - lm.t < 90) {
+        const cap = 2.6, sp = Math.hypot(lm.vLat, lm.vLon);
+        const k = sp > cap ? cap / sp : 1;
+        if (sp > 0.004) { inertiaRef.current.lat = lm.vLat * k; inertiaRef.current.lon = lm.vLon * k; }
+      }
+      wakeRef.current();
+      return;
+    }
+    if (modeRef.current !== 'planner') return;
+    const rect = containerRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+
+    // 1. First priority: a click directly on a (visible) runway selects THAT runway and flies to its own coordinates.
+    const clickedRunway = hitTestRunways(x, y, 20);
+    if (clickedRunway) {
+      const { airport, ident } = clickedRunway;
+      let role: 'dep' | 'arr' = 'dep';
+      if (selectedArrRef.current?.id === airport.id && selectedDepRef.current?.id !== airport.id) role = 'arr';
+      else if (selectedDepRef.current?.id === airport.id) role = 'dep';
+      else if (selectedDepRef.current && !selectedArrRef.current) role = 'arr';
+      onSelectRunwayRef.current?.(airport, ident, role);
+      onInspectAirport?.(airport);
+      setActiveAirport({ airport, x, y });
+      const a = resolveRunwayAnchor(airport, ident, role);
+      if (a) { const v = frameRunwayView(a); flyTo(v.lat, v.lon, v.zoom); }
+      return;
+    }
+
+    // 2. Second priority: airport markers – fly to frame the whole airfield.
+    let picked: { airport: Airport; x: number; y: number } | null = null;
+    let bestDistSq = 22 * 22;
+    for (const pin of screenPinsRef.current) {
+      const dSq = (pin.x - x) * (pin.x - x) + (pin.y - y) * (pin.y - y);
+      if (dSq < bestDistSq) { bestDistSq = dSq; picked = pin; }
+    }
+    if (picked) {
+      setActiveAirport(picked);
+      const v = frameAirportView(picked.airport);
+      flyTo(v.lat, v.lon, Math.max(GLOBE_AIRPORT_FOCUS_ZOOM, Math.min(v.zoom, Math.max(rotRef.current.zoom * 1.0, GLOBE_AIRPORT_FOCUS_ZOOM * 4))));
+      onInspectAirport?.(picked.airport);
+    } else {
+      setActiveAirport(null);
+    }
+    wakeRef.current();
+  };
+
+  const handlePointerCancel = (e: React.PointerEvent<HTMLDivElement>) => {
+    pointersRef.current.delete(e.pointerId);
+    dragRef.current.active = false;
+  };
+
+  const handleDoubleClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (modeRef.current !== 'planner') return;
+    const r = rotRef.current;
+    flightRef.current.cancel();
+    r.targetZoom = Math.max(1, Math.min(MAX_GLOBE_ZOOM, r.targetZoom * 2.4));
+    const hit = raycastGlobePoint(e.clientX, e.clientY, 0.015);
+    if (hit) zoomAnchorRef.current = { lat: hit.lat, lon: hit.lon, x: e.clientX, y: e.clientY };
+    wakeRef.current();
+  };
+
+  // Wheel / trackpad / pinch-zoom (native, non-passive so the page never scrolls or browser-zooms underneath).
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      if (modeRef.current !== 'planner') return;
+      if ((e.target as HTMLElement | null)?.closest?.('[data-globe-popup]')) return;
+      e.preventDefault();
+      const r = rotRef.current;
+      flightRef.current.cancel();
+      inertiaRef.current.lat = inertiaRef.current.lon = 0;
+      const dLog = wheelToLogZoom(e);
+      r.targetZoom = Math.max(1, Math.min(MAX_GLOBE_ZOOM, r.targetZoom * Math.exp(dLog)));
+      if (dLog > 0) {
+        const hit = raycastGlobePoint(e.clientX, e.clientY, 0.015);
+        if (hit) zoomAnchorRef.current = { lat: hit.lat, lon: hit.lon, x: e.clientX, y: e.clientY };
+      } else {
+        zoomAnchorRef.current = null;
+      }
+      wakeRef.current();
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, []);
+
+  // Repaint when the selection or popup changes (the loop is idle otherwise).
+  useEffect(() => { wakeRef.current(); }, [selectedDep, selectedArr, depRunway, arrRunway, activeAirport, mode]);
+
   return (
     <div
       ref={containerRef}
       aria-label="Interactive 3D Earth Globe"
-      onPointerDown={(e) => {
-        dragRef.current = {
-          active: true,
-          moved: false,
-          startX: e.clientX,
-          startY: e.clientY,
-          x: e.clientX,
-          y: e.clientY,
-        };
-      }}
-      onPointerMove={(e) => {
-        const rect = containerRef.current?.getBoundingClientRect();
-        if (rect) {
-          const px = e.clientX - rect.left;
-          const py = e.clientY - rect.top;
-          pointerPosRef.current = { x: px, y: py };
-
-          // Check if hovering near a runway on the map
-          let hitRwy: { airport: Airport; ident: string; x: number; y: number; lengthM: number } | null = null;
-          for (let k = 0; k < screenRunwaysRef.current.length; k++) {
-            const sr = screenRunwaysRef.current[k];
-            const dx = sr.rx2 - sr.rx1, dy = sr.ry2 - sr.ry1;
-            const lenSq = dx * dx + dy * dy;
-            if (lenSq < 16) continue;
-            let t = ((px - sr.rx1) * dx + (py - sr.ry1) * dy) / lenSq;
-            t = Math.max(0, Math.min(1, t));
-            const cx = sr.rx1 + t * dx, cy = sr.ry1 + t * dy;
-            const distSq = (px - cx) * (px - cx) + (py - cy) * (py - cy);
-            const hitDist = Math.max(16, sr.widthPx * 0.5 + 8);
-            if (distSq <= hitDist * hitDist) {
-              const ident = t <= 0.5 ? sr.le : sr.he;
-              hitRwy = { airport: sr.airport, ident, x: cx, y: cy, lengthM: sr.rw.length };
-              break;
-            }
-          }
-          hoveredRunwayRef.current = hitRwy;
-        }
-        if (!dragRef.current.active) return;
-        const dx = e.clientX - dragRef.current.x;
-        const dy = e.clientY - dragRef.current.y;
-        if (
-          Math.hypot(e.clientX - dragRef.current.startX, e.clientY - dragRef.current.startY) > 6
-        ) {
-          dragRef.current.moved = true;
-        }
-        dragRef.current.x = e.clientX;
-        dragRef.current.y = e.clientY;
-
-        // Exact 1:1 projective surface-locked drag sensitivity across all zoom levels (1x .. 21 000x)
-        const { fov, camZ, scale, viewH } = cameraStateRef.current;
-        const fovRad = (fov * Math.PI) / 180;
-        const surfDist = Math.max(0.00005, camZ - scale);
-        const radPerPixel =
-          (2 * surfDist * Math.tan(fovRad * 0.5)) / (Math.max(300, viewH) * scale);
-        const cosLat = Math.max(0.25, Math.cos(rotRef.current.lat));
-
-        rotRef.current.lon -= (dx * radPerPixel) / cosLat;
-        rotRef.current.lat = Math.max(-1.42, Math.min(1.42, rotRef.current.lat + dy * radPerPixel));
-        rotRef.current.targetLon = rotRef.current.lon;
-        rotRef.current.targetLat = rotRef.current.lat;
-      }}
-      onPointerUp={(e) => {
-        if (!dragRef.current.active) return;
-        const wasClick = !dragRef.current.moved;
-        dragRef.current.active = false;
-        if (wasClick && modeRef.current === 'planner') {
-          const rect = containerRef.current?.getBoundingClientRect();
-          if (!rect) return;
-          const x = e.clientX - rect.left;
-          const y = e.clientY - rect.top;
-
-          // 1. First priority: Check if user clicked directly on a runway
-          let clickedRunway: { airport: Airport; ident: string; rw: Runway } | null = null;
-          let bestRwyDistSq = Infinity;
-          for (let k = 0; k < screenRunwaysRef.current.length; k++) {
-            const sr = screenRunwaysRef.current[k];
-            const dx = sr.rx2 - sr.rx1, dy = sr.ry2 - sr.ry1;
-            const lenSq = dx * dx + dy * dy;
-            if (lenSq < 16) continue;
-            let t = ((x - sr.rx1) * dx + (y - sr.ry1) * dy) / lenSq;
-            t = Math.max(0, Math.min(1, t));
-            const cx = sr.rx1 + t * dx, cy = sr.ry1 + t * dy;
-            const distSq = (x - cx) * (x - cx) + (y - cy) * (y - cy);
-            const hitDist = Math.max(20, sr.widthPx * 0.5 + 10);
-            if (distSq <= hitDist * hitDist && distSq < bestRwyDistSq) {
-              bestRwyDistSq = distSq;
-              const ident = t <= 0.5 ? sr.le : sr.he;
-              clickedRunway = { airport: sr.airport, ident, rw: sr.rw };
-            }
-          }
-
-          if (clickedRunway) {
-            const { airport, ident } = clickedRunway;
-            let role: 'dep' | 'arr' = 'dep';
-            if (selectedArrRef.current?.id === airport.id && selectedDepRef.current?.id !== airport.id) {
-              role = 'arr';
-            } else if (selectedDepRef.current?.id === airport.id) {
-              role = 'dep';
-            } else if (selectedDepRef.current && !selectedArrRef.current) {
-              role = 'arr';
-            }
-
-            onSelectRunwayRef.current?.(airport, ident, role);
-            onInspectAirport?.(airport);
-            setActiveAirport({ airport, x, y });
-
-            const a = resolveRunwayAnchor(airport, ident, role);
-            if (a) {
-              const visibleKm = Math.max(1.2, (a.lengthM / 1000) / 0.45);
-              const z = Math.max(GLOBE_AIRPORT_FOCUS_ZOOM, Math.min(MAX_GLOBE_ZOOM, (2 * GLOBE_BASE_ALT * EARTH_RADIUS_KM * GLOBE_TAN_HALF_FOV) / visibleKm));
-              setShortestTargetLatLon(a.midLat, a.midLon, z);
-              requestHighResTilesRef.current?.(a.midLat, a.midLon, z);
-            }
-            return;
-          }
-
-          // 2. Second priority: Airport center markers
-          let picked: { airport: Airport; x: number; y: number } | null = null;
-          let bestDistSq = 22 * 22;
-          for (const pin of screenPinsRef.current) {
-            const dSq = (pin.x - x) * (pin.x - x) + (pin.y - y) * (pin.y - y);
-            if (dSq < bestDistSq) {
-              bestDistSq = dSq;
-              picked = pin;
-            }
-          }
-          if (picked) {
-            setActiveAirport(picked);
-            const nextZoom = Math.max(rotRef.current.targetZoom, GLOBE_AIRPORT_FOCUS_ZOOM);
-            setShortestTargetLatLon(picked.airport.lat, picked.airport.lon, nextZoom);
-            requestHighResTilesRef.current?.(picked.airport.lat, picked.airport.lon, nextZoom);
-            onInspectAirport?.(picked.airport);
-          } else {
-            setActiveAirport(null);
-          }
-        }
-      }}
-      onPointerCancel={() => {
-        dragRef.current.active = false;
-      }}
-      onWheel={(e) => {
-        if (modeRef.current !== 'planner') return;
-        const factor = e.deltaY < 0 ? 1.38 : 1 / 1.38;
-        const nextZoom = Math.max(1.0, Math.min(MAX_GLOBE_ZOOM, rotRef.current.targetZoom * factor));
-        rotRef.current.targetZoom = nextZoom;
-
-        // Zoom directed towards the mouse cursor position on the globe
-        const hit = raycastGlobePoint(e.clientX, e.clientY);
-        if (hit) {
-          const twoPi = Math.PI * 2;
-          const dLon = (((hit.lon - rotRef.current.lon) % twoPi) + twoPi * 1.5) % twoPi - Math.PI;
-          const dLat = hit.lat - rotRef.current.lat;
-
-          if (factor > 1) {
-            // Zooming IN: pull target center towards the cursor point on the globe
-            const moveFrac = Math.min(0.5, 1 - 1 / factor);
-            rotRef.current.targetLat = Math.max(-1.42, Math.min(1.42, rotRef.current.targetLat + dLat * moveFrac));
-            rotRef.current.targetLon = rotRef.current.targetLon + dLon * moveFrac;
-          } else {
-            // Zooming OUT: gently center back to keep overview stable
-            const moveFrac = Math.min(0.2, 1 - factor);
-            rotRef.current.targetLat = Math.max(-1.42, Math.min(1.42, rotRef.current.targetLat - dLat * moveFrac));
-            rotRef.current.targetLon = rotRef.current.targetLon - dLon * moveFrac;
-          }
-        } else {
-          rotRef.current.targetLat = rotRef.current.lat;
-          rotRef.current.targetLon = rotRef.current.lon;
-        }
-
-        if (nextZoom > 1.2) {
-          requestHighResTilesRef.current?.(
-            rotRef.current.targetLat * (180 / Math.PI),
-            rotRef.current.targetLon * (180 / Math.PI),
-            nextZoom
-          );
-        }
-      }}
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerUp}
+      onPointerCancel={handlePointerCancel}
+      onDoubleClick={handleDoubleClick}
       className={`relative ${hoveredRunwayRef.current ? 'cursor-pointer' : 'cursor-grab active:cursor-grabbing'} ${className}`}
     >
       <div ref={glMountRef} className="absolute inset-0 w-full h-full pointer-events-none" />
@@ -2407,6 +2253,7 @@ export function InteractiveEarthGlobe({
       {mode === 'planner' && activeAirport && (
         <div
           ref={popupDomRef}
+          data-globe-popup
           className="absolute z-30 pointer-events-auto select-none shadow-2xl"
           style={{
             left: Math.max(16, Math.min((containerRef.current?.clientWidth || 900) - 224, activeAirport.x + 14)),
@@ -2417,6 +2264,7 @@ export function InteractiveEarthGlobe({
           onPointerMove={(e) => e.stopPropagation()}
           onClick={(e) => e.stopPropagation()}
           onWheel={(e) => e.stopPropagation()}
+          onDoubleClick={(e) => e.stopPropagation()}
         >
           <div className="bg-white text-slate-950 px-2.5 py-1 text-[11px] font-extrabold tracking-tight border border-slate-300 shadow mb-1 flex items-center justify-between gap-2">
             <span className="truncate">
@@ -2460,14 +2308,14 @@ export function InteractiveEarthGlobe({
               type="button"
               onClick={() => {
                 const chosen = activeAirport.airport;
-                setShortestTargetLatLon(chosen.lat, chosen.lon, GLOBE_AIRPORT_DETAIL_ZOOM);
-                requestHighResTilesRef.current?.(chosen.lat, chosen.lon, GLOBE_AIRPORT_DETAIL_ZOOM);
+                const v = frameAirportView(chosen);
+                flyTo(v.lat, v.lon, v.zoom);
                 onInspectAirport?.(chosen);
               }}
               className="px-3 py-1.5 text-left text-xs font-bold bg-[#1e293b] text-slate-100 hover:bg-[#334155] transition flex items-center justify-between"
             >
               <span>Zoom to Airport</span>
-              <span className="text-[10px] font-mono text-sky-300">RWY</span>
+              <span className="text-[10px] font-mono text-sky-300">FRAME</span>
             </button>
             <button
               type="button"
@@ -2482,63 +2330,65 @@ export function InteractiveEarthGlobe({
               <FlightIcon name="plane" size={12} />
             </button>
             {activeAirport.airport.runways.length > 0 && (
-              <div className="bg-[#0b1220] px-2.5 py-1.5 text-slate-300">
-                <div className="text-[9px] uppercase tracking-wider text-slate-400 font-extrabold mb-1">
-                  Select Runway ({activeAirport.airport.runways.length})
+              <div className="bg-[#0b1220] px-2 py-2 text-slate-300" onMouseLeave={() => { popupHoverRunwayRef.current = null; wakeRef.current(); }}>
+                <div className="flex items-center justify-between mb-1.5">
+                  <span className="text-[9px] uppercase tracking-wider text-slate-400 font-extrabold">Runways · {activeAirport.airport.runways.length}</span>
+                  <span className="text-[9px] text-slate-500">pick an end to set DEP / ARR</span>
                 </div>
-                <div className="flex flex-col gap-1 max-h-36 overflow-y-auto pr-0.5">
-                  {activeAirport.airport.runways.map((rw) => (
-                    <div
-                      key={`${rw.le}-${rw.he}`}
-                      className="flex items-center justify-between text-[10px] font-mono bg-white/5 px-1.5 py-1 rounded border border-white/5"
-                    >
-                      <span className="font-bold text-slate-200">
-                        {rw.le}/{rw.he} <span className="text-slate-400 font-normal">({Math.round(rw.length)}m)</span>
-                      </span>
-                      <div className="flex items-center gap-1">
+                <div className="flex flex-col gap-1.5 max-h-52 overflow-y-auto pr-0.5">
+                  {activeAirport.airport.runways.map((rw) => {
+                    const ap = activeAirport.airport;
+                    const ends = [
+                      { ident: rw.le, hdg: Math.round(bearing(rw.leLat, rw.leLon, rw.heLat, rw.heLon)) },
+                      { ident: rw.he, hdg: Math.round(bearing(rw.heLat, rw.heLon, rw.leLat, rw.leLon)) },
+                    ];
+                    return (
+                      <div
+                        key={`${rw.le}-${rw.he}`}
+                        className="rounded border border-white/10 bg-white/[0.04] overflow-hidden"
+                        onMouseEnter={() => { popupHoverRunwayRef.current = { airportId: ap.id, ident: rw.le }; wakeRef.current(); }}
+                      >
                         <button
                           type="button"
+                          title="Fly to this runway"
                           onClick={() => {
-                            onSelectRunwayRef.current?.(activeAirport.airport, rw.le, 'dep');
-                            setActiveAirport(null);
+                            const a = resolveRunwayAnchor(ap, rw.le, 'dep');
+                            if (a) { const v = frameRunwayView(a); flyTo(v.lat, v.lon, v.zoom); }
                           }}
-                          className="px-1.5 py-0.5 bg-emerald-700 hover:bg-emerald-600 text-white font-extrabold rounded text-[9px] shadow"
+                          className="w-full flex items-center justify-between px-2 py-1 bg-white/[0.05] hover:bg-sky-500/20 transition text-left"
                         >
-                          {rw.le} DEP
+                          <span className="text-[11px] font-mono font-extrabold text-slate-100">{rw.le}<span className="text-slate-500">/</span>{rw.he}</span>
+                          <span className="text-[9px] font-mono text-slate-400">{Math.round(rw.length).toLocaleString()} × {Math.round(rw.width || 45)} m{rw.lit ? ' · lit' : ''}</span>
                         </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            onSelectRunwayRef.current?.(activeAirport.airport, rw.he, 'dep');
-                            setActiveAirport(null);
-                          }}
-                          className="px-1.5 py-0.5 bg-emerald-700 hover:bg-emerald-600 text-white font-extrabold rounded text-[9px] shadow"
-                        >
-                          {rw.he} DEP
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            onSelectRunwayRef.current?.(activeAirport.airport, rw.le, 'arr');
-                            setActiveAirport(null);
-                          }}
-                          className="px-1.5 py-0.5 bg-amber-700 hover:bg-amber-600 text-white font-extrabold rounded text-[9px] shadow"
-                        >
-                          {rw.le} ARR
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            onSelectRunwayRef.current?.(activeAirport.airport, rw.he, 'arr');
-                            setActiveAirport(null);
-                          }}
-                          className="px-1.5 py-0.5 bg-amber-700 hover:bg-amber-600 text-white font-extrabold rounded text-[9px] shadow"
-                        >
-                          {rw.he} ARR
-                        </button>
+                        {ends.map((end) => {
+                          const isDep = selectedDep?.id === ap.id && depRunway === end.ident;
+                          const isArr = selectedArr?.id === ap.id && arrRunway === end.ident;
+                          return (
+                            <div key={end.ident} className="flex items-center gap-1 px-2 py-1 border-t border-white/5" onMouseEnter={() => { popupHoverRunwayRef.current = { airportId: ap.id, ident: end.ident }; wakeRef.current(); }}>
+                              <span className="w-9 text-[11px] font-mono font-extrabold text-sky-300">{end.ident}</span>
+                              <span className="flex-1 text-[9px] font-mono text-slate-500">HDG {String(end.hdg).padStart(3, '0')}°</span>
+                              <button
+                                type="button"
+                                aria-pressed={isDep}
+                                onClick={() => onSelectRunwayRef.current?.(ap, end.ident, 'dep')}
+                                className={`px-1.5 py-0.5 rounded text-[9px] font-extrabold border transition ${isDep ? 'bg-emerald-500 text-slate-950 border-emerald-300' : 'bg-transparent text-emerald-300 border-emerald-500/50 hover:bg-emerald-600/30'}`}
+                              >
+                                DEP
+                              </button>
+                              <button
+                                type="button"
+                                aria-pressed={isArr}
+                                onClick={() => onSelectRunwayRef.current?.(ap, end.ident, 'arr')}
+                                className={`px-1.5 py-0.5 rounded text-[9px] font-extrabold border transition ${isArr ? 'bg-amber-400 text-slate-950 border-amber-200' : 'bg-transparent text-amber-300 border-amber-500/50 hover:bg-amber-600/30'}`}
+                              >
+                                ARR
+                              </button>
+                            </div>
+                          );
+                        })}
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </div>
             )}

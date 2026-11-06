@@ -29,6 +29,24 @@ interface Props {
   navigation?: boolean; focusTarget?: { lat: number; lon: number; request: number; label?: string };
 }
 
+/** Airports sorted by latitude so a chart rebuild only touches the handful inside the cached area (not all 8,400). */
+const AIRPORTS_BY_LAT: Airport[] = [...AIRPORTS].sort((a, b) => a.lat - b.lat);
+const IN_VIEW: Airport[] = [];
+function airportsInView(map: CanvasMap): Airport[] {
+  const c = [map.unproject(0, 0), map.unproject(map.W, 0), map.unproject(0, map.H), map.unproject(map.W, map.H)];
+  let minLa = 90, maxLa = -90, minLo = 360, maxLo = -360;
+  for (const [la, lo] of c) { minLa = Math.min(minLa, la); maxLa = Math.max(maxLa, la); minLo = Math.min(minLo, lo); maxLo = Math.max(maxLo, lo); }
+  const padLa = 0.3, wide = maxLo - minLo > 180; // antimeridian / planetary view: only latitude culling
+  let lo = 0, hi = AIRPORTS_BY_LAT.length;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (AIRPORTS_BY_LAT[mid].lat < minLa - padLa) lo = mid + 1; else hi = mid; }
+  IN_VIEW.length = 0;
+  for (let i = lo; i < AIRPORTS_BY_LAT.length; i++) {
+    const a = AIRPORTS_BY_LAT[i]; if (a.lat > maxLa + padLa) break;
+    if (!wide && (a.lon < minLo - 0.3 || a.lon > maxLo + 0.3)) continue;
+    IN_VIEW.push(a);
+  }
+  return IN_VIEW;
+}
 const RANGES_NM = [5, 10, 20, 40], TRACK_DASH = [4, 3], GUIDANCE_DASH = [3, 5], NO_DASH: number[] = [];
 const COMPASS_TICKS = Array.from({ length: 36 }, (_, i) => i * 10);
 
@@ -205,7 +223,7 @@ export function MapPanel({
         }
       }
       const compactMap = !!p.compact || (!!p.navigation && map.viewportW < 480);
-      if (L.airports && !(compactMap && z < 6.5)) for (const a of AIRPORTS) {
+      if (L.airports && !(compactMap && z < 6.5)) for (const a of airportsInView(map)) {
         if (a.size > maxSize) continue;
         const [x, y] = map.project(a.lat, a.lon);
         if (x < -10 || y < -10 || x > map.W + 10 || y > map.H + 10) continue;

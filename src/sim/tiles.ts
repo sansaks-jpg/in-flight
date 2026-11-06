@@ -22,6 +22,12 @@ export interface TileStyle {
 const ESRI = 'https://server.arcgisonline.com/ArcGIS/rest/services';
 const ESRI_ROADS = `${ESRI}/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}`;
 const ESRI_LABELS = `${ESRI}/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}`;
+/**
+ * Esri answers HTTP 200 with a grey "Map data not yet available" JPEG wherever its imagery coverage ends.
+ * `blankTile=false` (documented ArcGIS map-tile parameter, verified live) makes the service answer 404 instead, so every
+ * consumer (2D chart, 3D terrain, globe) can fall back to the last real parent tile instead of drawing grey squares.
+ */
+export const ESRI_IMAGERY_URL = `${ESRI}/World_Imagery/MapServer/tile/{z}/{y}/{x}?blankTile=false`;
 const ESRI_ATTR = 'Imagery © Esri, Maxar, Earthstar Geographics';
 // Independent overlay templates: usable on any satellite base, even without a style-provided overlay.
 export const ROAD_OVERLAY_URL = ESRI_ROADS;
@@ -33,14 +39,14 @@ export const HILLSHADE_MAX_ZOOM = 13;
 
 export const TILE_STYLES: TileStyle[] = [
   {
-    id: 'hybrid', name: 'Satellite', url: `${ESRI}/World_Imagery/MapServer/tile/{z}/{y}/{x}`,
+    id: 'hybrid', name: 'Satellite', url: ESRI_IMAGERY_URL,
     maxZoom: 18, attribution: `${ESRI_ATTR} · Overlays © Esri`, dark: true, satellite: true,
     overlayUrl: ESRI_ROADS, labelUrl: ESRI_LABELS, overlayMaxZoom: 18, overlayOpacity: 0.92,
     fallbackUrl: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
     blurb: 'Aerial imagery with optional roads, labels and airport overlays',
   },
   {
-    id: 'sat', name: 'Satellite', url: `${ESRI}/World_Imagery/MapServer/tile/{z}/{y}/{x}`,
+    id: 'sat', name: 'Satellite', url: ESRI_IMAGERY_URL,
     maxZoom: 18, attribution: ESRI_ATTR, dark: true, satellite: true,
     fallbackUrl: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
     blurb: 'Pure aerial imagery, no labels',
@@ -102,8 +108,10 @@ const MAX_ACTIVE = 10;
 let clock = 0;
 
 function pump() {
-  while (active < MAX_ACTIVE && queue.length) {
+  if (active < MAX_ACTIVE && queue.length > 1) {
     queue.sort((a, b) => a.prio - b.prio);
+  }
+  while (active < MAX_ACTIVE && queue.length) {
     queue.shift()!.start();
   }
 }
@@ -134,15 +142,17 @@ export function loadImage(url: string, prio = 5): Promise<HTMLImageElement | nul
         }
         resolve(ok ? img : null); pump();
       };
-      img.onload = () => finish(true); img.onerror = () => finish(false);
+      // Decode off the main thread BEFORE the image is handed out, so the first drawImage()/texImage2D() never stalls a frame.
+      img.onload = () => { if (typeof img.decode === 'function') img.decode().then(() => finish(true), () => finish(true)); else finish(true); };
+      img.onerror = () => finish(false);
       img.src = url;
     };
     queue.push({ url, start, cancel: () => resolve(null), prio });
   });
   entry = { img: null, failed: false, promise, t: ++clock, attempts: Math.max(hit?.attempts ?? 0, failure?.attempts ?? 0) + 1, retryAt: 0 };
   cache.set(url, entry);
-  if (cache.size > 900) {
-    const old = [...cache.entries()].filter(([, e]) => e.img || e.failed).sort((a, b) => a[1].t - b[1].t).slice(0, 200);
+  if (cache.size > 2400) {
+    const old = [...cache.entries()].filter(([, e]) => e.img || e.failed).sort((a, b) => a[1].t - b[1].t).slice(0, 400);
     old.forEach(([k]) => cache.delete(k));
   }
   pump();
