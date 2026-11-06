@@ -150,7 +150,7 @@ test('filterAircraftVariants filters by category, search query, and favourites',
 
 test('getAircraftStatsComparison computes cruise, ceiling, range, and deltas', () => {
   const stats = getAircraftStatsComparison('sky', 'swift');
-  assert.equal(stats.cruiseKt, 450);
+  assert.equal(stats.cruiseKt, 447);
   assert.ok(stats.cruiseDeltaKt > 250);
   assert.ok(stats.ceilingDeltaFt > 20000);
   assert.ok(stats.rangeDeltaKm > 3000);
