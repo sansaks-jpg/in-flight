@@ -1,8 +1,9 @@
 import * as THREE from 'three';
-import { Projection, wrap360, D2R, R2D, clamp, haversine } from './geo';
+import { Projection, wrap360, D2R, R2D, clamp, haversine, destination } from './geo';
 import { Terrain, DetailLayer } from './terrain';
 import { Structures } from './structures';
-import { Airport, Runway, airportsNear } from '../data/airports';
+import { Airport, Runway, Surface, airportsNear, getAirfield, isPaved } from '../data/airports';
+import { buildAirfieldMeshes } from './airfieldMesh';
 import { QualityPreset } from './storage';
 import { QUALITY } from './quality';
 
@@ -36,6 +37,16 @@ export interface Threshold {
   elev: number;
   lat: number;
   lon: number;
+  /** Displaced threshold distance (m). x/z/lat/lon above are the LANDING threshold (displaced), start* is the physical runway end. */
+  dispM: number;
+  startX: number;
+  startZ: number;
+  startLat: number;
+  startLon: number;
+  /** Full physical runway length available for take-off from the physical end (m). */
+  fullLen: number;
+  surface: Surface;
+  lit: boolean;
 }
 
 // Sky palette. Colours are authored as sRGB hex and converted to linear by THREE.Color, so the
@@ -102,6 +113,7 @@ function cloudTexture() {
 }
 
 function runwayTexture(rw: Runway, len: number, wid: number) {
+  if (!isPaved(rw.surface)) return unpavedRunwayTexture(rw, len, wid);
   const W = 256, Hh = Math.min(4096, Math.max(1024, Math.round(len / 2)));
   const c = document.createElement('canvas'); c.width = W; c.height = Hh;
   const g = c.getContext('2d')!;
@@ -138,6 +150,31 @@ function runwayTexture(rw: Runway, len: number, wid: number) {
     g.restore(); g.restore();
   }
   const tex = new THREE.CanvasTexture(c); tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = 8; return tex;
+}
+
+/** Grass / gravel / dirt strips: no paint beyond the numbers and a faint centreline, surface colour matches the real material. */
+function unpavedRunwayTexture(rw: Runway, len: number, wid: number) {
+  const W = 128, Hh = Math.min(2048, Math.max(256, Math.round(len / 3)));
+  const base = rw.surface === 'G' ? '#5d7a3a' : rw.surface === 'V' ? '#9b9486' : rw.surface === 'D' ? '#9a7b55' : '#7d7a55';
+  const c = document.createElement('canvas'); c.width = W; c.height = Hh;
+  const g = c.getContext('2d')!;
+  g.fillStyle = base; g.fillRect(0, 0, W, Hh);
+  for (let i = 0; i < 900; i++) {
+    const l = hashN(i, 11) > 0.5;
+    g.fillStyle = `rgba(${l ? 255 : 0},${l ? 255 : 0},${l ? 255 : 0},0.05)`;
+    g.fillRect(hashN(i, 12) * W, hashN(i, 13) * Hh, 2 + hashN(i, 14) * 10, 2 + hashN(i, 15) * 24);
+  }
+  const sy = Hh / len, sx = W / wid;
+  g.fillStyle = 'rgba(240,240,232,0.75)';
+  // threshold bars + dashed centreline (what a surveyed strip typically carries)
+  for (const end of [0, 1]) g.fillRect(0.12 * W, end ? 0 : Hh - 1.2 * sy * 6, 0.76 * W, 1.2 * sy * 6);
+  for (let y = 40; y < len - 40; y += 60) g.fillRect(W / 2 - 0.4 * sx, Hh - (y + 25) * sy, 0.8 * sx, 25 * sy);
+  for (const end of [0, 1]) {
+    g.save(); g.translate(W / 2, end ? Hh - (len - 14) * sy : Hh - 14 * sy - 0); if (end) g.rotate(Math.PI);
+    g.font = `bold ${Math.min(wid * 0.8, 26) * sx}px Arial`; g.textAlign = 'center'; g.textBaseline = 'top';
+    g.save(); g.scale(1, Math.max(0.2, sy / sx)); g.fillText(end ? rw.he : rw.le, 0, -(end ? 0 : 36 * sx * 0.0)); g.restore(); g.restore();
+  }
+  const tex = new THREE.CanvasTexture(c); tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = 4; return tex;
 }
 
 // Low-poly static parked airliner with distinctive Indonesian livery tail colors
@@ -456,18 +493,24 @@ export class World {
     for (const rw of ap.runways) {
       const g = this.runwayGeom(ap, rw);
       const h2 = wrap360(g.hdg + 180);
-      out.push({
-        ap, rw, end: 'le', ident: rw.le,
-        x: g.ax, z: g.az, hdg: g.hdg,
-        len: g.len, wid: g.wid, elev: ap.elev,
-        lat: rw.leLat, lon: rw.leLon,
-      });
-      out.push({
-        ap, rw, end: 'he', ident: rw.he,
-        x: g.bx, z: g.bz, hdg: h2,
-        len: g.len, wid: g.wid, elev: ap.elev,
-        lat: rw.heLat, lon: rw.heLon,
-      });
+      const mk = (end: 'le' | 'he'): Threshold => {
+        const le = end === 'le';
+        const hdg = le ? g.hdg : h2;
+        const disp = Math.max(0, Math.min(le ? rw.dispLe : rw.dispHe, g.len * 0.5));
+        const sx = le ? g.ax : g.bx, sz = le ? g.az : g.bz;
+        const sLat = le ? rw.leLat : rw.heLat, sLon = le ? rw.leLon : rw.heLon;
+        const fx = Math.sin(hdg * D2R), fz = -Math.cos(hdg * D2R);
+        const [dLat, dLon] = disp > 0 ? destination(sLat, sLon, hdg, disp) : [sLat, sLon];
+        return {
+          ap, rw, end, ident: le ? rw.le : rw.he,
+          x: sx + fx * disp, z: sz + fz * disp, hdg,
+          len: g.len - disp, wid: g.wid, elev: ap.elev,
+          lat: dLat, lon: dLon,
+          dispM: disp, startX: sx, startZ: sz, startLat: sLat, startLon: sLon, fullLen: g.len,
+          surface: rw.surface, lit: rw.lit,
+        };
+      };
+      out.push(mk('le'), mk('he'));
     }
     return out;
   }
@@ -530,7 +573,7 @@ export class World {
       );
       shoulder.position.set(g.cx, ap.elev + 0.05, g.cz);
       shoulder.rotation.y = -g.hdg * D2R;
-      group.add(shoulder);
+      if (isPaved(rw.surface)) group.add(shoulder); else { shoulder.geometry.dispose(); (shoulder.material as THREE.Material).dispose(); }
 
       const m = new THREE.Mesh(geo, mat);
       m.position.set(g.cx, ap.elev + 0.12, g.cz);
@@ -557,13 +600,15 @@ export class World {
       edge.count = k;
       edge.instanceMatrix.needsUpdate = true;
       edge.frustumCulled = false;
-      group.add(edge);
+      if (rw.lit) group.add(edge);
 
       // Green threshold bars
       const thr = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 0.5, 1), greenMat, 24);
       let tk = 0;
+      const dispOf = (end: number) => Math.max(0, Math.min(end ? rw.dispHe : rw.dispLe, g.len * 0.5));
       for (const end of [0, 1]) {
-        const bx = end ? g.bx : g.ax, bz = end ? g.bz : g.az;
+        const dd = dispOf(end);
+        const bx = (end ? g.bx : g.ax) + fx * (end ? -1 : 1) * dd, bz = (end ? g.bz : g.az) + fz * (end ? -1 : 1) * dd;
         for (let i = -5; i <= 5; i++) {
           dm.position.set(
             bx + rx * i * (g.wid / 12) - fx * (end ? -1 : 1) * 1.5,
@@ -576,10 +621,10 @@ export class World {
       }
       thr.count = tk;
       thr.frustumCulled = false;
-      group.add(thr);
+      if (isPaved(rw.surface)) group.add(thr);
 
       // ALS (Approach Lighting System) with Sequenced Flashing Strobe Rabbit (15 stations extending 450m)
-      for (const end of [0, 1]) {
+      if (isPaved(rw.surface) && rw.lit && g.len >= 1800) for (const end of [0, 1]) {
         const sgn = end ? 1 : -1;
         const bx = end ? g.bx : g.ax, bz = end ? g.bz : g.az;
         for (let i = 1; i <= 15; i++) {
@@ -597,6 +642,7 @@ export class World {
 
     // PAPI boxes for every runway end
     for (const th of this.thresholds(ap)) {
+      if (!isPaved(th.surface) || th.len < 900) continue;
       const h = th.hdg * D2R, fx = Math.sin(h), fz = -Math.cos(h), rx = -fz, rz = fx;
       const px = th.x + fx * 320 - rx * (th.wid / 2 + 16);
       const pz = th.z + fz * 320 - rz * (th.wid / 2 + 16);
@@ -610,6 +656,9 @@ export class World {
       }
       papis.push({ th, boxes, dirx: -fx, dirz: -fz, px, pz, elev: ap.elev + 1.2 });
     }
+
+    const layout = getAirfield(ap);
+    if (layout) buildAirfieldMeshes(ap, layout, this.proj, group, detailed);
 
     // High-Detail Airport Complexes: Multi-bay Terminal, Jetways, Indonesian Livery Airliners & Windsock
     if (detailed && ap.runways.length > 0) {
@@ -626,6 +675,7 @@ export class World {
       const hangarMat = new THREE.MeshLambertMaterial({ color: 0x94a3b8 });
       const towerMat = new THREE.MeshLambertMaterial({ color: 0xf1f5f9 });
 
+      if (!layout) { // surveyed OSM ground layout replaces the generic placeholder apron/terminal
       // 1. Parallel Taxiway
       const pTaxiGeo = new THREE.PlaneGeometry(22, taxiLen);
       pTaxiGeo.rotateX(-Math.PI / 2);
@@ -740,6 +790,8 @@ export class World {
         hangar.rotation.y = -g.hdg * D2R;
         hangar.position.set(hx, ap.elev + 0.5, hz);
         group.add(hangar);
+      }
+
       }
 
       // 7. Animated Windsock near runway primary threshold

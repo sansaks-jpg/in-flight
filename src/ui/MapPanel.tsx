@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useCallback, type RefObject } from 'react';
 import { CanvasMap } from './CanvasMap';
-import { AIRPORTS, Airport } from '../data/airports';
+import { AIRPORTS, Airport, getAirfield, NAVAIDS } from '../data/airports';
+import { trueToMag } from '../sim/magvar';
 import { TILE_STYLES, styleById } from '../sim/tiles';
 import { MapLayers, loadMapLayers, saveMapLayers } from './mapLayers';
 import { greatCircle, haversine, destination, D2R, M_PER_NM } from '../sim/geo';
@@ -127,6 +128,33 @@ export function MapPanel({
       const dark = styleById(map.styleId).dark;
       const gs = flightState;
       const labelRects: number[][] = [];
+      /** Surveyed ground layout (OSM): aprons, taxiways, hangars/terminals, stands and hold-short points. */
+      const drawLayout = (a: Airport, ppm: number) => {
+        if (z < 11.2) return;
+        const L = getAirfield(a); if (!L) return;
+        const ring = (pts: [number, number][]) => { pts.forEach(([la, lo], i) => { const [x, y] = map.project(la, lo); if (i) g.lineTo(x, y); else g.moveTo(x, y); }); };
+        g.lineJoin = 'round'; g.lineCap = 'round';
+        g.fillStyle = dark ? 'rgba(148,163,184,.30)' : 'rgba(71,85,105,.28)';
+        for (const o of L.aprons) { g.beginPath(); ring(o.ring); g.closePath(); g.fill(); }
+        for (const t of L.taxiways) {
+          g.beginPath(); ring(t.pts);
+          g.strokeStyle = dark ? 'rgba(4,10,16,.85)' : 'rgba(10,28,40,.55)'; g.lineWidth = Math.min(9, Math.max(1.6, t.width * ppm)) + 1.6; g.stroke();
+          g.strokeStyle = dark ? '#8493a6' : '#64748b'; g.lineWidth = Math.min(9, Math.max(1.6, t.width * ppm)); g.stroke();
+        }
+        g.fillStyle = dark ? 'rgba(226,232,240,.55)' : 'rgba(30,41,59,.55)';
+        for (const o of L.hangars.concat(L.terminals)) { g.beginPath(); ring(o.ring); g.closePath(); g.fill(); }
+        if (p.mode === 'planner' && z >= 12.2) {
+          g.fillStyle = '#ffe08a'; g.strokeStyle = '#0f172a'; g.lineWidth = 1.2;
+          g.font = '600 10px ui-sans-serif, system-ui'; g.textAlign = 'left'; g.textBaseline = 'middle';
+          for (const st of L.stands) {
+            const [x, y] = map.project(st.lat, st.lon); if (x < -8 || y < -8 || x > map.W + 8 || y > map.H + 8) continue;
+            g.beginPath(); g.arc(x, y, st.gate ? 3.6 : 3, 0, Math.PI * 2); g.fill(); g.stroke();
+            if (z >= 15 && st.ref) { g.lineWidth = 2.5; g.strokeStyle = 'rgba(0,0,0,.8)'; g.strokeText(st.ref, x + 6, y); g.fillStyle = '#ffe9a8'; g.fillText(st.ref, x + 6, y); g.fillStyle = '#ffe08a'; g.strokeStyle = '#0f172a'; g.lineWidth = 1.2; }
+          }
+          g.fillStyle = '#f59e0b';
+          for (const hp of L.holds) { const [x, y] = map.project(hp.lat, hp.lon); g.fillRect(x - 2.5, y - 2.5, 5, 5); }
+        }
+      };
       const drawRunways = (a: Airport, emphasized = false) => {
         if (!a.runways.length) return;
         const trueScale = z >= 9.4;
@@ -134,6 +162,7 @@ export function MapPanel({
         const ppm = (256 * 2 ** z) / (40075016.7 * Math.cos(a.lat * D2R));
         const rws = trueScale ? a.runways : [a.runways.reduce((m, r) => (r.length > m.length ? r : m), a.runways[0])];
         g.lineCap = 'butt';
+        let layoutDone = false;
         for (const r of rws) {
           const [x1, y1] = map.project(r.leLat, r.leLon), [x2, y2] = map.project(r.heLat, r.heLon);
           if (Math.max(x1, x2) < -30 || Math.min(x1, x2) > map.W + 30 || Math.max(y1, y2) < -30 || Math.min(y1, y2) > map.H + 30) continue;
@@ -146,6 +175,7 @@ export function MapPanel({
             continue;
           }
 
+          if (!layoutDone) { layoutDone = true; drawLayout(a, ppm); }
           const w = Math.min(18, Math.max(1.5, r.width * ppm));
           g.beginPath(); g.moveTo(x1, y1); g.lineTo(x2, y2);
           g.strokeStyle = dark ? 'rgba(4,10,16,.92)' : 'rgba(10,28,40,.65)'; g.lineWidth = w + 2.2; g.stroke();
@@ -158,17 +188,22 @@ export function MapPanel({
             g.lineWidth = 1.5;
             g.beginPath(); g.arc(x1, y1, 4.5, 0, Math.PI * 2); g.fill(); g.stroke();
             g.beginPath(); g.arc(x2, y2, 4.5, 0, Math.PI * 2); g.fill(); g.stroke();
-            // Gate/Ramp apron spots offset parallel to runway
-            const ang = Math.atan2(y2 - y1, x2 - x1);
-            const nx = -Math.sin(ang), ny = Math.cos(ang);
-            for (let step = 0.25; step <= 0.75; step += 0.125) {
-              const gx = x1 + (x2 - x1) * step + nx * (w + 14);
-              const gy = y1 + (y2 - y1) * step + ny * (w + 14);
-              g.beginPath(); g.arc(gx, gy, 3.8, 0, Math.PI * 2); g.fill(); g.stroke();
-            }
           }
         }
       };
+      if (L.airports && z >= 8.4 && !p.compact) {
+        g.font = '600 9px ui-sans-serif, system-ui'; g.textAlign = 'left'; g.textBaseline = 'middle';
+        for (const n of NAVAIDS) {
+          const [x, y] = map.project(n.lat, n.lon); if (x < -10 || y < -10 || x > map.W + 10 || y > map.H + 10) continue;
+          const vor = n.type.startsWith('VOR') || n.type === 'TACAN';
+          g.strokeStyle = dark ? '#7dd3fc' : '#0369a1'; g.fillStyle = dark ? 'rgba(125,211,252,.18)' : 'rgba(3,105,161,.15)'; g.lineWidth = 1.4;
+          g.beginPath();
+          if (vor) { for (let i = 0; i < 6; i++) { const a = (i / 6) * Math.PI * 2; const px = x + Math.cos(a) * 6, py = y + Math.sin(a) * 6; if (i) g.lineTo(px, py); else g.moveTo(px, py); } g.closePath(); }
+          else { g.setLineDash([2, 2]); g.arc(x, y, 5, 0, Math.PI * 2); }
+          g.fill(); g.stroke(); g.setLineDash([]);
+          if (z >= 9.6) { g.fillStyle = dark ? '#bae6fd' : '#075985'; g.fillText(n.ident, x + 8, y); }
+        }
+      }
       const compactMap = !!p.compact || (!!p.navigation && map.viewportW < 480);
       if (L.airports && !(compactMap && z < 6.5)) for (const a of AIRPORTS) {
         if (a.size > maxSize) continue;
@@ -379,7 +414,7 @@ export function MapPanel({
         g.beginPath(); g.arc(tx, ty, 3.5, 0, Math.PI * 2); g.fillStyle = '#ffd27a'; g.fill();
 
         if (!compactMap && z >= 6.0) {
-          const txt = `ILS RWY ${ap.ident} · ${String(Math.round(ap.hdg) % 360).padStart(3, '0')}°`;
+          const txt = `${ap.ils ? 'ILS' : 'RWY'} ${ap.ident} · ${String(Math.round(trueToMag(ap.hdg, ap.lat, ap.lon)) % 360 || 360).padStart(3, '0')}°M`;
           g.font = '700 11px ui-sans-serif, system-ui'; g.textAlign = 'left'; g.textBaseline = 'middle';
           g.lineWidth = 3; g.strokeStyle = 'rgba(0,0,0,.85)'; g.strokeText(txt, tx + 12, ty + 14);
           g.fillStyle = '#ffd9a6'; g.fillText(txt, tx + 12, ty + 14);

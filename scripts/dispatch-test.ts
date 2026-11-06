@@ -24,8 +24,8 @@ import {
 
 test('REPO_FACTS strictly match the repository dataset counts and architecture', () => {
   assert.equal(REPO_FACTS.totalAirports, AIRPORTS.length);
-  assert.equal(REPO_FACTS.totalAirports, 6615);
-  assert.equal(REPO_FACTS.indonesiaAirports, 157);
+  assert.equal(REPO_FACTS.totalAirports, 7134);
+  assert.equal(REPO_FACTS.indonesiaAirports, 676);
   assert.equal(REPO_FACTS.aircraftCount, 3);
   assert.ok(REPO_FACTS.terrainSource.includes('AWS'));
   assert.ok(REPO_FACTS.imagerySource.includes('Esri'));

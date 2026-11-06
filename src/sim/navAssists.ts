@@ -73,9 +73,10 @@ export function buildApproachGates(th: Threshold, elev: number): THREE.Line[] {
   return gates;
 }
 
+/** Chevrons along the taxi route (world x/z points), oriented along each leg and ending with the runway heading. */
 export function buildTaxiRibbon(
-  depTh: Threshold,
-  fmPos: THREE.Vector3,
+  path: [number, number][],
+  endHdgDeg: number,
   heightAt: (x: number, z: number) => number | undefined,
   elev: number
 ): THREE.Mesh[] {
@@ -96,20 +97,28 @@ export function buildTaxiRibbon(
     opacity: 0.8,
     side: THREE.DoubleSide,
     polygonOffset: true,
-    polygonOffsetFactor: -4,
+    polygonOffsetFactor: -6,
+    polygonOffsetUnits: -6,
   });
-
-  const count = 16;
-  for (let i = 1; i <= count; i++) {
-    const t = i / (count + 1);
-    const ax = fmPos.x + (depTh.x - fmPos.x) * t;
-    const az = fmPos.z + (depTh.z - fmPos.z) * t;
-    const ay = (heightAt(ax, az) ?? elev) + 0.12;
-    const mesh = new THREE.Mesh(arrowGeo, arrowMat);
-    mesh.position.set(ax, ay, az);
-    mesh.rotation.y = -depTh.hdg * D2R;
-    meshes.push(mesh);
+  if (path.length < 2) return meshes;
+  const STEP = 22, MAX = 140;
+  let carry = 0;
+  for (let i = 0; i + 1 < path.length && meshes.length < MAX; i++) {
+    const [ax, az] = path[i], [bx, bz] = path[i + 1];
+    const dx = bx - ax, dz = bz - az, L = Math.hypot(dx, dz);
+    if (L < 0.5) continue;
+    const hdg = Math.atan2(dx, -dz);
+    for (let d = STEP - carry; d <= L && meshes.length < MAX; d += STEP) {
+      const x = ax + (dx / L) * d, z = az + (dz / L) * d;
+      const m = new THREE.Mesh(arrowGeo, arrowMat);
+      m.position.set(x, (heightAt(x, z) ?? elev) + 0.18, z);
+      m.rotation.y = -hdg;
+      meshes.push(m);
+      carry = L - d;
+    }
+    carry = (carry + 0) % STEP;
   }
+  void endHdgDeg;
   return meshes;
 }
 

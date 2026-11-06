@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState, type MutableRefObject } from 'react';
 import { specById } from '../sim/specs';
-import { AIRPORT_BY_ID, Airport, searchAirports } from '../data/airports';
+import { AIRPORT_BY_ID, Airport, searchAirports, frequenciesFor, navaidsNear, navaidFreqLabel, getAirfield } from '../data/airports';
+import { startSpots } from '../sim/airfield';
+import { magVar, fmtVar } from '../sim/magvar';
 import { Settings } from '../sim/storage';
 import { TILE_STYLES } from '../sim/tiles';
 import { FlightIcon } from './FlightIcon';
@@ -33,6 +35,8 @@ interface Props {
   onSelectArr?: (a: Airport | null) => void;
   setFrom: (a: Airport) => void;
   setTo: (a: Airport) => void;
+  rwySel: { dep: string; arr: string; spot: string };
+  setRwySel: (f: (r: { dep: string; arr: string; spot: string }) => { dep: string; arr: string; spot: string }) => void;
   onFly: () => void;
   onBack: () => void;
   initialHangarOpen?: boolean;
@@ -149,6 +153,8 @@ export function Planner({
   onSelectDep,
   onSelectArr,
   onFly,
+  rwySel,
+  setRwySel,
   onBack,
   initialHangarOpen = false,
   globeControlRef,
@@ -165,8 +171,9 @@ export function Planner({
   const [routeFilter, setRouteFilter] = useState<'all' | 'id' | 'world'>('all');
   const [locationQuery, setLocationQuery] = useState('');
   const [locationOpen, setLocationOpen] = useState(false);
-  const [selectedDepRwy, setSelectedDepRwy] = useState<string>('');
-  const [selectedArrRwy, setSelectedArrRwy] = useState<string>('');
+  const selectedDepRwy = rwySel.dep, selectedArrRwy = rwySel.arr;
+  const setSelectedDepRwy = (v: string) => setRwySel((r) => ({ ...r, dep: v }));
+  const setSelectedArrRwy = (v: string) => setRwySel((r) => ({ ...r, arr: v }));
   const [utcMinutes, setUtcMinutes] = useState<number>(14 * 60 + 47); // 14:47 UTC matching reference images
   const [modal, setModal] = useState<null | 'scores' | 'settings' | 'controls' | 'credits'>(null);
   const [entered, setEntered] = useState(false);
@@ -216,26 +223,11 @@ export function Planner({
     () => (selectedArr ? expandAirportRunways(selectedArr) : []),
     [selectedArr]
   );
+  const depSpots = useMemo(() => (selectedDep ? startSpots(selectedDep) : []), [selectedDep]);
   const inspectedRunways = useMemo(
     () => expandAirportRunways(inspectedAirport),
     [inspectedAirport]
   );
-
-  useEffect(() => {
-    if (selectedDep) {
-      setSelectedDepRwy(selectedDep.runways[0]?.le || '07R');
-    } else {
-      setSelectedDepRwy('');
-    }
-  }, [selectedDep]);
-
-  useEffect(() => {
-    if (selectedArr) {
-      setSelectedArrRwy(selectedArr.runways[0]?.le || '11');
-    } else {
-      setSelectedArrRwy('');
-    }
-  }, [selectedArr]);
 
   const canStartSelectedFlight = Boolean(selectedDep || selectedArr);
 
@@ -383,11 +375,14 @@ export function Planner({
                 <select
                   aria-label="Departure Runway"
                   disabled={!selectedDep}
-                  value={selectedDep ? `${settings.startMode}:${selectedDepRwy}` : ''}
+                  value={!selectedDep ? '' : settings.startMode !== 'runway' ? settings.startMode : rwySel.spot ? `ramp:${rwySel.spot}` : `runway:${selectedDepRwy}`}
                   onChange={(e) => {
-                    const [modePart, rwyPart] = e.target.value.split(':');
-                    set({ startMode: modePart as Settings['startMode'] });
-                    if (rwyPart) setSelectedDepRwy(rwyPart);
+                    const v = e.target.value;
+                    const k = v.indexOf(':');
+                    const kind = k < 0 ? v : v.slice(0, k), id = k < 0 ? '' : v.slice(k + 1);
+                    if (kind === 'runway') { set({ startMode: 'runway' }); setRwySel((r) => ({ ...r, dep: id, spot: '' })); }
+                    else if (kind === 'ramp') { set({ startMode: 'runway' }); setRwySel((r) => ({ ...r, spot: id })); }
+                    else set({ startMode: kind as Settings['startMode'] });
                   }}
                   className="w-full bg-transparent text-[11px] font-medium text-slate-300 disabled:text-slate-400 outline-none truncate"
                 >
@@ -395,21 +390,44 @@ export function Planner({
                     <option value="">Runway</option>
                   ) : (
                     <>
-                      {depRunways.map((r) => (
-                        <option key={`dep-${r.ident}`} value={`runway:${r.ident}`}>
-                          RWY {r.ident} ({r.lengthM}m)
-                        </option>
-                      ))}
-                      <option value={`cruise:${selectedDepRwy}`}>
-                        AIRBORNE CRUISE (FL{dispatch.plannedFlightLevel})
-                      </option>
-                      <option value={`final:${selectedDepRwy}`}>
-                        14KM ILS FINAL APPROACH
-                      </option>
+                      <optgroup label="Runway start">
+                        <option value="runway:">AUTO runway (wind / route)</option>
+                        {depRunways.map((r) => (
+                          <option key={`dep-${r.ident}`} value={`runway:${r.ident}`}>
+                            RWY {r.ident} · {r.lengthM}m · {r.surface} · {String(r.headingDeg).padStart(3, '0')}°M
+                          </option>
+                        ))}
+                      </optgroup>
+                      {depSpots.length > 0 && (
+                        <optgroup label="Ramp start · taxi to the runway">
+                          {depSpots.map((sp) => (
+                            <option key={sp.id} value={`ramp:${sp.id}`}>{sp.label}</option>
+                          ))}
+                        </optgroup>
+                      )}
+                      <optgroup label="Airborne">
+                        <option value="cruise">AIRBORNE CRUISE (FL{dispatch.plannedFlightLevel})</option>
+                        <option value="final">14KM ILS FINAL APPROACH</option>
+                      </optgroup>
                     </>
                   )}
                 </select>
               </div>
+              {selectedDep && settings.startMode === 'runway' && rwySel.spot && (
+                <div className="flex items-center bg-[#121822]/90 border border-white/10 h-6 px-2">
+                  <select
+                    aria-label="Takeoff Runway"
+                    value={selectedDepRwy}
+                    onChange={(e) => setSelectedDepRwy(e.target.value)}
+                    className="w-full bg-transparent text-[11px] font-medium text-slate-300 outline-none truncate"
+                  >
+                    <option value="">Takeoff: AUTO runway</option>
+                    {depRunways.map((r) => (
+                      <option key={`to-${r.ident}`} value={r.ident}>Takeoff: RWY {r.ident} ({r.lengthM}m)</option>
+                    ))}
+                  </select>
+                </div>
+              )}
             </div>
 
             {/* Center Blue Swap Button */}
@@ -450,11 +468,14 @@ export function Planner({
                   {!selectedArr ? (
                     <option value="">Runway</option>
                   ) : (
-                    arrRunways.map((r) => (
-                      <option key={`arr-${r.ident}`} value={r.ident}>
-                        RWY {r.ident} ({r.lengthM}m {r.surface})
-                      </option>
-                    ))
+                    <>
+                      <option value="">AUTO approach runway (wind / route)</option>
+                      {arrRunways.map((r) => (
+                        <option key={`arr-${r.ident}`} value={r.ident}>
+                          RWY {r.ident} · LDA {r.ldaM}m · {r.surface} · {String(r.headingDeg).padStart(3, '0')}°M
+                        </option>
+                      ))}
+                    </>
                   )}
                 </select>
               </div>
@@ -854,34 +875,57 @@ export function Planner({
           {airportTab === 'runways' ? (
             <div className="flex-1 overflow-y-auto divide-y divide-white/5 text-xs">
               {inspectedRunways.map((r) => (
-                <button
-                  key={r.ident}
-                  type="button"
-                  onClick={() => setSelectedDepRwy(r.ident)}
-                  className="w-full px-3 py-1.5 flex items-center justify-between hover:bg-white/5 text-slate-200 transition"
-                >
-                  <span className="font-mono font-bold">{r.ident}</span>
-                  <span className="font-mono text-[11px] text-slate-300">
-                    {r.lengthM} m ({r.surface})
-                  </span>
-                </button>
+                <div key={`${r.pairIdent}-${r.ident}`} className="w-full px-3 py-1.5 text-slate-200">
+                  <div className="flex items-center justify-between">
+                    <span className="font-mono font-bold">{r.ident}</span>
+                    <span className="font-mono text-[11px] text-slate-300">
+                      {r.lengthM} × {r.widthM} m · {String(r.headingDeg).padStart(3, '0')}°M
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between text-[10px] text-slate-400">
+                    <span>
+                      {r.surface}{r.lit ? ' · lit' : ' · unlit'}{r.dispM > 0 ? ` · displaced ${r.dispM} m` : ''}{r.approx ? ' · position approx.' : ''}
+                    </span>
+                    <span className="flex gap-1">
+                      <button type="button" disabled={selectedDep?.id !== inspectedAirport.id} onClick={() => setSelectedDepRwy(r.ident)}
+                        className={`px-1.5 h-4 font-bold ${selectedDep?.id === inspectedAirport.id ? (selectedDepRwy === r.ident ? 'bg-[#2572eb] text-white' : 'bg-[#1f2937] text-sky-300 hover:bg-[#2572eb] hover:text-white') : 'bg-[#1a2230] text-slate-600'}`}>DEP</button>
+                      <button type="button" disabled={selectedArr?.id !== inspectedAirport.id} onClick={() => setSelectedArrRwy(r.ident)}
+                        className={`px-1.5 h-4 font-bold ${selectedArr?.id === inspectedAirport.id ? (selectedArrRwy === r.ident ? 'bg-[#2572eb] text-white' : 'bg-[#1f2937] text-sky-300 hover:bg-[#2572eb] hover:text-white') : 'bg-[#1a2230] text-slate-600'}`}>ARR</button>
+                    </span>
+                  </div>
+                </div>
               ))}
+              <div className="px-3 py-1.5 text-[10px] text-slate-400 font-mono">
+                {(() => {
+                  const L = getAirfield(inspectedAirport);
+                  return L
+                    ? `Ground layout (OSM): ${L.taxiways.length} taxiways · ${L.aprons.length} aprons · ${L.stands.length} stands · ${L.hangars.length} hangars`
+                    : 'Ground layout: runways only (no taxiway survey available)';
+                })()}
+              </div>
             </div>
           ) : (
             <div className="flex-1 overflow-y-auto p-3 space-y-2 text-xs">
               <div className="space-y-1 font-mono text-[11px]">
+                {frequenciesFor(inspectedAirport.id).length === 0 && (
+                  <div className="py-1 text-slate-400">No published radio frequencies for this airfield.</div>
+                )}
+                {frequenciesFor(inspectedAirport.id).map((f, i) => (
+                  <div key={`${f.type}-${i}`} className="flex justify-between py-1 border-b border-white/10">
+                    <span className="text-slate-400">{f.label}</span>
+                    <span className="text-white font-bold">{f.mhz.toFixed(3).replace(/0$/, '')} MHz</span>
+                  </div>
+                ))}
                 <div className="flex justify-between py-1 border-b border-white/10">
-                  <span className="text-slate-400">ATIS / WX</span>
-                  <span className="text-sky-300 font-bold">126.250 MHz</span>
+                  <span className="text-slate-400">Magnetic variation</span>
+                  <span className="text-amber-300 font-bold">{fmtVar(magVar(inspectedAirport.lat, inspectedAirport.lon))}</span>
                 </div>
-                <div className="flex justify-between py-1 border-b border-white/10">
-                  <span className="text-slate-400">TOWER</span>
-                  <span className="text-white font-bold">118.100 MHz</span>
-                </div>
-                <div className="flex justify-between py-1 border-b border-white/10">
-                  <span className="text-slate-400">ILS / APPR</span>
-                  <span className="text-emerald-300 font-bold">110.300 MHz</span>
-                </div>
+                {navaidsNear(inspectedAirport.lat, inspectedAirport.lon, 45000).slice(0, 6).map((n) => (
+                  <div key={`${n.ident}-${n.type}-${n.freqKhz}`} className="flex justify-between py-1 border-b border-white/10">
+                    <span className="text-slate-400">{n.type} {n.ident}</span>
+                    <span className="text-emerald-300 font-bold">{navaidFreqLabel(n)}</span>
+                  </div>
+                ))}
               </div>
               <div>
                 <label className="block text-[10px] uppercase tracking-wider font-bold text-slate-400 mb-1">
@@ -1153,7 +1197,7 @@ export function Planner({
           <Modal title="Aeronautical Data & Repository Architecture" onClose={() => setModal(null)}>
             <ul className="text-sm text-slate-300 space-y-2.5 list-disc pl-5">
               <li>
-                <b>OurAirports Worldwide Runway Database</b> — {REPO_FACTS.totalAirports.toLocaleString()} real-world airports (including {REPO_FACTS.indonesiaAirports} in Indonesia) with authentic runway coordinates, magnetic headings, thresholds, and dimensions.
+                <b>OurAirports + OpenStreetMap</b> — {REPO_FACTS.totalAirports.toLocaleString()} airfields, {REPO_FACTS.indonesiaAirports} in Indonesia (every mapped runway incl. grass/gravel strips) with surveyed centrelines, surfaces, displaced thresholds and taxiway/apron/stand layouts for {REPO_FACTS.indonesiaWithLayout}. Headings are magnetic (WMM2025).
               </li>
               <li>
                 <b>3D Terrain &amp; Elevation</b> — {REPO_FACTS.terrainSource} heightmaps paired with {REPO_FACTS.vectorSource} road, water, and building footprints.

@@ -60,7 +60,7 @@ export function NavigationMap({ game, hud, from, to, settings, focusTarget, view
 export function MiniMap({ game, hud, from, to, settings, viewStateRef, onExpand }:
   Omit<MapProps, 'setSettings'> & { viewStateRef: RefObject<NavigationMapView | null>; onExpand: () => void }) {
   return <section className="flight-mini-map" aria-label="Navigation mini map" data-flight-ui>
-    <header><span title="Aircraft heading · true north">HDG <b>{formatHeading(hud.hdg)}</b></span>
+    <header><span title="Aircraft heading · magnetic">HDG <b>{formatHeading(hud.hdg)}</b></span>
       <span title="Ground track from the flight model">TRK <b>{formatHeading(hud.track)}</b></span><kbd>M</kbd></header>
     <div className="flight-mini-chart"><MapPanel mode="flight" game={game} from={from} to={to} styleId={settings.mapStyle} onStyle={() => {}}
       navigation compact onExpand={onExpand} viewStateRef={viewStateRef} className="absolute inset-0" /></div>

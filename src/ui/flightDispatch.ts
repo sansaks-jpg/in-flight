@@ -1,10 +1,12 @@
 import { AIRCRAFT, AircraftSpec, specById } from '../sim/specs';
-import { AIRPORT_BY_ID, AIRPORTS, Airport } from '../data/airports';
+import { AIRPORT_BY_ID, AIRPORTS, Airport, SURFACE_NAME, isPaved, AIRFIELD_LAYOUT_COUNT } from '../data/airports';
+import { trueToMag } from '../sim/magvar';
 import { bearing, haversine, M_PER_NM } from '../sim/geo';
 
 export interface RepoFacts {
   totalAirports: number;
   indonesiaAirports: number;
+  indonesiaWithLayout: number;
   aircraftCount: number;
   engine: string;
   uiFramework: string;
@@ -16,6 +18,7 @@ export interface RepoFacts {
 export const REPO_FACTS: RepoFacts = {
   totalAirports: AIRPORTS.length,
   indonesiaAirports: AIRPORTS.filter((a) => a.country === 'ID').length,
+  indonesiaWithLayout: AIRFIELD_LAYOUT_COUNT,
   aircraftCount: AIRCRAFT.length,
   engine: 'Three.js WebGL 3D',
   uiFramework: 'React 19 + TypeScript 5.9',
@@ -383,7 +386,7 @@ export function getAircraftStatsComparison(activeAircraftId: string, baselineAir
 
 export const INDONESIA_ROUTES: [string, string, string, string][] = [
   ['WIII', 'WALK', 'Jakarta to IKN Nusantara', 'Capital corridor · East Kalimantan'],
-  ['WIII', 'WARC', 'Jakarta to Kediri Dhoho', 'East Java valley approach'],
+  ['WIII', 'WARD', 'Jakarta to Kediri Dhoho', 'East Java valley approach'],
   ['WADD', 'WATO', 'Bali to Labuan Bajo', 'Komodo archipelago scenic hop'],
   ['WIMM', 'WIMN', 'Medan to Silangit', 'Lake Toba volcanic caldera'],
   ['WAAA', 'WASS', 'Makassar to Sorong', 'Raja Ampat island gateway'],
@@ -505,34 +508,42 @@ export interface ExpandedRunwayEnd {
   ident: string;
   pairIdent: string;
   lengthM: number;
+  /** Landing distance available from the (possibly displaced) threshold. */
+  ldaM: number;
   widthM: number;
+  /** Magnetic heading (what the runway number and the cockpit compass use). */
   headingDeg: number;
+  trueHeadingDeg: number;
   surface: string;
+  paved: boolean;
+  lit: boolean;
+  dispM: number;
+  /** True when the runway position is derived from declared length/heading rather than a survey. */
+  approx: boolean;
 }
 
 export function expandAirportRunways(airport: Airport): ExpandedRunwayEnd[] {
   const list: ExpandedRunwayEnd[] = [];
   for (const r of airport.runways) {
-    const hdgLe = Math.round(bearing(r.leLat, r.leLon, r.heLat, r.heLon)) % 360;
-    const hdgHe = (hdgLe + 180) % 360;
+    const trueLe = bearing(r.leLat, r.leLon, r.heLat, r.heLon);
+    const mLat = (r.leLat + r.heLat) / 2, mLon = (r.leLon + r.heLon) / 2;
     const len = Math.round(r.length);
     const wid = Math.round(r.width);
-    list.push({
-      ident: r.le,
+    const mk = (ident: string, trueH: number, disp: number): ExpandedRunwayEnd => ({
+      ident,
       pairIdent: `${r.le}/${r.he}`,
       lengthM: len,
+      ldaM: Math.max(0, len - Math.round(disp)),
       widthM: wid,
-      headingDeg: hdgLe,
-      surface: 'Asphalt',
+      headingDeg: Math.round(trueToMag(trueH, mLat, mLon)) % 360 || 360,
+      trueHeadingDeg: Math.round(trueH) % 360,
+      surface: SURFACE_NAME[r.surface],
+      paved: isPaved(r.surface),
+      lit: r.lit,
+      dispM: Math.round(disp),
+      approx: r.src === 'H',
     });
-    list.push({
-      ident: r.he,
-      pairIdent: `${r.le}/${r.he}`,
-      lengthM: len,
-      widthM: wid,
-      headingDeg: hdgHe,
-      surface: 'Asphalt',
-    });
+    list.push(mk(r.le, trueLe, r.dispLe), mk(r.he, (trueLe + 180) % 360, r.dispHe));
   }
   return list;
 }

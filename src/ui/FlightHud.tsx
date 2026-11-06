@@ -137,13 +137,13 @@ function AutopilotPanel({ game, hud, to }: { game: Game; hud: HudState; to: Airp
       <button disabled={hud.onGround} aria-pressed={ap.on && ap.appr} onClick={() => game.action('appr')} title={hud.ils?.valid ? 'Arm ILS approach' : 'Requires an ILS signal'}><span>Approach</span><small>APPR</small></button>
     </div></div>
     <div className="flight-ap-targets">
-      <TargetSelector label="Heading" unit="DEG TRUE" value={Math.round(ap.hdg) % 360} step={5} min={0} max={359} disabled={hud.onGround} onChange={(v) => game.setApTarget('hdg', v)} />
+      <TargetSelector label="Heading" unit="DEG MAG" value={Math.round(ap.hdg) % 360} step={5} min={0} max={359} disabled={hud.onGround} onChange={(v) => game.setApTarget('hdg', v)} />
       <TargetSelector label="Altitude" unit={metric ? 'METERS' : 'FEET'} value={Number(formatAltitude(ap.alt, units))} step={metric ? 30 : 100} min={0} max={metric ? 13716 : 45000} disabled={managed} onChange={(v) => game.setApTarget('alt', v / (metric ? .3048 : 1))} />
       <TargetSelector label="Airspeed" unit={labels.speed} value={Number(formatSpeed(ap.spd, units))} step={5} min={Number(formatSpeed(hud.vs1 * 1.2, units))} max={Number(formatSpeed(hud.vne * .85, units))} disabled={managed} onChange={(v) => game.setApTarget('spd', v / (metric ? 1.852 : 1))} />
     </div>
     <p className="flight-panel-description">{managed ? 'Altitude and speed follow the route profile. Choose Heading to set your own targets.' : 'Selected targets use aviation units. Turn the heading selector to leave NAV mode.'}</p>
     <RunwaySelect airport={to} value={hud.apprRwy} onChange={(ident) => game.setArrRunway(ident)} />
-    <p className="flight-panel-description">{formatHeading(hud.rwyHdg)} true · {hud.ils?.valid ? `ILS ${hud.ils.ident} available` : 'ILS not in range'}</p>
+    <p className="flight-panel-description">{formatHeading(hud.rwyHdg)} magnetic · {hud.ils?.valid ? `ILS ${hud.ils.ident} available` : 'ILS not available / out of range'}</p>
     <div className="flight-rate-row"><span>Simulation rate<small>{hud.canWarp ? 'Autopilot cruise available' : 'Available in safe autopilot cruise'}</small></span>
       <button disabled={!hud.canWarp && hud.timeScale === 1} onClick={() => game.action('warp')} aria-label="Cycle simulation rate">{hud.timeScale}×<FlightIcon name="chevron" size={12} /></button>
     </div>
@@ -215,7 +215,7 @@ function FlightAlerts({ game, hud }: { game: Game; hud: HudState }) {
 function CompactTelemetry({ hud, metric, minimal }: { hud: HudState; metric: boolean; minimal: boolean }) {
   const units = metric ? 'metric' : 'aviation';
   return <section className="flight-telemetry" data-minimal={minimal} aria-label="Flight telemetry" data-flight-ui>
-    <div className="flight-telemetry-primary"><div><span className="flight-eyebrow">IAS · {metric ? 'KM/H' : 'KT'}</span><strong>{formatSpeed(hud.kias, units)}</strong></div><div><span className="flight-eyebrow">HDG · TRUE</span><strong>{formatHeading(hud.hdg)}</strong></div><div><span className="flight-eyebrow">ALT · {metric ? 'M' : 'FT'}</span><strong>{formatAltitude(hud.altFt, units)}</strong></div>{!minimal && <div><span className="flight-eyebrow">VS · {metric ? 'M/S' : 'FPM'}</span><strong>{metric ? (hud.vsFpm * .00508).toFixed(1) : Math.round(hud.vsFpm / 50) * 50}</strong></div>}</div>
+    <div className="flight-telemetry-primary"><div><span className="flight-eyebrow">IAS · {metric ? 'KM/H' : 'KT'}</span><strong>{formatSpeed(hud.kias, units)}</strong></div><div><span className="flight-eyebrow">HDG · MAG</span><strong>{formatHeading(hud.hdg)}</strong></div><div><span className="flight-eyebrow">ALT · {metric ? 'M' : 'FT'}</span><strong>{formatAltitude(hud.altFt, units)}</strong></div>{!minimal && <div><span className="flight-eyebrow">VS · {metric ? 'M/S' : 'FPM'}</span><strong>{metric ? (hud.vsFpm * .00508).toFixed(1) : Math.round(hud.vsFpm / 50) * 50}</strong></div>}</div>
     {!minimal && <div className="flight-telemetry-systems"><span>ENGINE <b>{Math.round(hud.n1 * 100)}%</b></span><span>FUEL <b>{Math.round(hud.fuelPct)}%</b></span><span>FLAPS <b>{hud.flapsIdx}/{hud.flapsDet}</b></span><span>TRIM <b>{Math.round(hud.trim * 100)}%</b></span><span data-active={hud.parking}>PARK BRAKE <b>{hud.parking ? 'SET' : 'OFF'}</b></span></div>}
   </section>;
 }

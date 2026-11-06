@@ -27,6 +27,9 @@ export default function App() {
   const [aircraftId, setAircraft] = useState(saved?.aircraft || 'sky');
   const [from, setFrom] = useState<Airport>(AIRPORT_BY_ID.get(saved?.from || DEFAULT_FROM) || AIRPORT_BY_ID.get(DEFAULT_FROM)!);
   const [to, setTo] = useState<Airport>(AIRPORT_BY_ID.get(saved?.to || DEFAULT_TO) || AIRPORT_BY_ID.get(DEFAULT_TO)!);
+  const [rwySel, setRwySel] = useState<{ dep: string; arr: string; spot: string }>({ dep: '', arr: '', spot: '' });
+  const launchPlan = useRef(false);
+  const rwySelRef = useRef(rwySel); rwySelRef.current = rwySel;
   const [selectedDep, setSelectedDep] = useState<Airport | null>(null);
   const [selectedArr, setSelectedArr] = useState<Airport | null>(null);
   const selectedDepRef = useRef(selectedDep); selectedDepRef.current = selectedDep;
@@ -97,10 +100,11 @@ export default function App() {
     saveRoute({ from: cur.current.from.id, to: cur.current.to.id, aircraft: cur.current.aircraftId });
     setTransitioningMenuExit(false);
     g.suspended = false; mapView.current = null; setResult(null); setMapOpen(false); dispatchWorkspace({ type: 'close' }); setScreen('flight'); setToasts([]);
-    g.load(cfgOf(s), 'play', s.startMode);
+    const plan = launchPlan.current ? rwySelRef.current : null;
+    g.load({ ...cfgOf(s), depRwy: plan?.dep || undefined, arrRwy: plan?.arr || undefined, startSpot: plan && s.startMode === 'runway' ? plan.spot || undefined : undefined }, 'play', s.startMode);
   }, [cfgOf]);
 
-  const quick = useCallback(() => { startFlight(); }, [startFlight]);
+  const quick = useCallback(() => { launchPlan.current = false; startFlight(); }, [startFlight]);
   const toMenu = useCallback(() => { setOpenHangarOnEnter(false); setTransitioningMenuExit(false); setScreen('start'); loadAttract(); }, [loadAttract]);
   const toPlanner = useCallback((withHangar = false) => {
     const g = gameRef.current;
@@ -108,6 +112,7 @@ export default function App() {
     // Start route selection with no pre-selected airport so the full globe is shown first
     setSelectedDep(null);
     setSelectedArr(null);
+    setRwySel({ dep: '', arr: '', spot: '' });
     if (screenRef.current === 'start') {
       setTransitioningMenuExit(true);
       window.setTimeout(() => setTransitioningMenuExit(false), 380);
@@ -128,6 +133,7 @@ export default function App() {
   // currently set on the opposite field, that opposite field is simply cleared (no silent WIII default).
   const selectDep = useCallback((airport: Airport | null) => {
     setSelectedDep(airport);
+    setRwySel((r) => ({ ...r, dep: '', spot: '' }));
     if (!airport) return;
     setFrom(airport);
     cur.current.from = airport;
@@ -137,6 +143,7 @@ export default function App() {
 
   const selectArr = useCallback((airport: Airport | null) => {
     setSelectedArr(airport);
+    setRwySel((r) => ({ ...r, arr: '' }));
     if (!airport) return;
     setTo(airport);
     cur.current.to = airport;
@@ -160,6 +167,7 @@ export default function App() {
     setTo(arr);
     cur.current.from = dep;
     cur.current.to = arr;
+    launchPlan.current = true;
     startFlight();
   }, [startFlight]);
 
@@ -172,6 +180,7 @@ export default function App() {
       : fallbackAirport(airport, DEFAULT_TO, DEFAULT_FROM);
     setTo(arr);
     cur.current.to = arr;
+    launchPlan.current = false;
     startFlight();
   }, [startFlight]);
 
@@ -217,6 +226,8 @@ export default function App() {
           onSelectArr={selectArr}
           setFrom={setFrom}
           setTo={setTo}
+          rwySel={rwySel}
+          setRwySel={setRwySel}
           onFly={flyFromPlanner}
           onBack={backFromPlanner}
           initialHangarOpen={openHangarOnEnter}

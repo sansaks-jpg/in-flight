@@ -1,5 +1,7 @@
 import * as THREE from 'three';
-import { Airport, airportsNear } from '../data/airports';
+import { Airport, airportsNear, frequenciesFor } from '../data/airports';
+import { taxiRoute, findStartSpot, TaxiRoute } from './airfield';
+import { magVar } from './magvar';
 import { AircraftSpec, specById } from './specs';
 import { FlightModel, G, atmosphere } from './physics';
 import { Projection, haversine, bearing, wrap180, wrap360, D2R, R2D, clamp, M_PER_NM, MS_TO_KT, destination, greatCircle, FlightWaypoint } from './geo';
@@ -18,7 +20,13 @@ import { computeFlightPhaseState, FlightPhaseContext } from './flightPhase';
 export type Phase = 'idle' | 'loading' | 'playing' | 'paused' | 'crashed' | 'complete';
 export type ViewId = 'cockpit' | 'chase' | 'spotter' | 'aisle' | 'window';
 const VIEWS: ViewId[] = ['cockpit', 'chase', 'spotter', 'aisle', 'window'];
-export interface ScenarioConfig { aircraftId: string; from: Airport; to: Airport; settings: Settings; }
+export interface ScenarioConfig {
+  aircraftId: string; from: Airport; to: Airport; settings: Settings;
+  /** Runway ident chosen in the planner (otherwise the best runway for wind/route is picked). */
+  depRwy?: string; arrRwy?: string;
+  /** Parking / start position id from `startSpots()` (gate, stand, apron, hangar). Only used with the runway start mode. */
+  startSpot?: string;
+}
 export type FlightPhase = 'taxi' | 'takeoff' | 'climb' | 'cruise' | 'descent' | 'final' | 'rollout';
 export interface AtcMessage { id: number; sender: string; text: string; time: number; needsAck?: boolean; }
 export interface Toast { id: number; text: string; level: 'info' | 'good' | 'warn' | 'bad'; }
@@ -89,7 +97,7 @@ export interface HudState {
   };
   fov: number;
 }
-export interface MapState { lat: number; lon: number; hdg: number; track: number; from: Airport; to: Airport; trail: [number, number][]; altFt: number; depRwy: string; apprRwy: string; appr: { lat: number; lon: number; hdg: number; ident: string } | null; navPath: [number, number][]; flightPlan: FlightWaypoint[]; activeWpIdx: number; }
+export interface MapState { lat: number; lon: number; hdg: number; track: number; from: Airport; to: Airport; trail: [number, number][]; altFt: number; depRwy: string; apprRwy: string; appr: { lat: number; lon: number; hdg: number; ident: string; ils?: boolean } | null; navPath: [number, number][]; flightPlan: FlightWaypoint[]; activeWpIdx: number; }
 interface Hooks { onHud(h: HudState): void; onToast(t: Toast): void; onPhase(p: Phase): void; onResult(r: Result): void; onCommand(cmd: string): void; }
 
 const gLimits = { piston: { p: 5.2, n: -2.4 }, turboprop: { p: 4.4, n: -1.8 }, jet: { p: 3.6, n: -1.4 } };
@@ -104,7 +112,8 @@ export function buildFlightPlan(
   arrTh: Threshold | null,
   cruiseAltM: number,
   cruiseSpeedKt: number,
-  vappKt: number
+  vappKt: number,
+  precision = true
 ): FlightWaypoint[] {
   const wps: FlightWaypoint[] = [];
 
@@ -114,15 +123,15 @@ export function buildFlightPlan(
       id: 'DEP',
       name: `RWY ${depTh.ident}`,
       type: 'takeoff',
-      lat: depTh.lat,
-      lon: depTh.lon,
+      lat: depTh.startLat,
+      lon: depTh.startLon,
       altM: from.elev,
       speedKt: 0,
       rwyIdent: depTh.ident,
       hdg: depTh.hdg,
     });
 
-    const [climbLat, climbLon] = destination(depTh.lat, depTh.lon, depTh.hdg, 5500);
+    const [climbLat, climbLon] = destination(depTh.startLat, depTh.startLon, depTh.hdg, 5500);
     wps.push({
       id: 'CLIMB',
       name: `CLIMB ${depTh.ident}`,
@@ -155,8 +164,9 @@ export function buildFlightPlan(
     arrLat = arrTh.lat;
     arrLon = arrTh.lon;
     arrHdg = arrTh.hdg;
-    [fafLat, fafLon] = destination(arrTh.lat, arrTh.lon, arrTh.hdg + 180, 8500);
-    [iafLat, iafLon] = destination(arrTh.lat, arrTh.lon, arrTh.hdg + 180, 18500);
+    // Precision (ILS) approach: FAF ~4.6 nm / IAF ~10 nm out. Runways without an ILS get a shorter visual final.
+    [fafLat, fafLon] = destination(arrTh.lat, arrTh.lon, arrTh.hdg + 180, precision ? 8500 : 4500);
+    [iafLat, iafLon] = destination(arrTh.lat, arrTh.lon, arrTh.hdg + 180, precision ? 18500 : 10000);
   } else {
     const oppBrg = wrap360(bearing(from.lat, from.lon, to.lat, to.lon) + 180);
     [fafLat, fafLon] = destination(to.lat, to.lon, oppBrg, 8500);
@@ -198,11 +208,11 @@ export function buildFlightPlan(
   // 4. IAF (Initial Approach Fix)
   wps.push({
     id: 'IAF',
-    name: `IAF ${arrTh?.ident ?? ''}`,
+    name: `${precision ? 'IAF' : 'FINAL 10 KM'} ${arrTh?.ident ?? ''}`.trim(),
     type: 'iaf',
     lat: iafLat,
     lon: iafLon,
-    altM: to.elev + 900,
+    altM: to.elev + (precision ? 900 : 560),
     speedKt: 160,
     rwyIdent: arrTh?.ident,
     hdg: arrHdg,
@@ -211,11 +221,11 @@ export function buildFlightPlan(
   // 5. FAF (Final Approach Fix)
   wps.push({
     id: 'FAF',
-    name: `FAF ${arrTh?.ident ?? ''}`,
+    name: `${precision ? 'FAF' : 'FINAL 4.5 KM'} ${arrTh?.ident ?? ''}`.trim(),
     type: 'faf',
     lat: fafLat,
     lon: fafLon,
-    altM: to.elev + 450,
+    altM: to.elev + (precision ? 450 : 255),
     speedKt: 140,
     rwyIdent: arrTh?.ident,
     hdg: arrHdg,
@@ -277,6 +287,8 @@ export class Game {
   private warnState: { text: string; level: 'caution' | 'warning'; sound: WarnSound }[] = []; private warnPenalty: Record<string, number> = {};
   private landing: LandingInfo | null = null; private takeoffDone = false; private stoppedT = 0; private endT = 0; private result: Result | null = null; private crashTimer = 0;
   private paEvents = { welcome: false, landing: false }; private cabinMsg = ''; private cabinMsgT = 0; private nextChat = 20; private shakeImpulse = 0;
+  /** Magnetic variation (deg E) at the aircraft – HUD/AP headings are magnetic, physics is true. */
+  magv = 0; taxiPlan: TaxiRoute | null = null;
   apprKey = ''; private apprLocked = false; depTh!: Threshold | null; depRwy = ''; flightPlan: FlightWaypoint[] = []; activeWpIdx = 0; private loadStart = 0; private usedAp = false; private ticks = 0;
   private prevAgl = 0; private fuelWarned = false; private wasStalled = false; private overspeedT = 0; private todShown = false;
   private raycaster = new THREE.Raycaster();
@@ -396,15 +408,20 @@ export class Game {
     this.ap = new Autopilot(); this.ap.vsLimit = spec.kind === 'jet' ? 12 : spec.kind === 'turboprop' ? 7 : 4.5;
     const dep = this.pickDepRunway(from);
     this.depTh = dep;
+    this.magv = magVar(from.lat, from.lon);
     this.depRwy = dep ? dep.ident : '';
     this.world!.rebuildAirports(from.lat, from.lon);
     const arr = this.bestApproach(to, from);
-    if (!this.apprLocked) this.apprKey = arr ? arr.ident : '';
+    const wantArr = cfg.arrRwy && w.thresholds(to).find((t) => t.ident === cfg.arrRwy);
+    if (wantArr) { this.apprKey = wantArr.ident; this.apprLocked = true; }
+    else if (!this.apprLocked) this.apprKey = arr ? arr.ident : '';
     this.rebuildFlightPlan();
     const brg = bearing(from.lat, from.lon, to.lat, to.lon);
     if (startMode === 'runway' && dep) {
       const h = dep.hdg * D2R;
-      this.fm.placeOnRunway(dep.x + Math.sin(h) * 18, dep.z - Math.cos(h) * 18, dep.hdg, from.elev);
+      const spot = cfg.startSpot ? findStartSpot(from, cfg.startSpot) : null;
+      if (spot) this.fm.placeOnRunway(w.proj.x(spot.lon), w.proj.z(spot.lat), spot.hdg, from.elev);
+      else this.fm.placeOnRunway(dep.startX + Math.sin(h) * 18, dep.startZ - Math.cos(h) * 18, dep.hdg, from.elev);
       this.fm.ctl.flapsIdx = spec.kind === 'piston' ? 1 : 0; this.fm.flapsPos = this.fm.ctl.flapsIdx / spec.flapDetents;
     } else if (startMode === 'cruise') {
       const alt = Math.max(spec.cruiseAlt * (dist < 120000 ? 0.55 : 1), from.elev + 1500, to.elev + 1500, 1500);
@@ -424,14 +441,14 @@ export class Game {
     this.score = 0; this.items = []; this.comfort = 100; this.landing = null; this.takeoffDone = startMode !== 'runway'; this.stoppedT = 0; this.result = null; this.endT = 0; this.crashTimer = 0;
     this.visual?.setVisible(true); this.effects?.clear(); this.paEvents = { welcome: false, landing: false }; this.flightTime = 0; this.flownKm = 0; this.trail = []; this.fuelWarned = false; this.warnPenalty = {}; this.timeScale = 1; this.todShown = false;
     this.seatbelt = true; this.lights = { nav: true, strobe: startMode !== 'runway', land: false, beacon: true };
-    if (startMode !== 'final') { this.apprKey = ''; this.apprLocked = false; }
+    if (startMode !== 'final' && !cfg.arrRwy) { this.apprKey = ''; this.apprLocked = false; }
     this.currentFlightPhase = startMode === 'runway' ? 'taxi' : startMode === 'final' ? 'final' : 'cruise';
     this.speedTrendSmoothed = 0;
     this.prevKias = this.fm ? this.fm.ias / 0.514444 : 0;
     this.atcMessages = []; this.atcReply = null;
     const rwyInit = this.depRwy || '09';
     if (startMode === 'runway') {
-      this.addAtc('GROUND', `Aero 101, ${from.icao} Ground. Cleared to taxi runway ${rwyInit} via Alpha. QNH 29.92.`, true);
+      this.addAtc('GROUND', `Aero 101, ${from.icao} Ground${this.atcFreq(from, 'GND')}. Cleared to taxi to holding point runway ${rwyInit}${this.taxiVia()}. ${this.qnh(from)}.`, true);
     } else if (startMode === 'final') {
       this.addAtc('TOWER', `Aero 101, ${to.icao} Tower. Established final approach runway ${this.apprKey || '27'}, cleared to land.`, true);
     } else {
@@ -450,7 +467,7 @@ export class Game {
     const from = this.cfg.from, to = this.cfg.to;
     const arr = this.approachTh();
     const cruiseAltM = Math.max(this.spec.cruiseAlt * (haversine(from.lat, from.lon, to.lat, to.lon) < 120000 ? 0.55 : 1), from.elev + 1500, to.elev + 1500, 1500);
-    this.flightPlan = buildFlightPlan(from, this.depTh, to, arr, cruiseAltM, this.spec.cruiseKt, this.spec.vapp);
+    this.flightPlan = buildFlightPlan(from, this.depTh, to, arr, cruiseAltM, this.spec.cruiseKt, this.spec.vapp, arr ? this.ilsCapable(arr) : true);
     if (activeId) {
       const idx = this.flightPlan.findIndex((wp) => wp.id === activeId);
       this.activeWpIdx = idx >= 0 ? idx : Math.min(previousIdx, this.flightPlan.length - 1);
@@ -474,7 +491,7 @@ export class Game {
     this.depRwy = th.ident;
     if (this.cfg.settings.startMode === 'runway' && !this.takeoffDone && this.fm) {
       const h = th.hdg * D2R;
-      this.fm.placeOnRunway(th.x + Math.sin(h) * 18, th.z - Math.cos(h) * 18, th.hdg, this.cfg.from.elev);
+      if (!this.cfg.startSpot) this.fm.placeOnRunway(th.startX + Math.sin(h) * 18, th.startZ - Math.cos(h) * 18, th.hdg, this.cfg.from.elev);
       this.ap.takeoffHdg = th.hdg;
       this.toast(`Departure runway ${th.ident} selected`, 'info');
     }
@@ -491,9 +508,34 @@ export class Game {
     this.toast(`Approach runway ${th.ident} selected`, 'info');
     this.rebuildFlightPlan(true);
   }
+  /** Heavier aircraft avoid unpaved / very short strips when anything better exists. */
+  private surfaceScore(t: Threshold) {
+    const paved = t.surface === 'A' || t.surface === 'C' || t.surface === 'U';
+    if (this.spec.kind === 'jet') return (paved ? 40 : -400) + (t.fullLen < 1500 ? -300 : 0);
+    if (this.spec.kind === 'turboprop') return (paved ? 25 : -30) + (t.fullLen < 700 ? -200 : 0);
+    return paved ? 8 : 0;
+  }
+  magHdg(trueDeg: number) { return wrap360(trueDeg - this.magv); }
+  /** ' on 121.900' when a published frequency of that type exists for the airfield. */
+  private atcFreq(ap: Airport, type: string) {
+    const f = frequenciesFor(ap.id).find((x) => x.type === type);
+    return f ? ` on ${f.mhz.toFixed(3).replace(/0$/, '')}` : '';
+  }
+  private qnh(ap: Airport) { return ap.id.startsWith('K') ? 'Altimeter 29.92' : 'QNH 1013'; }
+  private taxiVia() { return this.taxiPlan && this.taxiPlan.via.length ? ` via ${this.taxiPlan.via.join(', ')}` : ''; }
+  /** Real taxi route (surveyed taxiways) from the aircraft to the physical start of the departure runway. */
+  private computeTaxiRoute(): TaxiRoute | null {
+    if (!this.depTh || !this.fm || !this.world) return null;
+    const w = this.world, th = this.depTh;
+    const d = Math.hypot(this.fm.pos.x - th.startX, this.fm.pos.z - th.startZ);
+    if (d < 120) return null;
+    return taxiRoute(this.cfg.from, [w.proj.lat(this.fm.pos.z), w.proj.lon(this.fm.pos.x)], [th.startLat, th.startLon], `${th.rw.le}/${th.rw.he}`);
+  }
   /** Departure runway: longest, with the best headwind. */
   private pickDepRunway(ap: Airport): Threshold | null {
     const ths = this.world!.thresholds(ap); if (!ths.length) return null;
+    const chosen = this.cfg.depRwy ? ths.find((t) => t.ident === this.cfg.depRwy) : null;
+    if (chosen) return chosen;
     const maxLen = Math.max(...ths.map((t) => t.len));
     // Favour the active runway (headwind + length), but also prefer the end that
     // leaves toward the destination so the departure heading is not 180° off route.
@@ -502,7 +544,7 @@ export class Game {
     for (const t of ths) {
       const head = Math.cos((this.windFrom - t.hdg) * D2R) * this.windKt;
       const align = Math.cos((routeBrg - t.hdg) * D2R);
-      const sc = head * 0.6 + align * 9 + (t.len >= maxLen * 0.7 ? 20 : 0) + t.len / 1000;
+      const sc = head * 0.6 + align * 9 + (t.len >= maxLen * 0.7 ? 20 : 0) + t.len / 1000 + this.surfaceScore(t);
       if (sc > bs) { bs = sc; best = t; }
     }
     return best;
@@ -516,7 +558,7 @@ export class Game {
       const h = t.hdg * D2R, ax = t.x - Math.sin(h) * 12000, az = t.z + Math.cos(h) * 12000;
       const away = Math.hypot(ax - fx, az - fz);
       const head = Math.cos((this.windFrom - t.hdg) * D2R) * this.windKt;
-      const sc = head * 0.4 + (t.len >= maxLen * 0.7 ? 10 : 0) - away / 8000;
+      const sc = head * 0.4 + (t.len >= maxLen * 0.7 ? 10 : 0) - away / 8000 + this.surfaceScore(t);
       if (sc > bs) { bs = sc; best = t; }
     }
     return best;
@@ -544,7 +586,12 @@ export class Game {
 
     // 2. Taxi Ribbon Chevrons
     if (this.depTh && this.fm) {
-      const ribbons = buildTaxiRibbon(this.depTh, this.fm.pos, (x, z) => this.world?.terrain.heightAt(x, z), this.cfg.from.elev);
+      const w = this.world;
+      this.taxiPlan = this.computeTaxiRoute();
+      const path: [number, number][] = this.taxiPlan
+        ? this.taxiPlan.pts.map(([la, lo]) => [w.proj.x(lo), w.proj.z(la)] as [number, number])
+        : [[this.fm.pos.x, this.fm.pos.z], [this.depTh.startX, this.depTh.startZ]];
+      const ribbons = buildTaxiRibbon(path, this.depTh.hdg, (x, z) => this.world?.terrain.heightAt(x, z), this.cfg.from.elev);
       for (const r of ribbons) this.taxiRibbonGroup.add(r);
     }
     this.taxiRibbonGroup.visible = this.showTaxiRibbon && this.currentFlightPhase === 'taxi' && this.fm?.wow;
@@ -1080,7 +1127,7 @@ export class Game {
   setApTarget(target: 'hdg' | 'alt' | 'spd', value: number) {
     if (!Number.isFinite(value) || this.mode !== 'play' || this.phase !== 'playing') return;
     if (target === 'hdg') {
-      this.ap.hdg = wrap360(Math.round(value)); this.ap.setLateralMode('heading');
+      this.ap.hdg = wrap360(Math.round(value) + this.magv); this.ap.setLateralMode('heading');
     } else if (!(this.ap.on && (this.ap.nav || this.ap.appr))) {
       if (target === 'alt') this.ap.altFt = clamp(Math.round(value / 100) * 100, 0, 45000);
       else this.ap.spd = clamp(Math.round(value), Math.round(this.spec.vs1 * 1.2), Math.round(this.spec.vne * .85));
@@ -1116,7 +1163,7 @@ export class Game {
   private toggleAppr() {
     if (!this.ap.on) { if (this.fm.wow) return; this.toggleAp(); }
     const ils = this.computeIls();
-    if (!this.ap.appr && !(ils && ils.valid)) { this.toast('No ILS signal – fly within 30 nm of the destination runway', 'warn'); return; }
+    if (!this.ap.appr && !(ils && ils.valid)) { const t = this.approachTh(); this.toast(t && !this.ilsCapable(t) ? `Runway ${t.ident} has no ILS – visual approach only` : 'No ILS signal – fly within 30 nm of the destination runway', 'warn'); return; }
     this.ap.appr = !this.ap.appr; this.ap.nav = false; this.ap.gsCaptured = false;
     if (!this.ap.appr) this.ap.setLateralMode('heading');
     this.audio.click();
@@ -1274,6 +1321,11 @@ export class Game {
     if (this.apprKey) { const t = ths.find((x) => x.ident === this.apprKey); if (t) return t; }
     return this.bestApproach(this.cfg.to, this.cfg.from);
   }
+  /**
+   * Instrument approach availability. Open data does not list ILS installations, so a precision approach is only offered
+   * on runways that could realistically carry one: paved, lit and at least 1,200 m. Strips, grass and dirt are visual only.
+   */
+  ilsCapable(th: Threshold) { return (th.surface === 'A' || th.surface === 'C') && th.lit && th.fullLen >= 1200; }
   computeIls(): (IlsData & { valid: boolean }) | null {
     const th = this.approachTh(); if (!th) return null; const fm = this.fm;
     const h = th.hdg * D2R, fx = Math.sin(h), fz = -Math.cos(h), rx = Math.cos(h), rz = Math.sin(h);
@@ -1282,7 +1334,7 @@ export class Game {
     const angle = Math.atan2(fm.pos.y - (th.elev + 15), Math.max(1, dist)) * R2D;
     const locAngle = Math.atan2(cross, Math.max(80, Math.abs(dist))) * R2D;
     const aligned = Math.abs(wrap180(fm.heading - th.hdg)) < 100;
-    const valid = dist > -1500 && dist < 55500 && (dist < 0 || Math.abs(locAngle) < 35) && aligned;
+    const valid = this.ilsCapable(th) && dist > -1500 && dist < 55500 && (dist < 0 || Math.abs(locAngle) < 35) && aligned;
     return { valid, dist, cross, locDots: -locAngle / 1.25, gsDots: dist > 0 ? (3 - angle) / 0.35 : 0, course: th.hdg, elev: th.elev, x: th.x, z: th.z, ident: `${this.cfg.to.icao} ${th.ident}`, angle };
   }
   /** Write only the live physics pose into reusable chart storage; no route/ILS allocations. */
@@ -1297,7 +1349,7 @@ export class Game {
 
   getMapState(): MapState {
     const th = this.approachTh();
-    const appr = th ? { lat: this.world!.proj.lat(th.z), lon: this.world!.proj.lon(th.x), hdg: th.hdg, ident: th.ident } : null;
+    const appr = th ? { lat: this.world!.proj.lat(th.z), lon: this.world!.proj.lon(th.x), hdg: th.hdg, ident: th.ident, ils: this.ilsCapable(th) } : null;
     const navPath = th ? this.navWaypoints(th) : [];
     return {
       lat: this.lat(),
@@ -1522,6 +1574,7 @@ export class Game {
     const lat = this.lat(), lon = this.lon();
     if (Math.hypot(fm.pos.x, fm.pos.z) > 80000) { this.rebaseTo(lat, lon); this.lastLL = [lat, lon]; return; }
     w.rebuildAirports(lat, lon);
+    this.magv = magVar(lat, lon);
     // auto approach-runway selection while far away
     if (!this.apprLocked) {
       const th = this.bestApproachFor(lat, lon); if (th && th.ident !== this.apprKey) this.apprKey = th.ident;
@@ -1760,7 +1813,7 @@ export class Game {
     this.updateCamera(dt);
     // sim → cockpit instruments
     const interior = this.isInterior() && this.mode === 'play';
-    if (interior && this.cockpit) this.cockpit.update(dt, this.time, this.panelData(), { pitch: fm.ctl.pitch, roll: fm.ctl.roll, yaw: fm.ctl.yaw, throttle: fm.ctl.throttle, flapsIdx: fm.ctl.flapsIdx, gearDown: fm.ctl.gearDown, speedbrake: fm.ctl.speedbrake }, { lights: this.lights, seatbelt: this.seatbelt, parking: fm.ctl.parking, reverse: fm.ctl.reverse, apOn: this.ap.on, apNav: this.ap.nav, apAppr: this.ap.appr, apHdg: this.ap.hdg, apAlt: this.ap.altFt, apSpd: this.ap.spd, mood: this.comfort / 100, shake: clamp(this.turb * 1.6 + this.shakeImpulse, 0, 1.6) }, true);
+    if (interior && this.cockpit) this.cockpit.update(dt, this.time, this.panelData(), { pitch: fm.ctl.pitch, roll: fm.ctl.roll, yaw: fm.ctl.yaw, throttle: fm.ctl.throttle, flapsIdx: fm.ctl.flapsIdx, gearDown: fm.ctl.gearDown, speedbrake: fm.ctl.speedbrake }, { lights: this.lights, seatbelt: this.seatbelt, parking: fm.ctl.parking, reverse: fm.ctl.reverse, apOn: this.ap.on, apNav: this.ap.nav, apAppr: this.ap.appr, apHdg: this.magHdg(this.ap.hdg), apAlt: this.ap.altFt, apSpd: this.ap.spd, mood: this.comfort / 100, shake: clamp(this.turb * 1.6 + this.shakeImpulse, 0, 1.6) }, true);
     v.setInterior(interior);
     if (this.phase === 'playing') {
       this.updateChecklist();
@@ -1841,10 +1894,10 @@ export class Game {
     const relWind = wrap180(this.windFrom - fm.heading);
     const crosswind = Math.round(this.windKt * Math.sin(relWind * D2R));
     return {
-      kias: fm.ias / 0.514444, altFt: fm.pos.y / 0.3048, vsFpm: fm.vs * 196.85, hdg: fm.heading, trk: fm.track, pitch: fm.pitch * R2D, bank: fm.bank, slip: fm.beta, mach: fm.mach, gsKt: fm.gs * MS_TO_KT,
+      kias: fm.ias / 0.514444, altFt: fm.pos.y / 0.3048, vsFpm: fm.vs * 196.85, hdg: this.magHdg(fm.heading), trk: this.magHdg(fm.track), pitch: fm.pitch * R2D, bank: fm.bank, slip: fm.beta, mach: fm.mach, gsKt: fm.gs * MS_TO_KT,
       n1: fm.n.slice(0, s.engines), fuelKg: fm.fuel, fuelFrac: fm.fuelFrac, flapsIdx: fm.ctl.flapsIdx, flapsDet: s.flapDetents, gear: fm.gearPos, throttle: fm.ctl.throttle, parking: fm.ctl.parking, reverse: fm.ctl.reverse, spoilers: fm.sbPos,
-      apOn: this.ap.on, apHdg: this.ap.hdg, apAlt: this.ap.altFt, apSpd: this.ap.spd, apNav: this.ap.nav, apAppr: this.ap.appr, apVsMode: false,
-      dest: { id: this.cfg.to.icao, name: this.cfg.to.name, brg: wrap180(brg), distNm: rem / M_PER_NM, eteMin: (rem / Math.max(30, fm.gs)) / 60 },
+      apOn: this.ap.on, apHdg: this.magHdg(this.ap.hdg), apAlt: this.ap.altFt, apSpd: this.ap.spd, apNav: this.ap.nav, apAppr: this.ap.appr, apVsMode: false,
+      dest: { id: this.cfg.to.icao, name: this.cfg.to.name, brg: wrap180(this.magHdg(brg)), distNm: rem / M_PER_NM, eteMin: (rem / Math.max(30, fm.gs)) / 60 },
       ils: ils ? { valid: ils.valid, loc: ils.locDots, gs: ils.gsDots, ident: ils.ident, distNm: ils.dist / M_PER_NM } : null,
       warn: this.warnState.map((w) => w.text), aglFt: fm.agl / 0.3048, alphaFrac: fm.alpha / fm.alphaStall, time: this.time, thrustPct: (Math.abs(fm.thrustN) / ((s.thrust || s.power / 60) * (s.kind === 'jet' ? 1 : 1))) * 100, fuelFlowKgH: fm.fuelFlow * 3600,
       wind: { dir: this.windFrom, kt: this.windKt, cross: crosswind },
@@ -1898,31 +1951,31 @@ export class Game {
     switch (next) {
       case 'taxi':
         if (this.landing) {
-          this.addAtc('GROUND', `Aero 101, welcome to ${toIcao}. Taxi to apron via Bravo. Contact ground 121.7.`, true);
+          this.addAtc('GROUND', `Aero 101, welcome to ${toIcao}. Taxi to the apron, vacate the runway and contact Ground${this.atcFreq(this.cfg.to, 'GND')}.`, true);
         } else {
-          this.addAtc('GROUND', `Aero 101, ${fromIcao} Ground. Taxi to holding point runway ${depRwy} via Alpha.`, true);
+          this.addAtc('GROUND', `Aero 101, ${fromIcao} Ground. Taxi to holding point runway ${depRwy}${this.taxiVia()}.`, true);
         }
         break;
       case 'takeoff':
-        this.addAtc('TOWER', `Aero 101, ${fromIcao} Tower. Runway ${depRwy}, wind ${wind}, cleared for takeoff.`, true);
+        this.addAtc('TOWER', `Aero 101, ${fromIcao} Tower${this.atcFreq(this.cfg.from, 'TWR')}. Runway ${depRwy}, wind ${wind}, cleared for takeoff.`, true);
         this.audio.chirp();
         break;
       case 'climb':
-        this.addAtc('DEPARTURE', `Aero 101, airborne, radar contact. Climb and maintain ${Math.round(this.spec.cruiseAlt / 0.3048)} ft, contact Departure on 124.2.`, false);
+        this.addAtc('DEPARTURE', `Aero 101, airborne, radar contact. Climb and maintain ${Math.round(this.spec.cruiseAlt / 0.3048)} ft, contact Departure${this.atcFreq(this.cfg.from, 'DEP') || this.atcFreq(this.cfg.from, 'APP')}.`, false);
         break;
       case 'cruise':
-        this.addAtc('ENROUTE', `Aero 101, reaching cruise altitude. Traffic clear, monitor frequency 133.5.`, false);
+        this.addAtc('ENROUTE', `Aero 101, reaching cruise altitude. Traffic clear, monitor ${this.atcFreq(this.cfg.to, 'APP').trim() || 'enroute frequency'}.`, false);
         break;
       case 'descent':
-        this.addAtc('APPROACH', `Aero 101, ${toIcao} Approach. Descend and maintain 3,500 ft, QNH 29.92. Expect ILS runway ${arrRwy}.`, true);
+        this.addAtc('APPROACH', `Aero 101, ${toIcao} Approach. Descend and maintain 3,500 ft, ${this.qnh(this.cfg.to)}. Expect ILS runway ${arrRwy}.`, true);
         this.audio.chime();
         break;
       case 'final':
-        this.addAtc('TOWER', `Aero 101, ${toIcao} Tower. Runway ${arrRwy}, wind ${wind}, cleared to land.`, true);
+        this.addAtc('TOWER', `Aero 101, ${toIcao} Tower${this.atcFreq(this.cfg.to, 'TWR')}. Runway ${arrRwy}, wind ${wind}, cleared to land.`, true);
         this.audio.chime();
         break;
       case 'rollout':
-        this.addAtc('TOWER', `Aero 101, rollout safe. Vacate runway left when able, contact Ground on 121.9.`, false);
+        this.addAtc('TOWER', `Aero 101, rollout safe. Vacate the runway when able and contact Ground${this.atcFreq(this.cfg.to, 'GND')}.`, false);
         break;
     }
   }
@@ -2002,7 +2055,7 @@ export class Game {
     const fm = this.fm, s = this.spec, ils = this.computeIls(), rem = this.distToDest();
     const brg = bearing(this.lat(), this.lon(), this.cfg.to.lat, this.cfg.to.lon);
     const th = this.approachTh();
-    const rwyHdg = th ? th.hdg : 0;
+    const rwyHdg = th ? this.magHdg(th.hdg) : 0;
     const rwyIdent = this.apprKey || (th ? th.ident : '');
     const rwyDistNm = th ? Math.hypot(fm.pos.x - th.x, fm.pos.z - th.z) / M_PER_NM : 0;
     const total = haversine(this.cfg.from.lat, this.cfg.from.lon, this.cfg.to.lat, this.cfg.to.lon) || 1;
@@ -2025,8 +2078,8 @@ export class Game {
 
     let runwayRemM = 0;
     if (this.depTh && !this.takeoffDone && fm.wow) {
-      const d = Math.hypot(fm.pos.x - this.depTh.x, fm.pos.z - this.depTh.z);
-      runwayRemM = Math.max(0, Math.round(this.depTh.len - d));
+      const d = Math.hypot(fm.pos.x - this.depTh.startX, fm.pos.z - this.depTh.startZ);
+      runwayRemM = Math.max(0, Math.round(this.depTh.fullLen - d));
     } else if (th && (this.landing || flightPhase === 'final' || flightPhase === 'rollout')) {
       const d = Math.hypot(fm.pos.x - th.x, fm.pos.z - th.z);
       runwayRemM = Math.max(0, Math.round(th.len - d));
@@ -2037,7 +2090,7 @@ export class Game {
 
     // Flight Path Angle (gamma) in degrees: atan2(vertical speed, ground speed)
     const fpaDeg = Math.atan2(fm.vs, Math.max(0.5, fm.gs)) * R2D;
-    const track = fm.track;
+    const track = this.magHdg(fm.track);
 
     // Active flight plan waypoint telemetry
     let activeWp: { name: string; distNm: number; brg: number; etaMin: number } | null = null;
@@ -2050,7 +2103,7 @@ export class Game {
       activeWp = {
         name: wp.name,
         distNm: wpDistNm,
-        brg: Math.round(b),
+        brg: Math.round(this.magHdg(b)),
         etaMin,
       };
     }
@@ -2070,10 +2123,10 @@ export class Game {
     }));
 
     return {
-      phase: this.phase, view: VIEWS[this.viewIdx], kias: fm.ias / 0.514444, altFt: fm.pos.y / 0.3048, vsFpm: fm.vs * 196.85, hdg: fm.heading, gsKt: fm.gs * MS_TO_KT, mach: fm.mach, pitch: fm.pitch * R2D, bank: fm.bank * R2D,
+      phase: this.phase, view: VIEWS[this.viewIdx], kias: fm.ias / 0.514444, altFt: fm.pos.y / 0.3048, vsFpm: fm.vs * 196.85, hdg: this.magHdg(fm.heading), gsKt: fm.gs * MS_TO_KT, mach: fm.mach, pitch: fm.pitch * R2D, bank: fm.bank * R2D,
       throttle: fm.ctl.throttle, n1: fm.n[0], flapsIdx: fm.ctl.flapsIdx, flapsDet: s.flapDetents, gear: fm.gearPos, gearDown: fm.ctl.gearDown, brake: fm.ctl.brake > 0.1, parking: fm.ctl.parking, reverse: fm.ctl.reverse, spoilers: fm.sbPos,
-      fuelPct: fm.fuelFrac * 100, fuelKg: fm.fuel, aglFt: fm.agl / 0.3048, distNm: rem / M_PER_NM, brg, eteMin: rem / Math.max(0.5, fm.gs) / 60, warn: warnList,
-      score: Math.round(this.score), comfort: this.comfort, ap: { on: this.ap.on, nav: this.ap.nav, appr: this.ap.appr, gsCaptured: this.ap.gsCaptured, hdg: this.ap.hdg, alt: this.ap.altFt, spd: this.ap.spd },
+      fuelPct: fm.fuelFrac * 100, fuelKg: fm.fuel, aglFt: fm.agl / 0.3048, distNm: rem / M_PER_NM, brg: this.magHdg(brg), eteMin: rem / Math.max(0.5, fm.gs) / 60, warn: warnList,
+      score: Math.round(this.score), comfort: this.comfort, ap: { on: this.ap.on, nav: this.ap.nav, appr: this.ap.appr, gsCaptured: this.ap.gsCaptured, hdg: this.magHdg(this.ap.hdg), alt: this.ap.altFt, spd: this.ap.spd },
       ils: ils ? { valid: ils.valid, locDots: ils.locDots, gsDots: ils.gsDots, ident: ils.ident, dist: ils.dist / M_PER_NM } : null,
       timeScale: this.timeScale, lights: { ...this.lights }, seatbelt: this.seatbelt, assist: fm.ctl.assist, hint: this.coach(), loadProgress: loadP, restartHold: clamp(this.restartHold / 0.7, 0, 1),
       wind: { dir: windDirection, kt: windSpeedKt }, destId: this.cfg.to.icao, fromId: this.cfg.from.icao, aircraft: s.name, progress: clamp(1 - rem / total, 0, 1), onGround: fm.wow, stall: fm.stalled || fm.stallWarn, nz: fm.nz,

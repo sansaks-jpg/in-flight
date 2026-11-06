@@ -691,7 +691,7 @@ export function StartScreen({
               <b>AWS Open Data Terrain Tiles (Terrarium)</b> — global DEM elevation heightmaps derived from SRTM, ETOPO1, and GMTED datasets.
             </li>
             <li>
-              <b>OurAirports Worldwide Runway Database</b> — {REPO_FACTS.totalAirports.toLocaleString()} airports ({REPO_FACTS.indonesiaAirports} in Indonesia) with authentic runway coordinates, magnetic headings, thresholds, and dimensions.
+              <b>OurAirports + OpenStreetMap</b> — {REPO_FACTS.totalAirports.toLocaleString()} airfields, {REPO_FACTS.indonesiaAirports} in Indonesia (every mapped runway incl. grass/gravel strips) with surveyed centrelines, surfaces, displaced thresholds and taxiway/apron/stand layouts for {REPO_FACTS.indonesiaWithLayout}. Headings are magnetic (WMM2025).
             </li>
             <li>
               <b>OpenStreetMap &amp; OpenFreeMap MVT</b> — real airport terminals, control towers, hangars, highways, and coastlines rendered dynamically in 3D.
