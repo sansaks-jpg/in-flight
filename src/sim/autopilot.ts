@@ -65,6 +65,12 @@ export class Autopilot {
   altFt = 3000;
   spd = 120;
   vsLimit = 8;
+  /** FCU selected (pulled) vs managed (pushed) guidance: when selected, VNAV/LNAV no longer overwrite the FCU target. */
+  altSelected = false; spdSelected = false;
+  /** FCU V/S mode: commanded vertical speed in ft/min (null = altitude guidance). Cleared on altitude capture or AP disconnect. */
+  vsHoldFpm: number | null = null;
+  /** FCU EXPED pushbutton: higher climb / descent rate limit. */
+  expedite = false;
   takeoffHdg = 0;
   targetWpIdx = 0;
   activeWpName = '';
@@ -109,7 +115,7 @@ export class Autopilot {
   }
 
   disengage() {
-    this.on = false; this.pitchTargetRad = null;
+    this.on = false; this.pitchTargetRad = null; this.vsHoldFpm = null; this.expedite = false;
     this.phase = 'idle';
     this.appr = false;
     this.nav = false;
@@ -229,8 +235,8 @@ export class Autopilot {
             altTarget = wp.altM;
         }
         spdT = wp.speedKt > 0 ? wp.speedKt : (landingLeg ? s.vapp : spdT);
-        this.altFt = Math.round(altTarget / FT);
-        this.spd = Math.round(spdT);
+        if (this.altSelected) altTarget = this.altFt * FT; else this.altFt = Math.round(altTarget / FT);
+        if (this.spdSelected) spdT = this.spd; else this.spd = Math.round(spdT);
 
         // Visual / LNAV final: no ILS needed. Fly the 3° path to the threshold, configure, flare.
         if (landingLeg) {
@@ -372,8 +378,14 @@ export class Autopilot {
     // -------------------------------------------------------------
     // 8. VERTICAL CONTROL (Pitch Rate & Speed Protection)
     // -------------------------------------------------------------
+    if (vsCmd === null && this.vsHoldFpm !== null) {
+      // FCU V/S mode: hold the selected rate (1 ft/min = 0.00508 m/s); capture the FCU altitude when it is reached in the direction of travel.
+      const dTgt = altTarget - alt;
+      if (this.vsHoldFpm !== 0 && Math.sign(dTgt) === Math.sign(this.vsHoldFpm) && Math.abs(dTgt) < Math.max(18, Math.abs(this.vsHoldFpm) * 0.00508 * 7)) this.vsHoldFpm = null;
+      else vsCmd = this.vsHoldFpm * 0.00508;
+    }
     if (vsCmd === null) {
-      const maxClimb = Math.min(this.vsLimit, 4 + s.maxPitchRate * 30);
+      const maxClimb = Math.min(this.vsLimit * (this.expedite ? 1.35 : 1), 4 + s.maxPitchRate * 30);
       const dErr = altTarget - alt;
       if (dErr < -30) {
         // Descend on a 3° path (not a dive), then capture the level smoothly.

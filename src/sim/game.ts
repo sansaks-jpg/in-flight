@@ -803,10 +803,11 @@ export class Game {
     const g = this;
     return {
       get fm() { return g.fm; }, get ap() { return g.ap; }, get lights() { return g.lights; }, get seatbelt() { return g.seatbelt; },
-      action: (id: string) => g.action(id), setApTarget: (t, v) => g.setApTarget(t, v), toast: (m, k) => g.toast(m, k ?? 'info'),
+      action: (id: string) => g.action(id), setApTarget: (t, v) => g.setApTarget(t, v), toast: (m, k) => g.toast(m, k as ('info' | 'warn' | 'good') ?? 'info'),
       route: () => g.flightPlan.slice(Math.max(0, g.activeWpIdx)).map((w) => ({ name: w.name, lat: w.lat, lon: w.lon })),
       position: () => ({ lat: g.lat(), lon: g.lon() }), magVar: (h: number) => g.magHdg(h) - h,
       efbInfo: () => g.efbInfo(),
+      terrainFt: (lat: number, lon: number) => (g.world ? g.world.terrain.heightAt(g.world.proj.x(lon), g.world.proj.z(lat)) / 0.3048 : 0),
     };
   }
 
@@ -1162,7 +1163,7 @@ export class Game {
     if (!Number.isFinite(value) || this.mode !== 'play' || this.phase !== 'playing') return;
     if (target === 'hdg') {
       this.ap.hdg = wrap360(Math.round(value) + this.magv); this.ap.setLateralMode('heading');
-    } else if (!(this.ap.on && (this.ap.nav || this.ap.appr))) {
+    } else if (!(this.ap.on && (this.ap.nav || this.ap.appr)) || (target === 'alt' ? this.ap.altSelected : this.ap.spdSelected)) {
       if (target === 'alt') this.ap.altFt = clamp(Math.round(value / 100) * 100, 0, 45000);
       else this.ap.spd = clamp(Math.round(value), Math.round(this.spec.vs1 * 1.2), Math.round(this.spec.vne * .85));
     }
@@ -2004,7 +2005,7 @@ export class Game {
       n1: fm.n.slice(0, s.engines), fuelKg: fm.fuel, fuelFrac: fm.fuelFrac, flapsIdx: fm.ctl.flapsIdx, flapsDet: s.flapDetents, gear: fm.gearPos, throttle: fm.ctl.throttle, parking: fm.ctl.parking, reverse: fm.ctl.reverse, spoilers: fm.sbPos,
       apOn: this.ap.on, apHdg: this.magHdg(this.ap.hdg), apAlt: this.ap.altFt, apSpd: this.ap.spd, apNav: this.ap.nav, apAppr: this.ap.appr, apVsMode: false,
       dest: { id: this.cfg.to.icao, name: this.cfg.to.name, brg: wrap180(this.magHdg(brg)), distNm: rem / M_PER_NM, eteMin: (rem / Math.max(30, fm.gs)) / 60 },
-      ils: ils ? { valid: ils.valid, loc: ils.locDots, gs: ils.gsDots, ident: ils.ident, distNm: ils.dist / M_PER_NM } : null,
+      ils: ils ? { valid: ils.valid, loc: ils.locDots, gs: ils.gsDots, ident: ils.ident, distNm: ils.dist / M_PER_NM, courseTrue: ils.course } : null,
       warn: this.warnState.map((w) => w.text), aglFt: fm.agl / 0.3048, alphaFrac: fm.alpha / fm.alphaStall, time: this.time, thrustPct: (Math.abs(fm.thrustN) / ((s.thrust || s.power / 60) * (s.kind === 'jet' ? 1 : 1))) * 100, fuelFlowKgH: fm.fuelFlow * 3600,
       wind: { dir: this.windFrom, kt: this.windKt, cross: crosswind },
       activeWp,

@@ -7,7 +7,7 @@ export interface PanelData {
   n1: number[]; fuelKg: number; fuelFrac: number; flapsIdx: number; flapsDet: number; gear: number; throttle: number; parking: boolean; reverse: boolean; spoilers: number;
   apOn: boolean; apHdg: number; apAlt: number; apSpd: number; apNav: boolean; apAppr: boolean; apVsMode: boolean;
   dest: { id: string; name: string; brg: number; distNm: number; eteMin: number } | null;
-  ils: { valid: boolean; loc: number; gs: number; ident: string; distNm: number } | null;
+  ils: { valid: boolean; loc: number; gs: number; ident: string; distNm: number; /** runway / ILS course, degrees TRUE */ courseTrue?: number } | null;
   warn: string[]; aglFt: number; alphaFrac: number; time: number; thrustPct: number; fuelFlowKgH: number;
   wind?: { dir: number; kt: number; cross: number };
   activeWp?: { name: string; distNm: number; etaMin: number } | null;

@@ -3,161 +3,20 @@
 // Every renderer works in a 1000 x 1000 (or W x H) virtual space so textures can be any resolution.
 import type { PanelData } from '../instruments';
 import type { A320Systems, CockpitHost, EcamPage } from './systems';
+import { speeds } from './efisDisplays';
 import { atmosphere } from '../physics';
-import { thrDetentName } from './systems';
 
 type G = CanvasRenderingContext2D;
 export interface Ctx { d: PanelData; sys: A320Systems; host: CockpitHost; t: number; mcdu: Mcdu; utc: Date }
 const F = 'Arial, Helvetica, sans-serif', M = 'Consolas, "Courier New", monospace';
 const C = { green: '#2bff4a', cyan: '#2ee6ff', amber: '#ffb000', red: '#ff3030', white: '#f4f4f4', mag: '#ff5cf0', sky: '#1d7fe0', gnd: '#7a4a1c', grey: '#8a96a3' };
-const R2D = 180 / Math.PI, D2R = Math.PI / 180;
 function T(g: G, s: string | number, x: number, y: number, px: number, col = C.white, al: CanvasTextAlign = 'center', font = F) { g.font = `bold ${px}px ${font}`; g.fillStyle = col; g.textAlign = al; g.textBaseline = 'middle'; g.fillText(String(s), x, y); }
 function line(g: G, x1: number, y1: number, x2: number, y2: number, col: string, w = 3) { g.strokeStyle = col; g.lineWidth = w; g.beginPath(); g.moveTo(x1, y1); g.lineTo(x2, y2); g.stroke(); }
 const pad = (n: number, w: number) => String(Math.round(n)).padStart(w, '0');
 const off = (g: G, W: number, H: number, msg = '') => { g.fillStyle = '#000'; g.fillRect(0, 0, W, H); if (msg) { g.setTransform(1, 0, 0, 1, 0, 0); } };
 
-/** Stall reference speeds (kt IAS) for the current configuration and weight: Vs1g, VLS, Vα-prot. */
-export function speeds(h: CockpitHost) {
-  const fm = h.fm, s = fm.spec, rho0 = 1.225, fl = fm.flapsPos;
-  const clmax = s.CLmax + s.flapCL * fl * 1.05, vs1g = Math.sqrt(2 * fm.totalMass * 9.80665 / (rho0 * s.S * clmax)) / 0.514444;
-  return { vs1g, vls: vs1g * 1.23, vaprot: vs1g * 1.08, vsw: vs1g * 1.03, green: vs1g * 1.6, vfe: s.vfe[Math.min(s.vfe.length - 1, Math.max(0, Math.ceil(fl * s.flapDetents - 1e-6)))] };
-}
-
-// =============================================================== PFD
-export function drawPFD(g: G, W: number, H: number, c: Ctx) {
-  const d = c.d, sys = c.sys, h = c.host, fm = h.fm;
-  g.setTransform(W / 1000, 0, 0, H / 1000, 0, 0); g.fillStyle = '#000'; g.fillRect(0, 0, 1000, 1000);
-  if (!sys.dc) return;
-  const sp = speeds(h), cx = 500, cy = 400, pxDeg = 11;
-  // ---- attitude sphere ----
-  g.save(); g.beginPath(); g.rect(190, 120, 620, 560); g.clip();
-  g.translate(cx, cy); g.rotate(d.bank); // bank + = right wing down -> horizon rotates left
-  const off0 = d.pitch * pxDeg;
-  g.fillStyle = C.sky; g.fillRect(-700, -900 + off0, 1400, 900); g.fillStyle = C.gnd; g.fillRect(-700, off0, 1400, 900);
-  line(g, -700, off0, 700, off0, '#fff', 3);
-  for (let p = -30; p <= 30; p += 2.5) { if (!p) continue; const y = off0 - p * pxDeg, big = p % 10 === 0, mid = p % 5 === 0; const w = big ? 80 : mid ? 40 : 20; if (!big && !mid && Math.abs(p) > 15) continue; line(g, -w, y, w, y, '#fff', 2.5); if (big) { T(g, Math.abs(p), -w - 24, y, 24, '#fff'); T(g, Math.abs(p), w + 24, y, 24, '#fff'); } }
-  g.restore();
-  // roll scale
-  g.save(); g.translate(cx, cy); g.strokeStyle = '#fff'; g.fillStyle = '#fff'; g.lineWidth = 3;
-  for (const a of [-60, -45, -30, -20, -10, 0, 10, 20, 30, 45, 60]) { const r = 250, l = a % 30 === 0 ? 24 : 14, rad = (a - 90) * D2R; line(g, Math.cos(rad) * r, Math.sin(rad) * r, Math.cos(rad) * (r - l), Math.sin(rad) * (r - l), '#fff', 3); }
-  g.rotate(d.bank); g.fillStyle = C.amber; g.beginPath(); g.moveTo(0, -250); g.lineTo(-14, -226); g.lineTo(14, -226); g.closePath(); g.fill();
-  g.strokeStyle = C.amber; g.lineWidth = 3; g.strokeRect(-18 + Math.max(-1, Math.min(1, d.slip * 6)) * 18, -222, 36, 10); g.restore();
-  // aircraft symbol (fixed)
-  g.strokeStyle = C.amber; g.lineWidth = 7; g.beginPath(); g.moveTo(cx - 110, cy); g.lineTo(cx - 40, cy); g.lineTo(cx - 40, cy + 18); g.moveTo(cx + 110, cy); g.lineTo(cx + 40, cy); g.lineTo(cx + 40, cy + 18); g.stroke(); g.fillStyle = C.amber; g.fillRect(cx - 5, cy - 5, 10, 10);
-  // flight director
-  if (sys.fd[0] && d.apOn || sys.fd[0] && !d.apOn && sys.fd[1]) {
-    const dh = ((d.apHdg - d.hdg + 540) % 360) - 180, rollCmd = Math.max(-25, Math.min(25, dh * 1.2)), pitchCmd = Math.max(-10, Math.min(15, (d.apAlt - d.altFt) / 150));
-    g.save(); g.translate(cx, cy); g.strokeStyle = C.green; g.lineWidth = 6; const by = (pitchCmd - d.pitch) * pxDeg * -1; g.beginPath(); g.moveTo(-100, by); g.lineTo(100, by); g.stroke();
-    const bx = (rollCmd - -d.bank * R2D) * 3; g.beginPath(); g.moveTo(bx, -90); g.lineTo(bx, 90); g.stroke(); g.restore();
-  }
-  // ---- FMA ----
-  g.strokeStyle = '#888'; g.lineWidth = 2; for (let i = 1; i < 5; i++) line(g, i * 200, 8, i * 200, 108, '#666', 2); line(g, 0, 110, 1000, 110, '#666', 2);
-  const altErr = d.apAlt - d.altFt, vMode = !d.apOn ? '' : d.apAppr && d.ils?.valid ? 'G/S' : Math.abs(altErr) < 120 ? 'ALT' : sys.vsMode ? 'V/S' : altErr > 0 ? 'OP CLB' : 'OP DES';
-  const lMode = !d.apOn ? '' : d.apAppr && d.ils?.valid ? 'LOC' : d.apNav ? 'NAV' : 'HDG';
-  const detent = thrDetentName(d.throttle), thrMode = fm.wow && detent === 'TOGA' ? 'MAN TOGA' : fm.wow && detent === 'FLX/MCT' ? 'MAN FLX' : d.apOn ? `SPEED ${Math.round(d.apSpd)}` : detent === 'CL' ? 'THR CLB' : d.throttle > 0.85 ? 'MAN THR' : '';
-  T(g, thrMode, 100, 34, 30, C.green); T(g, vMode, 300, 34, 34, C.green); T(g, lMode, 500, 34, 34, C.green);
-  T(g, d.apAppr ? (d.ils?.valid ? 'LOC' : 'APPR') : '', 700, 34, 28, C.white);
-  T(g, d.apOn ? 'AP1' : '', 900, 30, 30, C.white); T(g, `${sys.fd[0] ? '1' : '-'} FD ${sys.fd[1] ? '2' : '-'}`, 900, 62, 26, C.white); T(g, d.apOn ? 'A/THR' : (sys.athrArmed ? 'A/THR' : ''), 900, 92, 26, d.apOn ? C.white : C.cyan);
-  if (d.apOn) { T(g, 'SPEED', 100, 72, 26, C.cyan); T(g, 'MAN' , 300, 72, 1, C.cyan); T(g, d.apNav ? '' : '', 500, 72, 1); }
-  // ---- speed tape ----
-  g.save(); g.beginPath(); g.rect(20, 120, 150, 560); g.clip(); g.fillStyle = '#16242f'; g.fillRect(20, 120, 150, 560);
-  const k = Math.max(30, d.kias), ppk = 7, yOf = (v: number) => 400 - (v - k) * ppk;
-  for (let v = Math.max(30, Math.floor((k - 45) / 10) * 10); v <= k + 45; v += 10) { const y = yOf(v); line(g, 140, y, 170, y, '#fff', 3); if (v % 20 === 0) T(g, v, 80, y, 30, '#fff', 'center'); }
-  const vmax = Math.min(sp.vfe < 900 ? sp.vfe : 350, 350); g.fillStyle = 'rgba(255,0,0,0.9)'; g.fillRect(150, yOf(vmax + 80), 20, yOf(vmax) - yOf(vmax + 80));
-  g.fillStyle = C.amber; g.fillRect(150, yOf(sp.vls), 12, yOf(sp.vls - 60) - yOf(sp.vls) + 0); g.fillStyle = 'rgba(255,60,60,0.95)'; g.fillRect(150, yOf(sp.vsw), 20, yOf(sp.vsw - 80) - yOf(sp.vsw));
-  g.fillStyle = C.amber; g.fillRect(150, yOf(sp.vaprot), 8, yOf(sp.vsw) - yOf(sp.vaprot));
-  if (fm.flapsPos < 0.05) { g.strokeStyle = C.green; g.lineWidth = 3; g.beginPath(); g.arc(160, yOf(sp.green), 8, 0, 7); g.stroke(); }
-  const bugY = yOf(d.apSpd); g.strokeStyle = C.cyan; g.lineWidth = 4; g.beginPath(); g.moveTo(170, bugY); g.lineTo(150, bugY - 12); g.lineTo(150, bugY + 12); g.closePath(); g.stroke();
-  g.restore();
-  g.fillStyle = '#000'; g.fillRect(40, 372, 110, 56); g.strokeStyle = C.amber; g.lineWidth = 3; g.strokeRect(40, 372, 110, 56); T(g, pad(Math.max(30, d.kias), 3), 95, 401, 44, d.kias < sp.vls - 3 && !fm.wow ? C.amber : C.green);
-  g.fillStyle = C.amber; g.beginPath(); g.moveTo(150, 400); g.lineTo(172, 388); g.lineTo(172, 412); g.fill();
-  if (d.mach > 0.5) T(g, `.${pad(d.mach * 100, 2)}`, 95, 700, 34, C.green);
-  T(g, `${Math.round(d.apSpd)}`, 95, 100 + 0, 1, C.cyan);
-  T(g, `${Math.round(d.apSpd)}`, 95, 140, 30, C.cyan);
-  // ---- altitude tape ----
-  g.save(); g.beginPath(); g.rect(830, 120, 160, 560); g.clip(); g.fillStyle = '#16242f'; g.fillRect(830, 120, 160, 560);
-  const alt = d.altFt, ppf = 0.56, yA = (v: number) => 400 - (v - alt) * ppf;
-  for (let v = Math.floor((alt - 480) / 20) * 20; v <= alt + 480; v += 20) { const y = yA(v), big = v % 100 === 0; line(g, 830, y, big ? 870 : 850, y, '#fff', 3); if (v % 200 === 0) T(g, pad(Math.abs(v) / 100, 2) + (v < 0 ? '' : ''), 925, y, 30, '#fff'); }
-  g.fillStyle = C.cyan; const aby = yA(d.apAlt); g.beginPath(); g.moveTo(830, aby); g.lineTo(856, aby - 14); g.lineTo(856, aby + 14); g.closePath(); g.fill();
-  g.restore();
-  g.fillStyle = '#000'; g.fillRect(840, 368, 150, 64); g.strokeStyle = C.amber; g.lineWidth = 3; g.strokeRect(840, 368, 150, 64);
-  const ab = Math.round(alt / 20) * 20; T(g, pad(Math.floor(Math.abs(ab) / 100), 2), 890, 400, 46, C.green, 'center'); T(g, pad(Math.abs(ab) % 100, 2), 958, 404, 34, C.green);
-  T(g, d.apAlt >= 1000 ? `${Math.round(d.apAlt)}` : `${Math.round(d.apAlt)}`, 905, 100 + 0, 1, C.cyan);
-  T(g, Math.round(d.apAlt), 905, 140, 34, C.cyan);
-  T(g, sys.std ? 'STD' : (sys.qnhInHg ? (sys.qnh * 0.02953).toFixed(2) : String(Math.round(sys.qnh))), 905, 716, 34, sys.std ? C.cyan : C.cyan);
-  if (d.aglFt < 2500) { const ra = Math.max(0, Math.round(d.aglFt - 18)); T(g, ra, 500, 640, 40, ra < 400 ? C.amber : C.green); }
-  // V/S
-  g.fillStyle = '#16242f'; g.fillRect(800, 200, 24, 400);
-  for (const v of [-6, -4, -2, -1, 0, 1, 2, 4, 6]) { const y = 400 - v * 30 * (Math.abs(v) <= 2 ? 3 : 1.5) * (Math.abs(v) <= 2 ? 1 : 1) / (Math.abs(v) <= 2 ? 1 : 1); line(g, 800, Math.max(205, Math.min(595, y)), 812, Math.max(205, Math.min(595, y)), '#fff', 2); }
-  const vs = Math.max(-6000, Math.min(6000, d.vsFpm)) / 1000, vy = 400 - vs * (Math.abs(vs) <= 2 ? 90 : 0) - (Math.abs(vs) > 2 ? Math.sign(vs) * (180 + (Math.abs(vs) - 2) * 36) : 0);
-  line(g, 824, 400, 800, vy, C.green, 4); if (Math.abs(d.vsFpm) > 200) T(g, Math.round(Math.abs(d.vsFpm) / 50) * 50, 770, vy, 22, C.green);
-  // ---- ILS ----
-  if (d.ils?.valid && (d.apAppr || sys.ndOverlay.ls)) {
-    const lx = cx + Math.max(-2, Math.min(2, d.ils.loc)) * 60, gy = cy + Math.max(-2, Math.min(2, d.ils.gs)) * -60 * -1;
-    g.fillStyle = C.mag; g.save(); g.translate(lx, 650); g.rotate(Math.PI / 4); g.fillRect(-9, -9, 18, 18); g.restore(); g.save(); g.translate(790, gy); g.rotate(Math.PI / 4); g.fillRect(-9, -9, 18, 18); g.restore();
-    T(g, d.ils.ident, 230, 650, 28, C.mag);
-  }
-  // ---- heading scale ----
-  g.fillStyle = '#16242f'; g.fillRect(190, 760, 620, 150); g.save(); g.beginPath(); g.rect(190, 760, 620, 150); g.clip();
-  const hdg = d.hdg, pph = 8, xH = (v: number) => 500 + (((v - hdg + 540) % 360) - 180) * pph;
-  for (let v = 0; v < 360; v += 5) { const x = xH(v), maj = v % 10 === 0; if (x < 190 || x > 810) continue; line(g, x, 768, x, maj ? 796 : 782, '#fff', 3); if (v % 10 === 0) T(g, pad(v / 10 % 36, 2), x, 826, 28, '#fff'); }
-  const hb = xH(d.apHdg); g.fillStyle = C.cyan; g.beginPath(); g.moveTo(hb, 768); g.lineTo(hb - 14, 790); g.lineTo(hb + 14, 790); g.fill();
-  const tx = xH(d.trk); g.strokeStyle = C.green; g.lineWidth = 4; g.beginPath(); g.moveTo(tx, 760); g.lineTo(tx - 10, 772); g.lineTo(tx, 784); g.lineTo(tx + 10, 772); g.closePath(); g.stroke();
-  g.restore(); g.fillStyle = C.amber; g.beginPath(); g.moveTo(500, 760); g.lineTo(488, 744); g.lineTo(512, 744); g.fill(); T(g, pad(hdg, 3), 500, 722, 30, C.green);
-  // flap/gear/warn flags
-  if (!fm.wow && d.aglFt < 2000 && d.gear < 0.9) T(g, 'L/G NOT DOWN', 500, 190, 28, C.red);
-  if (d.warn.some((w) => /STALL/i.test(w))) T(g, 'STALL', 500, 240, 44, C.red);
-  T(g, sys.lampTest > 0 ? 'TEST' : '', 500, 500, 40, C.amber);
-}
-
-// =============================================================== ND
-export function drawND(g: G, W: number, H: number, c: Ctx) {
-  const d = c.d, sys = c.sys, h = c.host, fm = h.fm;
-  g.setTransform(W / 1000, 0, 0, H / 1000, 0, 0); g.fillStyle = '#000'; g.fillRect(0, 0, 1000, 1000);
-  if (!sys.dc) return;
-  const mode = sys.ndMode; // 0 LS 1 VOR 2 NAV 3 ARC 4 PLAN
-  const rng = [10, 20, 40, 80, 160, 320][Math.max(0, Math.min(5, sys.ndRange))];
-  const arc = mode === 3, plan = mode === 4, cx = 500, cy = arc ? 800 : 500, rad = arc ? 640 : 380;
-  const pos = h.position(), hdgT = fm.heading, up = plan ? 0 : hdgT;
-  const proj = (lat: number, lon: number) => { const dx = (lon - pos.lon) * Math.cos(pos.lat * D2R) * 60, dy = (lat - pos.lat) * 60, r = Math.hypot(dx, dy), br = Math.atan2(dx, dy) * R2D; const a = (br - up) * D2R; return { x: cx + Math.sin(a) * r / rng * rad, y: cy - Math.cos(a) * r / rng * rad, r, br }; };
-  g.save(); g.beginPath(); if (arc) { g.rect(0, 120, 1000, 880); } else g.rect(0, 0, 1000, 1000); g.clip();
-  // compass
-  const mv = h.magVar(0) - 0; const hdgM = d.hdg; void mv;
-  if (!plan) {
-    g.save(); g.translate(cx, cy); g.rotate(-hdgM * D2R); g.strokeStyle = '#fff'; g.lineWidth = 3;
-    for (let a = 0; a < 360; a += 5) { const r1 = rad + 10, r2 = rad - (a % 10 === 0 ? 24 : 12), ca = Math.cos((a - 90) * D2R), sa = Math.sin((a - 90) * D2R); if (arc && (((a - hdgM + 540) % 360) - 180 > 60 || ((a - hdgM + 540) % 360) - 180 < -60)) continue; line(g, ca * r1, sa * r1, ca * r2, sa * r2, '#fff', a % 10 === 0 ? 3 : 2); if (a % 30 === 0) { g.save(); g.translate(ca * (r2 - 28), sa * (r2 - 28)); g.rotate(a * D2R); T(g, a % 90 === 0 ? 'NESW'[a / 90] : a / 10, 0, 0, 28, '#fff'); g.restore(); } }
-    g.restore();
-  } else T(g, 'N', cx, cy - rad - 20, 32, C.cyan);
-  // range rings
-  g.strokeStyle = '#6a7683'; g.lineWidth = 2; g.setLineDash([6, 10]); for (const f of [0.5]) { g.beginPath(); if (arc) g.arc(cx, cy, rad * f, Math.PI * 1.17, Math.PI * 1.83); else g.arc(cx, cy, rad * f, 0, 7); g.stroke(); } g.setLineDash([]);
-  T(g, rng / 2, cx - 6 - rad * 0.5 * 0.5, cy - rad * 0.5 * 0.85 - (arc ? 0 : 0) + 0, 22, C.cyan);
-  // route
-  const rt = h.route(); const act = Math.max(0, h.ap.nav ? 0 : 0); void act;
-  if (rt.length) {
-    g.strokeStyle = C.green; g.lineWidth = 4; g.beginPath(); let first = true;
-    const here = proj(pos.lat, pos.lon); g.moveTo(here.x, here.y);
-    for (const w of rt) { const p = proj(w.lat, w.lon); g.lineTo(p.x, p.y); first = false; }
-    void first; g.stroke();
-    for (const w of rt) { const p = proj(w.lat, w.lon); if (p.r > rng * 1.3 && !plan) continue; g.strokeStyle = C.white; g.lineWidth = 3; g.beginPath(); g.moveTo(p.x, p.y - 12); g.lineTo(p.x + 11, p.y + 8); g.lineTo(p.x - 11, p.y + 8); g.closePath(); g.stroke(); if (sys.ndOverlay.wpt || w === rt[0]) T(g, w.name, p.x + 14, p.y - 18, 22, w === rt[0] ? C.mag : C.white, 'left'); }
-  }
-  // heading bug, track line
-  const rel = (v: number) => ((v - hdgM + 540) % 360) - 180;
-  if (!plan) {
-    const tr = rel(d.trk) * D2R; line(g, cx, cy, cx + Math.sin(tr) * rad, cy - Math.cos(tr) * rad, C.green, 3);
-    const hb = rel(d.apHdg) * D2R; g.save(); g.translate(cx + Math.sin(hb) * rad, cy - Math.cos(hb) * rad); g.rotate(hb); g.fillStyle = C.cyan; g.fillRect(-14, -8, 28, 16); g.restore();
-  }
-  // ownship
-  g.save(); g.translate(cx, cy); if (plan) g.rotate(hdgT * D2R); g.strokeStyle = C.amber; g.lineWidth = 6; g.beginPath(); g.moveTo(0, -30); g.lineTo(0, 36); g.moveTo(-26, 12); g.lineTo(26, 12); g.moveTo(-10, 34); g.lineTo(10, 34); g.stroke(); g.restore();
-  g.restore();
-  // header
-  g.fillStyle = '#000'; g.fillRect(0, 0, 1000, 120);
-  T(g, 'GS', 40, 30, 24, C.white, 'left'); T(g, Math.round(d.gsKt), 100, 30, 34, C.green, 'left'); T(g, 'TAS', 40, 66, 24, C.white, 'left'); T(g, Math.round(d.kias * 1 / Math.sqrt(atmosphere(fm.pos.y).sigma)), 110, 66, 34, C.green, 'left');
-  T(g, pad(hdgM, 3), 500, 28, 36, C.green); T(g, ['ILS', 'VOR', 'NAV', 'ARC', 'PLAN'][mode], 330, 28, 26, C.green);
-  if (rt.length) { const p = proj(rt[0].lat, rt[0].lon); T(g, rt[0].name, 760, 28, 32, C.mag, 'left'); T(g, `${Math.round((p.br + 360 - 0) % 360)}°`, 760, 66, 26, C.mag, 'left'); T(g, `${p.r.toFixed(1)}NM`, 880, 66, 26, C.white, 'left'); }
-  if (d.wind) { T(g, `${pad(d.wind.dir, 3)}/${Math.round(d.wind.kt)}`, 100, 130, 28, C.green, 'left'); }
-  T(g, `${rng}`, 940, 940, 26, C.cyan, 'right'); T(g, 'RANGE', 940, 910, 18, C.white, 'right');
-  if (d.ils?.valid) { T(g, `${d.ils.ident}`, 60, 900, 28, C.mag, 'left'); T(g, `${d.ils.distNm.toFixed(1)}NM`, 60, 936, 26, C.white, 'left'); }
-}
+// PFD / ND live in efisDisplays.ts (per-side EFIS state).
+export { drawPFD, drawND, speeds, baroText } from './efisDisplays';
 
 // =============================================================== E/WD
 export function drawEWD(g: G, W: number, H: number, c: Ctx) {
@@ -192,13 +51,14 @@ export function drawEWD(g: G, W: number, H: number, c: Ctx) {
     else { if (c.host.seatbelt) lines.push({ t: 'SEAT BELTS', col: C.green }); if (c.host.lights.land) lines.push({ t: 'LAND LT', col: C.green }); if (sys.apuRpm >= 95) lines.push({ t: `APU AVAIL`, col: C.green }); if (sys.ext) lines.push({ t: 'EXT PWR', col: C.green }); if (sys.apuBleed && sys.apuRpm >= 95) lines.push({ t: 'APU BLEED', col: C.green }); if (!c.host.lights.beacon && fm.anyEngineRunning) lines.push({ t: 'BEACON  OFF', col: C.amber }); if (fm.wow && fm.ctl.parking) lines.push({ t: 'PARK BRK', col: C.green }); if (fm.ctl.reverse) lines.push({ t: 'REV SELECTED', col: C.amber }); if (!lines.length) lines.push({ t: ' ', col: C.green }); }
   }
   lines.slice(0, 10).forEach((l, i) => T(g, l.t, 40, 545 + i * 44, 34, l.col, 'left'));
+  if (sys.ecam.statusPending && sys.sdPage !== 'STS') T(g, 'STS', 900, 960, 30, C.white);   // status reminder
   if (sys.masterWarn || d.warn.some((w) => /STALL|FIRE/i.test(w))) { }
 }
 
 // =============================================================== SD
 const SD_TITLES: Record<EcamPage, string> = { ENG: 'ENGINE', BLEED: 'BLEED', PRESS: 'CAB PRESS', ELEC: 'ELEC', HYD: 'HYD', FUEL: 'FUEL', APU: 'APU', COND: 'COND', DOOR: 'DOOR/OXY', WHEEL: 'WHEEL', 'F/CTL': 'F/CTL', STS: 'STATUS', CRZ: 'CRUISE' };
 export function drawSD(g: G, W: number, H: number, c: Ctx) {
-  const d = c.d, sys = c.sys, fm = c.host.fm, page = sys.page ?? sys.pageAuto;
+  const d = c.d, sys = c.sys, fm = c.host.fm, page = sys.sdPage;
   g.setTransform(W / 1000, 0, 0, H / 1000, 0, 0); g.fillStyle = '#000'; g.fillRect(0, 0, 1000, 1000);
   if (!sys.dc) return;
   T(g, SD_TITLES[page], 500, 36, 36, C.white); line(g, 360, 62, 640, 62, C.white, 3);
@@ -225,7 +85,7 @@ export function drawSD(g: G, W: number, H: number, c: Ctx) {
     case 'WHEEL': { lbl(500, 120, `A/SKID ${sys.antiSkid ? 'ON' : 'OFF'}   N/W STRG ${sys.nwStrg ? 'ON' : 'OFF'}`, C.green, 28); const gear = (x: number, y: number, n: string) => { lbl(x, y, n, C.white, 22); box(x - 50, y + 20, 100, 50, d.gear > 0.95 ? C.green : d.gear < 0.05 ? C.white : C.red); lbl(x, y + 45, d.gear > 0.95 ? 'DN' : d.gear < 0.05 ? 'UP' : '...', d.gear > 0.95 ? C.green : C.amber, 30); };
       gear(500, 190, 'NOSE'); gear(200, 330, 'LEFT'); gear(800, 330, 'RIGHT'); const br = Math.min(400, 60 + Math.max(0, fm.gs - 5) * 1.5 * (fm.ctl.brake + (fm.ctl.parking ? 0 : 0) + 0.2)); lbl(200, 480, 'BRAKE °C', C.white, 22); val(200, 530, Math.round(br), br > 300 ? C.amber : C.green); val(800, 530, Math.round(br), br > 300 ? C.amber : C.green); lbl(500, 480, `AUTO BRK ${['OFF', 'LO', 'MED', 'MAX'][sys.autobrake]}`, sys.autobrake ? C.green : C.white, 26); lbl(500, 560, `SPLRS ${sys.spoilerArm ? 'ARM' : '---'}`, sys.spoilerArm ? C.green : C.white, 24); lbl(500, 640, fm.ctl.parking ? 'PARK BRK ON' : '', C.red, 28); lbl(500, 720, 'TIRE 185 PSI', C.green, 22); break; }
     case 'F/CTL': { lbl(250, 130, 'ELAC 1 2   SEC 1 2 3   FAC 1 2', C.green, 22); const el = fm.surf.el, al = fm.surf.ail; lbl(500, 220, 'ELEV', C.white, 24); box(430, 250, 140, 200); line(g, 440, 350 - el * 90, 560, 350 - el * 90, C.green, 8); lbl(250, 220, 'AIL L', C.white, 24); line(g, 160, 330 + al * 60, 340, 330 + al * 60, C.green, 8); lbl(750, 220, 'AIL R', C.white, 24); line(g, 660, 330 - al * 60, 840, 330 - al * 60, C.green, 8); lbl(500, 520, 'SPLRS', C.white, 24); for (let i = 0; i < 5; i++) { for (const sx of [-1, 1]) line(g, 500 + sx * (60 + i * 55), 600, 500 + sx * (60 + i * 55), 600 - fm.sbPos * 70 - 4, C.green, 10); } lbl(500, 700, `FLAPS ${['0', '1', '2', '3', 'FULL'][fm.ctl.flapsIdx]}  ${Math.round(fm.flapsPos * 100)}%`, C.green, 28); lbl(500, 770, `PITCH TRIM ${(fm.trimAuto * 4).toFixed(1)}° ${fm.trimAuto > 0 ? 'UP' : 'DN'}`, C.green, 26); lbl(500, 830, `RUD ${(fm.surf.rud * 25).toFixed(0)}°`, C.green, 26); break; }
-    case 'STS': lbl(500, 400, d.warn.length || sys.startMsg ? 'INOP SYS' : 'STATUS  NORMAL', d.warn.length ? C.amber : C.green, 44); d.warn.slice(0, 6).forEach((w, i) => lbl(500, 480 + i * 44, w.toUpperCase().slice(0, 30), C.amber, 30)); break;
+    case 'STS': { const it = sys.ecam.statusItems; if (it.length) { lbl(500, 220, 'CANCELLED CAUTION', C.white, 34); it.slice(0, 7).forEach((w, k) => lbl(500, 300 + k * 52, w.toUpperCase().slice(0, 30), C.amber, 32)); } else lbl(500, 420, 'NORMAL', C.green, 56); break; }
     case 'CRZ': { lbl(150, 160, 'F.USED', C.white, 24); val(150, 210, Math.round((spec0(c).fuelCap - fm.fuel) / 10) * 10, C.green, 'KG'); lbl(500, 160, 'CAB V/S', C.white, 24); val(500, 210, Math.round(sys.cabVs / 50) * 50, C.green, 'FT/MIN'); lbl(850, 160, 'CAB ALT', C.white, 24); val(850, 210, Math.round(sys.cabAltFt / 50) * 50, C.green, 'FT'); lbl(850, 330, 'ΔP', C.white, 24); val(850, 370, sys.deltaP.toFixed(1), C.green, 'PSI'); lbl(150, 330, 'OIL', C.white, 24); val(150, 370, Math.round(sys.oilQty[0] * 10) / 10, C.green, 'QT'); lbl(500, 520, `ELEC ${sys.ac ? 'AC OK' : 'NO AC'}`, sys.ac ? C.green : C.amber, 28); lbl(500, 600, `HYD G ${Math.round(sys.hyd.green / 100) * 100}  B ${Math.round(sys.hyd.blue / 100) * 100}  Y ${Math.round(sys.hyd.yellow / 100) * 100}`, C.green, 26); break; }
   }
   // bottom status line
@@ -313,17 +173,30 @@ export function drawISIS(g: G, W: number, H: number, c: Ctx) {
   const d = c.d; g.setTransform(W / 400, 0, 0, H / 400, 0, 0); g.fillStyle = '#000'; g.fillRect(0, 0, 400, 400); if (!c.sys.dc) return;
   g.save(); g.translate(200, 200); g.rotate(d.bank); const o = d.pitch * 5; g.fillStyle = '#2a73c9'; g.fillRect(-300, -400 + o, 600, 400); g.fillStyle = '#7a4a1c'; g.fillRect(-300, o, 600, 400); line(g, -300, o, 300, o, '#fff', 3); g.restore();
   g.fillStyle = '#000'; g.fillRect(0, 0, 70, 400); g.fillRect(330, 0, 70, 400); T(g, Math.round(d.kias), 35, 200, 34, C.white); T(g, Math.round(d.altFt / 10) * 10, 365, 200, 30, C.white); T(g, 'SPD', 35, 40, 20, C.amber); T(g, 'ALT', 365, 40, 20, C.amber);
-  g.strokeStyle = C.amber; g.lineWidth = 5; g.beginPath(); g.moveTo(130, 200); g.lineTo(190, 200); g.moveTo(210, 200); g.lineTo(270, 200); g.stroke(); T(g, c.sys.std ? 'STD' : Math.round(c.sys.qnh), 365, 370, 24, C.cyan);
+  g.strokeStyle = C.amber; g.lineWidth = 5; g.beginPath(); g.moveTo(130, 200); g.lineTo(190, 200); g.moveTo(210, 200); g.lineTo(270, 200); g.stroke(); T(g, c.sys.isis.std ? 'STD' : Math.round(c.sys.isis.hpa), 365, 370, 24, C.cyan);
 }
 /** FCU digits overlay: canvas covers the whole display strip; x positions map 1:1 to the model's `.ind` meshes. */
 export function drawFCU(g: G, W: number, H: number, c: Ctx, zToX: (z: number) => number) {
   g.clearRect(0, 0, W, H); const d = c.d, sys = c.sys; if (!sys.ac && !sys.acEss) return;
-  const px = H * 0.68, col = '#ffb23d';
+  const px = H * 0.68, col = '#ffb23d', f = d.mach > 0.05 && d.kias > 30 ? d.kias / d.mach : 661.5;
+  g.globalAlpha = 0.4 + 0.6 * sys.bright.fcu;
   const seg = (z: number, s: string) => { g.font = `bold ${px}px ${M}`; g.fillStyle = col; g.textAlign = 'center'; g.textBaseline = 'middle'; g.shadowColor = col; g.shadowBlur = H * 0.25; g.fillText(s, zToX(z) * W, H / 2); g.shadowBlur = 0; };
-  seg(0.0985, sys.spdManaged ? '---' : sys.spdMach ? (d.apSpd / 600).toFixed(2).slice(1) : pad(d.apSpd, 3));
-  seg(0.0575, sys.hdgManaged ? '---' : pad((d.apHdg + 360) % 360, 3));
-  seg(-0.0435 + 0.0, sys.metric ? pad(d.apAlt * 0.3048 / 10, 4) + '0' : pad(d.apAlt, 5));
-  seg(-0.0895, d.apOn && sys.vsMode ? (sys.vsTarget >= 0 ? '+' : '-') + pad(Math.abs(sys.vsTarget), 4) : '-----');
+  const spd = (v: number) => sys.spdMach ? (v / f).toFixed(2).slice(1) : pad(v, 3);
+  // managed (pushed) windows show dashes; a preselection made while managed is displayed until it times out (10 s SPD, 45 s HDG / V/S)
+  seg(0.0985, sys.spdManaged ? (sys.spdPre > 0 ? spd(sys.spdPreVal) : '---') : spd(d.apSpd));
+  seg(0.0575, sys.hdgManaged ? (sys.hdgPre > 0 ? pad(sys.hdgPreVal, 3) : '---') : pad(((Math.round(d.apHdg) % 360) + 360) % 360, 3));
+  seg(-0.0435, pad(d.apAlt, 5));   // the ALT window is always feet; METRIC ALT only adds metres on the PFD / ECAM
+  const vsShown = sys.vsMode || sys.vsPre > 0;
+  seg(-0.0895, !vsShown ? '-----' : sys.trkFpa ? (sys.fpaTarget >= 0 ? '+' : '-') + Math.abs(sys.fpaTarget).toFixed(1) : (sys.vsTarget >= 0 ? '+' : '-') + pad(Math.abs(sys.vsTarget), 4));
+  g.globalAlpha = 1;
+}
+/** EFIS BARO window (above the BARO knob): QNH in hPa / inHg, or "Std". */
+export function drawBaro(g: G, W: number, H: number, c: Ctx, side: 0 | 1 = 0) {
+  g.clearRect(0, 0, W, H); if (!c.sys.dc) return; const e = c.sys.efis[side], col = '#cfe8ff';
+  g.fillStyle = '#05090e'; g.fillRect(0, 0, W, H);
+  g.font = `bold ${H * 0.2}px ${M}`; g.fillStyle = '#7fa6d6'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText('BARO', W / 2, H * 0.17);
+  g.font = `bold ${H * 0.52}px ${M}`; g.fillStyle = col; g.shadowColor = col; g.shadowBlur = H * 0.12;
+  g.fillText(e.std ? 'Std' : e.unitInHg ? (e.inHg / 100).toFixed(2) : String(Math.round(e.hpa)).padStart(4, ' '), W / 2, H * 0.64); g.shadowBlur = 0;
 }
 export function drawClock(g: G, W: number, H: number, c: Ctx) {
   g.setTransform(W / 400, 0, 0, H / 400, 0, 0); g.fillStyle = '#050505'; g.fillRect(0, 0, 400, 400); if (!c.sys.dc) return;

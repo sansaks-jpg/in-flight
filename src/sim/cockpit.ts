@@ -8,8 +8,9 @@ import { AircraftSpec } from './specs';
 import { PanelData } from './instruments';
 import { QualityPreset } from './storage';
 import { loadCockpitAssets, Axis } from './a320/assets';
-import { A320Systems, CockpitHost, EcamPage, THR_DETENTS, snapThrottle, thrDetentName } from './a320/systems';
-import { Ctx, Mcdu, drawPFD, drawND, drawEWD, drawSD, drawISIS, drawFCU, drawClock } from './a320/displays';
+import { A320Systems, CockpitHost, EcamPage, THR_DETENTS, snapThrottle, thrDetentName, ND_MODE_NAMES, ND_RANGES } from './a320/systems';
+import { Ctx, Mcdu, drawPFD, drawND, drawEWD, drawSD, drawISIS, drawFCU, drawBaro, drawClock } from './a320/displays';
+import { PAGE_KEYS } from './a320/ecam';
 import { ProceduralCockpit, CockpitInputs, CockpitUi, View } from './a320/proceduralCockpit';
 import { simNowMs } from './clock';
 import { describeControl } from './a320/controlInfo';
@@ -101,10 +102,43 @@ for (const c of 'abcdefghijklmnopqrstuvwxyz0123456789') MCDU_KEYS.add(c);
 for (let i = 1; i <= 6; i++) { MCDU_KEYS.add('L' + i); MCDU_KEYS.add('R' + i); }
 const ON_WHEN_IN = new Set(['APUMasterBtn', 'APUStartBtn', 'ExtPwrBtn', 'Eng1ManStartBtn', 'Eng2ManStartBtn', 'RamAirBtn', 'WingAntiIceBtn', 'Eng1AntiIceBtn', 'Eng2AntiIceBtn', 'PrbWinHeatBtn', 'EmerCallBtn', 'EvacCommandBtn', 'CrewOxyBtn', 'GalleyPwrBtn', 'CommercialBtn', 'RcdrGndCtlBtn', 'ToiletBtn', 'DitchBtn', 'MaskManOnBtn']);
 const DEFAULT_OFF = new Set(['APUMasterBtn', 'APUStartBtn', 'ExtPwrBtn', 'Eng1ManStartBtn', 'Eng2ManStartBtn', 'RamAirBtn', 'DitchBtn', 'EvacCommandBtn', 'RcdrGndCtlBtn', 'MaskManOnBtn', 'WingAntiIceBtn', 'Eng1AntiIceBtn', 'Eng2AntiIceBtn', 'Lcutoff', 'Rcutoff']);
-const SWITCH3 = new Set(['StrobeLtSwtch', 'LandingLtSwtch', 'LandingLtRSwtch', 'NoseLtSwtch', 'NavLogoLtSwtch', 'SeatBeltSwtch', 'NoSmokingSwtch', 'EmerExtLtSwtch', 'DomeLtSwtch', 'TurnoffLtSwtch', 'WingLtSwtch', 'AnnunciatorLtSwtch', 'CockpitDoorSwitch', 'ManVSCTLSwitch', 'DLSSysSwtch']);
-const KNOB_STEPS: Record<string, number> = { IR1ModeKnb: 3, IR2ModeKnb: 3, IR3ModeKnb: 3, XbleedKnb: 3, eng_mode: 3, nd_mode: 5, nd_mode_fo: 5, nd_range: 6, nd_range_fo: 6, CockpitACKnb: 12, FwdCabinACKnb: 12, AftCabinACKnb: 12, ACFlowKnb: 3, LdgElevKnb: 12, LeftWiperKnb: 4, RightWiperKnb: 4, radar_mode: 4, radar_sys: 3, 'qnh_cpt_sw': 3, 'qnh_fo_sw': 3, 'spd-sel': 40, hdg_sel: 40, 'alt-sel': 40, 'vs-sel': 40, 'qnh_cpt_knb': 40, 'qnh_fo_knb': 40, iesi_baro_knb: 40, clock_knob: 3, LReadingLtKnb: 12, RReadingLtKnb: 12, OHPMarkLtKnb: 12 };
+const SWITCH3 = new Set(['vor-adf1', 'vor-adf2', 'vor-adf-1-right', 'vor-adf-2-right', 'StrobeLtSwtch', 'LandingLtSwtch', 'LandingLtRSwtch', 'NoseLtSwtch', 'NavLogoLtSwtch', 'SeatBeltSwtch', 'NoSmokingSwtch', 'EmerExtLtSwtch', 'DomeLtSwtch', 'TurnoffLtSwtch', 'WingLtSwtch', 'AnnunciatorLtSwtch', 'CockpitDoorSwitch', 'ManVSCTLSwitch', 'DLSSysSwtch']);
+const KNOB_STEPS: Record<string, number> = { IR1ModeKnb: 3, IR2ModeKnb: 3, IR3ModeKnb: 3, XbleedKnb: 3, eng_mode: 3, nd_mode: 5, nd_mode_fo: 5, nd_range: 6, nd_range_fo: 6, CockpitACKnb: 12, FwdCabinACKnb: 12, AftCabinACKnb: 12, ACFlowKnb: 3, LdgElevKnb: 12, LeftWiperKnb: 4, RightWiperKnb: 4, radar_mode: 4, radar_sys: 3, 'qnh_cpt_sw': 2, 'qnh_fo_sw': 2, 'alt-sel-mode': 2, 'spd-sel': 40, hdg_sel: 40, 'alt-sel': 40, 'vs-sel': 40, 'qnh_cpt_knb': 40, 'qnh_fo_knb': 40, iesi_baro_knb: 40, clock_knob: 3, LReadingLtKnb: 12, RReadingLtKnb: 12, OHPMarkLtKnb: 12 };
+/** Rotary push/pull encoders of the FCU and the EFIS BARO knobs: rotate, PUSH (managed / QNH) and PULL (selected / STD). Knob angle follows the clicks (32 per turn), never the value. */
+const PUSHPULL = new Set(['spd-sel', 'hdg_sel', 'alt-sel', 'vs-sel', 'qnh_cpt_knb', 'qnh_fo_knb']);
+/** Two-position rings: ALT 100/1000 ft step ring, EFIS hPa/inHg ring (position 0 = left). */
+const RING = new Set(['alt-sel-mode', 'qnh_cpt_sw', 'qnh_fo_sw']);
+/** Initial positions that must match the system state (ADF-OFF-VOR switches rest in OFF, ND selectors in ARC / 80 NM). */
+const POS0: Record<string, number> = { 'alt-sel-mode': 0, qnh_cpt_sw: 1, qnh_fo_sw: 1, 'vor-adf1': 1, 'vor-adf2': 1, 'vor-adf-1-right': 1, 'vor-adf-2-right': 1, nd_mode: 3, nd_mode_fo: 3, nd_range: 3, nd_range_fo: 3 };
+const ECP_KEYS = new Set([...Object.keys(PAGE_KEYS), 'ecam_all', 'ecam_clr_l', 'ecam_clr_r', 'ecam_rcl', 'ecam_emer_canc', 'ecam_to_config']);
+/** Source switching knobs (pedestal switching panel) -> field of A320Systems.switching and the legend of each position. */
+const SRC_KNOBS: Record<string, { key: 'attHdg' | 'airData' | 'eisDmc' | 'ndXfr'; legend: string[] }> = {
+  ecam_att_hdg: { key: 'attHdg', legend: ['CAPT 3', 'NORM', 'F/O 3'] }, ecam_air_data: { key: 'airData', legend: ['CAPT 3', 'NORM', 'F/O 3'] },
+  ecam_eis_dmc: { key: 'eisDmc', legend: ['CAPT 3', 'NORM', 'F/O 3'] }, ecam_nd_xfr: { key: 'ndXfr', legend: ['CAPT', 'NORM', 'F/O'] },
+};
+const BRT_KNOBS: Record<string, 'uecam' | 'lecam'> = { ecam_brt_upper: 'uecam', ecam_brt_lower: 'lecam' };
 const FCU_TOGGLES = new Set(['ap1', 'ap2', 'a-thr', 'appr', 'loc', 'exped', 'fd1', 'fd2', 'arpt', 'arpt.001', 'cstr', 'cstr.001', 'wpt', 'wpt.001', 'vord', 'vord.001', 'ndb', 'ndb.001', 'ils', 'ils2', 'hdg-vs', 'spd-mach', 'metric_alt', 'alt-sel-mode', 'vor-adf1', 'vor-adf2', 'vor-adf-1-right', 'vor-adf-2-right', 'master_warning', 'master_caution', 'chrono_btn', 'chrono_reset', 'abs_low', 'abs_med', 'abs_max', 'ecam_all', 'ecam_clr_l', 'ecam_clr_r', 'ecam_rcl', 'ecam_emer_canc', 'ecam_to_config', 'gear_lever', 'ParkBrk', 'rev_l', 'rev_r', 'gravity_gear', 'tiller', 'tillerFo', 'RudderTrim', 'RudderTrimReset', 'thr_l_button', 'thr_r_button', 'pfd_nd_xfr_sw', 'pfd_nd_xfr_sw2', 'terr_on_nd_l', 'terr_on_nd_r', 'iesi_btn_bugs', 'iesi_btn_ls', 'iesi_btn_minus', 'iesi_btn_plus', 'iesi_btn_rst', 'clock_set', 'et_knob', 'HeadsetHangerCpt', 'extinguisher', 'brk_fan', 'FuelXFeedBtn']);
-const SCREENS: Record<string, 'pfd' | 'nd' | 'uecam' | 'lecam' | 'mcdu1' | 'mcdu2' | 'isis' | 'clock'> = { 'pfd1.screen': 'pfd', 'pfd2.screen': 'pfd', 'ND.screen': 'nd', 'ND_R.screen': 'nd', 'uecam.screen': 'uecam', 'uecam.screen2': 'uecam', 'lecam.screen': 'lecam', 'mcdu1.screen': 'mcdu1', 'mcdu2.screen': 'mcdu2', iesi_screen: 'isis', clock_display: 'clock' };
+const SCREENS: Record<string, 'pfd' | 'pfd2' | 'nd' | 'nd2' | 'uecam' | 'lecam' | 'mcdu1' | 'mcdu2' | 'isis' | 'clock'> = { 'pfd1.screen': 'pfd', 'pfd2.screen': 'pfd2', 'ND.screen': 'nd', 'ND_R.screen': 'nd2', 'uecam.screen': 'uecam', 'uecam.screen2': 'uecam', 'lecam.screen': 'lecam', 'mcdu1.screen': 'mcdu1', 'mcdu2.screen': 'mcdu2', iesi_screen: 'isis', clock_display: 'clock' };
+/** EFIS control panels: control id -> side (0 CAPT, 1 F/O) and function. Every id below exists in the upstream GLB. */
+type EfisFn = 'fd' | 'ls' | 'cstr' | 'wpt' | 'vord' | 'ndb' | 'arpt' | 'mode' | 'range' | 'baro' | 'unit' | 'nav0' | 'nav1' | 'xfr' | 'pfd' | 'nd' | 'ndOuter' | 'terr';
+const EFIS_MAP: Record<string, { side: 0 | 1; fn: EfisFn }> = {
+  fd1: { side: 0, fn: 'fd' }, fd2: { side: 1, fn: 'fd' }, ils: { side: 0, fn: 'ls' }, ils2: { side: 1, fn: 'ls' },
+  cstr: { side: 0, fn: 'cstr' }, 'cstr.001': { side: 1, fn: 'cstr' }, wpt: { side: 0, fn: 'wpt' }, 'wpt.001': { side: 1, fn: 'wpt' }, vord: { side: 0, fn: 'vord' }, 'vord.001': { side: 1, fn: 'vord' },
+  ndb: { side: 0, fn: 'ndb' }, 'ndb.001': { side: 1, fn: 'ndb' }, arpt: { side: 0, fn: 'arpt' }, 'arpt.001': { side: 1, fn: 'arpt' },
+  nd_mode: { side: 0, fn: 'mode' }, nd_mode_fo: { side: 1, fn: 'mode' }, nd_range: { side: 0, fn: 'range' }, nd_range_fo: { side: 1, fn: 'range' },
+  qnh_cpt_knb: { side: 0, fn: 'baro' }, qnh_fo_knb: { side: 1, fn: 'baro' }, qnh_cpt_sw: { side: 0, fn: 'unit' }, qnh_fo_sw: { side: 1, fn: 'unit' },
+  'vor-adf1': { side: 0, fn: 'nav0' }, 'vor-adf2': { side: 0, fn: 'nav1' }, 'vor-adf-1-right': { side: 1, fn: 'nav0' }, 'vor-adf-2-right': { side: 1, fn: 'nav1' },
+  pfd_nd_xfr_sw: { side: 0, fn: 'xfr' }, pfd_nd_xfr_sw2: { side: 1, fn: 'xfr' },
+  pfd_brt_cpt: { side: 0, fn: 'pfd' }, pfd_brt_fo: { side: 1, fn: 'pfd' }, brightness_nd_2_cpt: { side: 0, fn: 'nd' }, brightness_nd_2_fo: { side: 1, fn: 'nd' }, brightness_nd_1_cpt: { side: 0, fn: 'ndOuter' }, brightness_nd_1_fo: { side: 1, fn: 'ndOuter' },
+  terr_on_nd_l: { side: 0, fn: 'terr' }, terr_on_nd_r: { side: 1, fn: 'terr' },
+};
+/** Lever direction of the ADF / OFF / VOR switches (positive turn about the manifest axis swings the lever to the captain's left = ADF). */
+const NAV_SWITCH_SIGN = -1;
+const OPT_FN = new Set<string>(['cstr', 'wpt', 'vord', 'ndb', 'arpt']);
+/** Pointer angle (degrees clockwise from 12 o'clock) of each knob's mesh at rest, measured from the model's pointer mark. */
+const KNOB_REST_DEG: Record<string, number> = { nd_mode: -90, nd_mode_fo: -90, nd_range: -90, nd_range_fo: -90 };   // verified against a straight-on render: the mesh rests on its first detent (LS / 10 NM)
+const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
+const briOf = (b: number) => (b < 0.03 ? 0 : Math.min(1, 0.35 + 0.8 * b));
 const HIDE = /^hud|hud_|\.tmp$|^dummy|glass|^fcu_hud\.plug|ovh_eng_iae|glare_ovh_eng_iae|fcu_labels_hud|^visor_glass|^WindowGlass/i;
 const FCU_IND = new Set(['spd.ind', 'hdg.ind', 'alt.ind', 'vs.ind', 'lvlch.ind', 'mach.ind', 'trk.ind', 'trk2.ind', 'fpa.ind', 'fpa.ind.001', 'vs.ind.001', 'hdg2.ind', 'spd.dash', 'lat.dash', 'vs.dash', 'ver.fmgc', 'lat.fmgc', 'spd.fmgc']);
 const prettify = (n: string) => n.replace(/(Btn|Knb|Swtch|Switch)$/, '').replace(/\.(cpt|fo)$/, m => (m === '.cpt' ? ' (CAPT)' : ' (F/O)')).replace(/[_-]/g, ' ').replace(/([a-z])([A-Z0-9])/g, '$1 $2').toUpperCase();
@@ -148,7 +182,9 @@ export class Cockpit {
   host?: CockpitHost; sys = new A320Systems(); mcdu = [new Mcdu(), new Mcdu()];
   ready: Promise<void>; loaded = false; fallback?: ProceduralCockpit; daylight = 1;
   zoom = 1; private zoomT = 1; private fovCur = 68; private fovT = 68;
-  private groups = new Map<string, Group>(); private byNode = new Map<THREE.Object3D, Group>(); private lampNodes: { node: THREE.Mesh; base: string; kind: 'led' | 'leg'; letter: string; row: number }[] = [];
+  private groups = new Map<string, Group>(); private byNode = new Map<THREE.Object3D, Group>(); private lampNodes: { node: THREE.Mesh; base: string; kind: 'led' | 'leg'; letter: string; row: number; m0?: THREE.Matrix4 }[] = [];
+  private fcuInd = new Map<string, THREE.Mesh>(); private baro: { cv: HTMLCanvasElement; tex: THREE.CanvasTexture; key: string; side: 0 | 1 }[] = []; private slideDir = new Map<string, number>();
+  private screenDefs: Record<string, Screen> = {}; private screenMesh: Map<string, THREE.Mesh> = new Map();
   private screens: Screen[] = []; private fcuCanvas?: HTMLCanvasElement; private fcuTex?: THREE.CanvasTexture; private fcuKey = '';
   private hemi = new THREE.HemisphereLight(0xffffff, 0x777777, 2); private sun = new THREE.DirectionalLight(0xffffff, 1.6);
   private cur = { pos: new THREE.Vector3(), yaw: 0, pitch: 0 }; private t = new THREE.Vector3(); private tBody = new THREE.Vector3();
@@ -188,11 +224,11 @@ export class Cockpit {
     const addPart = (g: Group, m: THREE.Mesh) => { m.updateMatrix(); m.matrixAutoUpdate = false; g.parts.push({ node: m, m0: m.matrix.clone() }); used.add(m); const b = new THREE.Box3().setFromObject(m); g.box.union(b); };
     for (const m of all) {
       const n = m.name; if (HIDE.test(n)) { m.visible = false; used.add(m); continue; }
-      if (SCREENS[n]) continue; if (FCU_IND.has(n)) { m.visible = false; used.add(m); continue; }
+      if (SCREENS[n]) continue; if (FCU_IND.has(n)) { this.fcuInd.set(n, m); m.visible = false; used.add(m); continue; }
       const leg = baseOfLegend(n);
       if (leg) { this.lampNodes.push({ node: m, base: leg.base, kind: 'leg', letter: leg.letter, row: leg.row }); used.add(m); continue; }
       const lb = n.match(/^(.*?)_(?:led|lit)(\.cpt|\.fo|\.ovh)?(\.\d+)?$/);
-      if (lb || isLed(n)) { this.lampNodes.push({ node: m, base: lb ? lb[1] + (lb[2] ?? '') : n.replace(/(_led|_on|_lit|_illuminated)(\.\w+)?$/, ''), kind: 'led', letter: '', row: 0 }); m.visible = false; used.add(m); continue; }
+      if (lb || isLed(n)) { this.lampNodes.push({ node: m, base: lb ? lb[1] + (lb[2] ?? (/^(arpt|cstr|wpt|vord|ndb)$/.test(lb[1]) ? (lb[3] ?? '') : '')) : n.replace(/(_led|_on|_lit|_illuminated)(\.\w+)?$/, ''), kind: 'led', letter: '', row: 0 }); m.visible = false; used.add(m); continue; }
       if (n === 'atc_screen' || n === 'main_panel_screen') { used.add(m); continue; }
     }
     for (const m of all) {
@@ -202,7 +238,7 @@ export class Cockpit {
       if (/\.mark$/.test(n) && nodes.has(n.replace(/\.mark$/, ''))) { const g = mkGroup(n.replace(/\.mark$/, ''), 'knob'); addPart(g, m); continue; }
       if (/\.cpt$|\.fo$/.test(n) && MCDU_KEYS.has(key)) { kind = 'key'; id = (side === 'fo' ? 'F:' : 'C:') + key; }
       else if (/(Knb)$/.test(n) || n in KNOB_STEPS || /^(brightness_|pfd_brt|ecam_brt|speaker_volume|lt_knb|flood_lt_main$|flood_lt_ped$|integ_lt$|fcu_integ_knb|light_console|nd_range|nd_mode|radar_(gain|tilt|gcs)|audio_pa_rot|radio_rot)/.test(n)) kind = 'knob';
-      else if (/Swtch$|Switch$/.test(n) || SWITCH3.has(n) || /_sw$|_sw\.(cpt|fo)$|^qnh_(cpt|fo)_sw$|^(land_sw|NoseLtSwtch|trim_?\w*)$/.test(n)) kind = 'switch';
+      else if (/Swtch$|Switch$/.test(n) || SWITCH3.has(n) || /^pfd_nd_xfr_sw2?$/.test(n) || /_sw$|_sw\.(cpt|fo)$|^qnh_(cpt|fo)_sw$|^(land_sw|NoseLtSwtch|trim_?\w*)$/.test(n)) kind = 'switch';
       else if (/(Guard|Prot|Cover)(\.\d+)?$/.test(n) || /^(APUFireCover|Eng[12]FireCover)$/.test(n)) kind = 'guard';
       else if (/Btn$/.test(n) || /^(OVH_button\.\d+|ecam_(?!.*(_led|_lit)$)\w+|firebtn\w*|PedestalFireBtn\.(cpt|fo)|EmerGenTest(\.\d+)?|Eng[12]FireTst|APUFireTst|CVR\w+|\w+Call|EvacHornOff|EvacCapt-Purs|SEC\dBtn|CargoSmkTest|LeftRainTest|RightRainTest|DLSSys(Next|Prev|SelCtl)Btn|atc_\w+|radio_\w+|audio_\w+|\w+\.(cpt|fo))$/.test(n) || FCU_TOGGLES.has(n) || /^(spd-sel|hdg_sel|alt-sel|vs-sel)$/.test(n)) kind = 'push';
       else if (/^(gear_lever|FlapsLever|SpdBrk|ParkBrk|thr_[lr]_body|Lcutoff|Rcutoff|eng_mode)$/.test(n)) kind = 'lever';
@@ -218,7 +254,7 @@ export class Cockpit {
       g.label = g.id.startsWith('C:') ? `MCDU KEY ${g.id.slice(2).toUpperCase()}` : g.id.startsWith('F:') ? `MCDU KEY ${g.id.slice(2).toUpperCase()} (F/O)` : prettify(g.id);
       if (g.kind === 'stick') g.label = 'SIDESTICK';
       for (const p of g.parts) this.interactive.push(p.node);
-      if (!ON_WHEN_IN.has(g.id) && !DEFAULT_OFF.has(g.id)) g.pos = 1; else g.pos = 0; if (g.kind === 'switch') g.pos = 0;
+      if (!ON_WHEN_IN.has(g.id) && !DEFAULT_OFF.has(g.id)) g.pos = 1; else g.pos = 0; if (g.kind === 'switch') g.pos = 0; if (g.id in POS0) g.pos = POS0[g.id];
       for (const p of g.parts) this.byNode.set(p.node, g);
     }
     // lamp nodes (LEDs) default hidden; legends keep texture
@@ -253,12 +289,14 @@ export class Cockpit {
     const mk = (key: string, maxRes: number, hz: number, prio: number, draw: Screen['draw'], aspect = 1) => { const s = new Screen(key, maxRes, 1 / hz, aspect, prio, draw); s.idx = this.screens.length; this.screens.push(s); return s; };
     const C = () => this.ctx;
     const defs: Record<string, Screen> = {
-      pfd: mk('pfd', big, 30, 3, (g, W, H) => drawPFD(g, W, H, C())), nd: mk('nd', big, 20, 2, (g, W, H) => drawND(g, W, H, C())),
-      uecam: mk('uecam', mid, 15, 1.5, (g, W, H) => drawEWD(g, W, H, C())), lecam: mk('lecam', mid, 15, 1.2, (g, W, H) => drawSD(g, W, H, C())),
+      pfd: mk('pfd', big, 30, 3, (g, W, H) => (this.sys.efis[0].xfr ? drawND(g, W, H, C(), 0) : drawPFD(g, W, H, C(), 0))), nd: mk('nd', big, 20, 2, (g, W, H) => (this.sys.efis[0].xfr ? drawPFD(g, W, H, C(), 0) : drawND(g, W, H, C(), 0))),
+      pfd2: mk('pfd2', big, 30, 3, (g, W, H) => (this.sys.efis[1].xfr ? drawND(g, W, H, C(), 1) : drawPFD(g, W, H, C(), 1))), nd2: mk('nd2', big, 20, 2, (g, W, H) => (this.sys.efis[1].xfr ? drawPFD(g, W, H, C(), 1) : drawND(g, W, H, C(), 1))),
+      uecam: mk('uecam', mid, 15, 1.5, (g, W, H) => drawEWD(g, W, H, C())), lecam: mk('lecam', mid, 15, 1.2, (g, W, H) => (this.sys.duOn('uecam') ? drawSD(g, W, H, C()) : drawEWD(g, W, H, C()))),
       mcdu1: mk('mcdu1', mid, 8, 1, (g, W, H) => this.mcdu[0].draw(g, W, H, C())), mcdu2: mk('mcdu2', mid, 8, 1, (g, W, H) => this.mcdu[1].draw(g, W, H, C())),
       isis: mk('isis', 768, 20, 1.6, (g, W, H) => drawISIS(g, W, H, C())), clock: mk('clock', 512, 2, 0.5, (g, W, H) => drawClock(g, W, H, C())),
     };
-    for (const [name, key] of Object.entries(SCREENS)) { const m = nodes.get(name); if (!m) continue; const s = defs[key]; m.material = s.mat; s.meshes.push(m); if (name === 'uecam.screen2') m.visible = false; }
+    this.screenDefs = defs;
+    for (const [name, key] of Object.entries(SCREENS)) { const m = nodes.get(name); if (!m) continue; const s = defs[key]; m.material = s.mat; s.meshes.push(m); this.screenMesh.set(name, m); if (name === 'uecam.screen2') m.visible = false; }
   }
 
   private buildFcu(nodes: Map<string, THREE.Mesh>) {
@@ -270,6 +308,13 @@ export class Cockpit {
     const n = new THREE.Vector3(0.957, 0.289, 0).normalize(), up = new THREE.Vector3(-0.289, 0.957, 0), xa = new THREE.Vector3(0, 0, -1);
     const m = new THREE.Matrix4().makeBasis(xa, up, n); mesh.quaternion.setFromRotationMatrix(m); mesh.position.set(-0.3795 + n.x * 0.0012, 0.505 + n.y * 0.0012, zc); mesh.renderOrder = 5;
     this.root.add(mesh); this.fcuCanvas = cv; this.fcuTex = tex; void nodes;
+    // EFIS BARO windows (blank in the model): centres / sizes measured on the panel, same plane as the FCU strip
+    for (let i = 0; i < 2; i++) {
+      const z = i === 0 ? 0.251 : -0.2397;
+      const bc = document.createElement('canvas'); bc.width = 256; bc.height = 112; const bt = new THREE.CanvasTexture(bc); bt.colorSpace = THREE.SRGBColorSpace; bt.anisotropy = 8;
+      const bm = new THREE.Mesh(new THREE.PlaneGeometry(0.0306, 0.0136), new THREE.MeshBasicMaterial({ map: bt, transparent: true, depthWrite: false, toneMapped: false }));
+      bm.quaternion.setFromRotationMatrix(m); bm.position.set(-0.3722 + n.x * 0.0008, 0.4967 + n.y * 0.0008, z); bm.renderOrder = 5; this.root.add(bm); this.baro.push({ cv: bc, tex: bt, key: '', side: i as 0 | 1 });
+    }
   }
 
   // ====================================================================== EFB tablet (captain's side window mount)
@@ -421,7 +466,7 @@ export class Cockpit {
     const info = describeControl(p.g.id);
     return { id: p.g.id, label: p.g.kind === 'key' ? p.g.label : info.name, value: this.stateText(p.g), hint: this.hint(p.g), desc: info.text };
   }
-  private hint(g: Group) { return g.kind === 'knob' || g.id === 'spd-sel' || g.id === 'hdg_sel' || g.id === 'alt-sel' ? 'Wheel / drag to turn · click = push · right-click = pull' : g.kind === 'lever' ? 'Drag to move · detents snap' : g.kind === 'stick' ? 'Drag to fly' : g.kind === 'key' ? 'Click to press' : 'Click to operate'; }
+  private hint(g: Group) { const ef = EFIS_MAP[g.id]; if (ef) { const t = this.efisHint(ef.fn); if (t) return t; } return g.kind === 'knob' || g.id === 'spd-sel' || g.id === 'hdg_sel' || g.id === 'alt-sel' ? 'Wheel / drag to turn · click = push · right-click = pull' : g.kind === 'lever' ? 'Drag to move · detents snap' : g.kind === 'stick' ? 'Drag to fly' : g.kind === 'key' ? 'Click to press' : 'Click to operate'; }
   stateText(g: Group): string {
     const s = this.sys, h = this.host, id = g.id;
     switch (id) {
@@ -435,10 +480,10 @@ export class Cockpit {
       case 'thr_l_body': return thrDetentName(h?.fm.ctl.throttle ?? 0, !!h?.fm.ctl.reverse); case 'thr_r_body': return thrDetentName(Math.min(1, Math.max(0, (h?.fm.ctl.throttle ?? 0) + (h?.fm.ctl.thrOffset ?? 0))), !!h?.fm.ctl.reverse);
       case 'SpdBrk': return s.spoilerArm ? 'ARMED' : `${Math.round((h?.fm.ctl.speedbrake ?? 0) * 100)}%`;
       case 'abs_low': return s.autobrake === 1 ? 'ON' : 'OFF'; case 'abs_med': return s.autobrake === 2 ? 'ON' : 'OFF'; case 'abs_max': return s.autobrake === 3 ? 'ON' : 'OFF';
-      case 'qnh_cpt_knb': return s.std ? 'STD' : s.qnhInHg ? (s.qnh * 0.02953).toFixed(2) + ' inHg' : `${Math.round(s.qnh)} hPa`;
-      case 'nd_range': return `${[10, 20, 40, 80, 160, 320][s.ndRange]} NM`; case 'nd_mode': return ['LS', 'VOR', 'NAV', 'ARC', 'PLAN'][s.ndMode];
+      case 'iesi_baro_knb': return s.isis.std ? 'STD' : `${Math.round(s.isis.hpa)} hPa`;
       case 'BeaconLtSwtch': return h?.lights.beacon ? 'ON' : 'OFF'; case 'SeatBeltSwtch': return h?.seatbelt ? 'ON' : 'OFF';
     }
+    const ef = EFIS_MAP[id]; if (ef) { const t = this.efisText(ef.side, ef.fn); if (t) return t; }
     if (g.kind === 'key') return '';
     if (g.kind === 'switch') return SWITCH3.has(g.id) ? (['OFF / LOW', 'AUTO / MID', 'ON / HIGH'][g.pos] ?? '') : g.pos ? 'ON' : 'OFF';
     if (g.kind === 'guard') return g.pos ? 'OPEN' : 'CLOSED';
@@ -459,12 +504,17 @@ export class Cockpit {
     if (g.id === 'rev_l' || g.id === 'rev_r') { h.action('rev'); return { id: g.id, handled: true }; }
     if (g.kind === 'lever') { this.active = { g, sy: 0, acc: 0, v0: this.leverValue(g), kind: 'lever' }; return { id: g.id, handled: true }; }
     if (g.kind === 'key') { this.mcduKey(g.id); g.press = 1; return { id: g.id, handled: true }; }
-    const fcuKnob = g.id === 'spd-sel' || g.id === 'hdg_sel' || g.id === 'alt-sel' || g.id === 'vs-sel';
+    if (ECP_KEYS.has(g.id)) { this.sys.ecam.down(g.id); g.press = 1; this.active = { g, sy: 0, acc: 0, v0: 0, kind: 'hold' }; return { id: g.id, handled: true }; }
+    const fcuKnob = PUSHPULL.has(g.id);
+    if (RING.has(g.id)) { this.stepKnob(g, g.pos ? -1 : 1, false); g.press = 1; return { id: g.id, handled: true }; }
     if (g.kind === 'knob' || fcuKnob) {
       if (fcuKnob) { this.active = { g, sy: 0, acc: 0, v0: 0, kind: 'knob' }; g.press = 1; this.activateKnob(g, button === 2 || shift ? 'pull' : 'push'); return { id: g.id, handled: true }; }
-      this.active = { g, sy: 0, acc: 0, v0: 0, kind: 'knob' }; this.stepKnob(g, button === 2 ? -1 : 1, shift); return { id: g.id, handled: true };
+      this.active = { g, sy: 0, acc: 0, v0: 0, kind: 'knob' };
+      if (SRC_KNOBS[g.id]) { const dir = button === 2 ? -1 : g.pos >= 2 ? -1 : g.pos <= 0 ? 1 : g.angle < 0 ? -1 : 1; g.angle = dir; this.stepKnob(g, dir, false); return { id: g.id, handled: true }; }
+      this.stepKnob(g, button === 2 ? -1 : 1, shift); return { id: g.id, handled: true };
     }
-    this.toggle(g, button === 2 || shift ? -1 : 1); g.press = 1; return { id: g.id, handled: true };
+    this.toggle(g, button === 2 || shift ? -1 : 1); g.press = 1; this.active = { g, sy: 0, acc: 0, v0: 0, kind: 'push' };
+    return { id: g.id, handled: true };
   }
   drag(dx: number, dy: number) {
     const a = this.active; if (!a || !this.host) return false; const c = this.host.fm.ctl;
@@ -481,7 +531,7 @@ export class Cockpit {
     return true;
   }
   release() {
-    const a = this.active; this.active = null; if (!a || !this.host) return;
+    const a = this.active; this.active = null; if (a && ECP_KEYS.has(a.g.id)) this.sys.ecam.up(a.g.id); if (!a || !this.host) return;
     const c = this.host.fm.ctl; if (Math.abs(c.thrOffset) < 0.03) c.thrOffset = 0;
     for (const g of this.groups.values()) g.press = 0;
   }
@@ -491,7 +541,7 @@ export class Cockpit {
     const p = this.pickGroup(ray), e = this.pickEfb(ray);
     if (e && (!p || e.dist < p.hit.distance)) { this.efbShown.wheel(deltaY); return true; }
     if (!p) return false; const g = p.g;
-    const isK = g.kind === 'knob' || /^(spd-sel|hdg_sel|alt-sel|vs-sel)$/.test(g.id) || g.id === 'eng_mode';
+    const isK = g.kind === 'knob' || PUSHPULL.has(g.id) || g.id === 'eng_mode';
     if (g.kind === 'lever' && this.host) { const c = this.host.fm.ctl, d = deltaY > 0 ? -0.05 : 0.05; if (g.id === 'thr_l_body') { const R = c.throttle + c.thrOffset; c.throttle = this.stepDetent(c.throttle, d); c.thrOffset = R - c.throttle; } else if (g.id === 'thr_r_body') c.thrOffset = this.stepDetent(c.throttle + c.thrOffset, d) - c.throttle; else if (g.id === 'FlapsLever') c.flapsIdx = Math.min(4, Math.max(0, c.flapsIdx + (deltaY > 0 ? 1 : -1))); else return false; return true; }
     if (!isK) return false; this.stepKnob(g, deltaY > 0 ? -1 : 1, shift); return true;
   }
@@ -502,38 +552,29 @@ export class Cockpit {
 
   private mcduKey(id: string) { const fo = id.startsWith('F:'), k = id.slice(2); const m = this.mcdu[fo ? 1 : 0]; m.key(k === 'mcdu' ? 'menu' : k); }
 
-  private activateKnob(g: Group, how: 'push' | 'pull') {
-    const h = this.host!, s = this.sys;
-    switch (g.id) {
-      case 'hdg_sel': if (how === 'push') { s.hdgManaged = true; h.action('apnav'); } else { s.hdgManaged = false; h.action('aphdg'); } break;
-      case 'spd-sel': s.spdManaged = how === 'push'; break;
-      case 'alt-sel': s.altStep1000 = how === 'pull' ? !s.altStep1000 : s.altStep1000; if (how === 'push') h.toast('ALT: level change / open', 'info'); break;
-      case 'vs-sel': if (how === 'push') { s.vsMode = false; h.ap.altFt = h.ap.altFt; } else { s.vsMode = true; this.applyVs(); } break;
-    }
-  }
-  private applyVs() { const h = this.host!; const ap = h.ap as unknown as { vsLimit?: number }; if (this.sys.vsMode) ap.vsLimit = Math.min(15, Math.max(1, Math.abs(this.sys.vsTarget) / 196.85)); else ap.vsLimit = 8; }
   private stepKnob(g: Group, dir: number, shift: boolean) {
     const h = this.host; if (!h) return; const s = this.sys; const id = g.id;
     switch (id) {
-      case 'spd-sel': h.setApTarget('spd', h.ap.spd + dir * (shift ? 10 : 1)); return;
-      case 'hdg_sel': h.setApTarget('hdg', (h.ap.hdg + dir * (shift ? 10 : 1) + 360) % 360); return;
-      case 'alt-sel': h.setApTarget('alt', h.ap.altFt + dir * (shift || s.altStep1000 ? 1000 : 100)); return;
-      case 'vs-sel': s.vsTarget = Math.max(-6000, Math.min(6000, s.vsTarget + dir * 100)); s.vsMode = true; this.applyVs(); return;
-      case 'qnh_cpt_knb': case 'qnh_fo_knb': case 'iesi_baro_knb': s.std = false; s.qnh = Math.max(950, Math.min(1050, s.qnh + dir)); g.angle += dir * 0.2; return;
-      case 'nd_range': case 'nd_range_fo': s.ndRange = Math.max(0, Math.min(5, s.ndRange + dir)); g.pos = s.ndRange; return;
-      case 'nd_mode': case 'nd_mode_fo': s.ndMode = Math.max(0, Math.min(4, s.ndMode + dir)); g.pos = s.ndMode; return;
+      case 'spd-sel': case 'hdg_sel': case 'alt-sel': case 'vs-sel': this.fcuTurn(g, dir, shift); return;
+      case 'qnh_cpt_knb': case 'qnh_fo_knb': s.efisBaroTurn(id === 'qnh_fo_knb' ? 1 : 0, dir); g.angle += dir * 0.2; return;
+      case 'qnh_cpt_sw': case 'qnh_fo_sw': s.efisBaroUnit(id === 'qnh_fo_sw' ? 1 : 0, dir < 0); return;
+      case 'iesi_baro_knb': s.isis.std = false; s.isis.hpa = Math.max(950, Math.min(1050, s.isis.hpa + dir)); g.angle += dir * 0.2; return;
+      case 'alt-sel-mode': g.pos = dir > 0 ? 1 : 0; s.altStep1000 = g.pos === 1; return;
+      case 'fcu_integ_knb1': case 'fcu_integ_knb2': s.bright.fcu = this.clampN(s.bright.fcu + dir * 0.1, 0.2, 1); g.angle += dir * 0.3; return;
+      case 'nd_range': case 'nd_range_fo': { const e = s.efis[id === 'nd_range_fo' ? 1 : 0]; e.ndRange = Math.max(0, Math.min(5, e.ndRange + dir)); return; }
+      case 'nd_mode': case 'nd_mode_fo': { const e = s.efis[id === 'nd_mode_fo' ? 1 : 0]; e.ndMode = Math.max(0, Math.min(4, e.ndMode + dir)); return; }
       case 'eng_mode': s.engMode = Math.max(0, Math.min(2, s.engMode + dir)) as 0 | 1 | 2; g.pos = s.engMode; return;
       case 'XbleedKnb': g.pos = Math.max(0, Math.min(2, (g.pos || 1) + dir)); s.xbleed = g.pos === 0 ? 0 : 1; return;
-      case 'pfd_brt_cpt': case 'pfd_brt_fo': s.bright.pfd = Math.max(0.2, Math.min(1, s.bright.pfd + dir * 0.1)); g.angle += dir * 0.3; return;
-      case 'brightness_nd_cpt': case 'brightness_nd_fo': s.bright.nd = Math.max(0.2, Math.min(1, s.bright.nd + dir * 0.1)); g.angle += dir * 0.3; return;
-      case 'ecam_brt_upper': s.bright.uecam = Math.max(0.2, Math.min(1, s.bright.uecam + dir * 0.1)); g.angle += dir * 0.3; return;
-      case 'ecam_brt_lower': s.bright.lecam = Math.max(0.2, Math.min(1, s.bright.lecam + dir * 0.1)); g.angle += dir * 0.3; return;
+      case 'pfd_brt_cpt': case 'pfd_brt_fo': { const i = id === 'pfd_brt_fo' ? 1 : 0; s.bright.pfd[i] = clamp01(s.bright.pfd[i] + dir * 0.05); return; }
+      case 'brightness_nd_2_cpt': case 'brightness_nd_2_fo': { const i = id === 'brightness_nd_2_fo' ? 1 : 0; s.bright.nd[i] = clamp01(s.bright.nd[i] + dir * 0.05); return; }
+      case 'brightness_nd_1_cpt': case 'brightness_nd_1_fo': { const i = id === 'brightness_nd_1_fo' ? 1 : 0; s.bright.ndOuter[i] = clamp01(s.bright.ndOuter[i] + dir * 0.05); return; }
+      case 'ecam_brt_upper': case 'ecam_brt_lower': { const k = BRT_KNOBS[id]; s.bright[k] = Math.max(0, Math.min(1, Math.round((s.bright[k] + dir * 0.1) * 10) / 10)); return; }
+      case 'ecam_att_hdg': case 'ecam_air_data': case 'ecam_eis_dmc': case 'ecam_nd_xfr': { g.pos = Math.max(0, Math.min(2, g.pos + dir)); s.switching[SRC_KNOBS[id].key] = g.pos; s.sw[id] = g.pos; this.routeDisplays(); return; }
     }
     const n = g.steps; const cont = n >= 12;
     g.pos = cont ? g.pos + dir : Math.max(0, Math.min(n - 1, g.pos + dir)); s.sw[id] = g.pos;
   }
-
-  /** Toggle / cycle a push-button, switch or guard and apply its system effect. */
+/** Toggle / cycle a push-button, switch or guard and apply its system effect. */
   private toggle(g: Group, dir: number) {
     const h = this.host!, s = this.sys, id = g.id, fm = h.fm;
     const flip = () => { g.pos = g.pos ? 0 : 1; s.sw[id] = g.pos; return !!g.pos; };
@@ -563,14 +604,16 @@ export class Cockpit {
       case 'SeatBeltSwtch': { cycle(2); if (g.pos === 1 !== h.seatbelt) h.action('belt'); return; }
       case 'Lcutoff': s.master[0] = !s.master[0]; return; case 'Rcutoff': s.master[1] = !s.master[1]; return;
       case 'eng_mode': s.engMode = ((s.engMode + (dir > 0 ? 1 : 2)) % 3) as 0 | 1 | 2; return;
-      case 'ap1': case 'ap2': h.action('ap'); return;
-      case 'a-thr': s.athrArmed = !s.athrArmed; return; case 'appr': h.action('appr'); return; case 'loc': s.sw.loc = s.sw.loc ? 0 : 1; if (s.sw.loc) h.action('apnav'); return;
-      case 'exped': s.exped = !s.exped; if (s.exped) { s.vsMode = false; } return; case 'fd1': s.fd[0] = !s.fd[0]; return; case 'fd2': s.fd[1] = !s.fd[1]; return;
+      case 'ap1': this.apPress(0); return; case 'ap2': this.apPress(1); return;
+      case 'a-thr': s.athrArmed = !s.athrArmed; return; case 'appr': h.action('appr'); return; case 'loc': s.locArmed = !s.locArmed; if (s.locArmed && !h.ap.on) h.toast('LOC armed – engage AP1 / AP2 to capture the localizer', 'info'); return;
+      case 'exped': s.exped = !s.exped; if (s.exped) { s.vsMode = false; } return; 
       case 'hdg-vs': case 'trk-fpa': s.trkFpa = !s.trkFpa; return; case 'spd-mach': s.spdMach = !s.spdMach; return; case 'metric_alt': s.metric = !s.metric; return;
-      case 'arpt': case 'arpt.001': s.ndOverlay.arpt = !s.ndOverlay.arpt; return; case 'cstr': case 'cstr.001': s.ndOverlay.cstr = !s.ndOverlay.cstr; return; case 'wpt': case 'wpt.001': s.ndOverlay.wpt = !s.ndOverlay.wpt; return;
-      case 'vord': case 'vord.001': s.ndOverlay.vord = !s.ndOverlay.vord; return; case 'ndb': case 'ndb.001': s.ndOverlay.ndb = !s.ndOverlay.ndb; return; case 'ils': case 'ils2': s.ndOverlay.ls = !s.ndOverlay.ls; return;
-      case 'qnh_cpt_sw': case 'qnh_fo_sw': case 'iesi_btn_rst': s.std = !s.std; return;
-      case 'master_warning': s.masterWarn = false; h.action('ackWarn'); return; case 'master_caution': s.masterCaut = false; h.action('ackWarn'); return;
+      case 'fd1': case 'fd2': case 'ils': case 'ils2': case 'cstr': case 'cstr.001': case 'wpt': case 'wpt.001': case 'vord': case 'vord.001': case 'ndb': case 'ndb.001': case 'arpt': case 'arpt.001':
+      case 'pfd_nd_xfr_sw': case 'pfd_nd_xfr_sw2': case 'terr_on_nd_l': case 'terr_on_nd_r': { const m = EFIS_MAP[id], e = s.efis[m.side];
+        if (m.fn === 'fd') e.fd = !e.fd; else if (m.fn === 'ls') e.ls = !e.ls; else if (OPT_FN.has(m.fn)) s.efisOpt(m.side, m.fn as 'cstr'); else if (m.fn === 'xfr') e.xfr = !e.xfr; else s.terrOnNd[m.side] = !s.terrOnNd[m.side]; return; }
+      case 'vor-adf1': case 'vor-adf2': case 'vor-adf-1-right': case 'vor-adf-2-right': { const m = EFIS_MAP[id], e = s.efis[m.side], i = m.fn === 'nav1' ? 1 : 0, order = [0, 1, -1]; e.nav[i] = order[(order.indexOf(e.nav[i]) + (dir > 0 ? 1 : 2)) % 3]; return; }   // OFF -> VOR -> ADF -> OFF
+      case 'iesi_btn_rst': s.isis.std = !s.isis.std; return;
+      case 'master_warning': s.ecam.acknowledgeMaster(); h.action('ackWarn'); return; case 'master_caution': s.masterCaut = false; h.action('ackWarn'); return;
       case 'chrono_btn': s.chronoRun = !s.chronoRun; s.chronoShow = true; return; case 'chrono_reset': s.chronoT = 0; s.chronoRun = false; s.chronoShow = false; return;
       case 'abs_low': s.autobrake = s.autobrake === 1 ? 0 : 1; return; case 'abs_med': s.autobrake = s.autobrake === 2 ? 0 : 2; return; case 'abs_max': s.autobrake = s.autobrake === 3 ? 0 : 3; return;
       case 'AnnunciatorLtSwtch': s.lampTest = 3; return; case 'APUFireTst': case 'Eng1FireTst': case 'Eng2FireTst': s.lampTest = 2; return;
@@ -592,6 +635,58 @@ export class Cockpit {
     if (g.kind === 'switch') { cycle(SWITCH3.has(id) ? 3 : 2); return; }
     if (g.kind === 'guard') { flip(); return; }
     flip();
+  }
+
+  // ====================================================================== EFIS control panels (CAPT / F/O)
+  private efisText(side: 0 | 1, fn: EfisFn): string {
+    const e = this.sys.efis[side], b = (v: number) => (v < 0.03 ? 'OFF' : `${Math.round(v * 100)} %`);
+    switch (fn) {
+      case 'fd': return e.fd ? 'ON · bars shown' : 'OFF · bars removed'; case 'ls': return e.ls ? 'ON · LOC/GS scales' : 'OFF';
+      case 'cstr': case 'wpt': case 'vord': case 'ndb': case 'arpt': return e.opt === fn ? 'ON' : 'OFF';
+      case 'mode': return ND_MODE_NAMES[e.ndMode]; case 'range': return `${ND_RANGES[e.ndRange]} NM`;
+      case 'baro': return e.std ? 'STD (pulled)' : e.unitInHg ? `${(e.inHg / 100).toFixed(2)} inHg (QNH)` : `${Math.round(e.hpa)} hPa (QNH)`;
+      case 'unit': return e.unitInHg ? 'inHg' : 'hPa'; case 'nav0': return ['ADF', 'OFF', 'VOR'][e.nav[0] + 1]; case 'nav1': return ['ADF', 'OFF', 'VOR'][e.nav[1] + 1];
+      case 'xfr': return e.xfr ? 'PFD / ND SWAPPED' : 'NORM';
+      case 'pfd': return b(this.sys.bright.pfd[side]); case 'nd': return b(this.sys.bright.nd[side]); case 'ndOuter': return b(this.sys.bright.ndOuter[side]);
+      case 'terr': return this.sys.terrOnNd[side] ? 'ON' : 'OFF';
+    }
+  }
+  private efisHint(fn: EfisFn): string {
+    switch (fn) {
+      case 'baro': return 'Wheel / drag = set pressure · left-click = PUSH (QNH) · right-click or Shift = PULL (STD)';
+      case 'unit': return 'Click or wheel = hPa / inHg';
+      case 'mode': case 'range': return 'Wheel / drag to rotate · click = next · right-click = previous';
+      case 'nav0': case 'nav1': return 'Click: OFF → VOR → ADF → OFF · right-click reverses';
+      case 'pfd': case 'nd': case 'ndOuter': return 'Wheel / drag to rotate · fully counter-clockwise = OFF';
+      default: return '';
+    }
+  }
+  /** Keeps the posed state of the 3-position / 2-position EFIS switches equal to the systems state (also after another code path changed it). */
+  private syncEfisGroups() {
+    for (const id in EFIS_MAP) { const g = this.groups.get(id); if (!g) continue; const m = EFIS_MAP[id], e = this.sys.efis[m.side]; if (m.fn === 'nav0') g.pos = e.nav[0] + 1; else if (m.fn === 'nav1') g.pos = e.nav[1] + 1; else if (m.fn === 'xfr') g.pos = e.xfr ? 1 : 0; }
+  }
+  /** Pose of EFIS knobs / levers from the real state. Rotation sense: positive turn about an axis pointing at the pilot is counter-clockwise, so the pointer angle (clockwise
+   *  from 12 o'clock) is mapped with the sign of the axis direction; the baro knob also slides out along the panel normal when pulled (STD) and dips when pressed. */
+  private animateEfis(g: Group): boolean {
+    const m = EFIS_MAP[g.id]; if (!m) return false; const e = this.sys.efis[m.side], rad = Math.PI / 180, br = this.sys.bright;
+    let phi = 0, push = 0, lever = false;
+    switch (m.fn) {
+      case 'mode': phi = -90 + e.ndMode * 45; break;
+      case 'range': phi = -90 + e.ndRange * 45; break;
+      case 'baro': phi = g.angle / rad; push = e.std ? 0.004 : 0; break;
+      case 'unit': phi = e.unitInHg ? -40 : 40; break;
+      case 'pfd': phi = -135 + 270 * br.pfd[m.side]; break; case 'nd': phi = -135 + 270 * br.nd[m.side]; break; case 'ndOuter': phi = -135 + 270 * br.ndOuter[m.side]; break;
+      case 'nav0': case 'nav1': lever = true; break;
+      default: return false;
+    }
+    let ax = g.axis;
+    if (lever && !ax) { const src = this.groups.get(g.id === 'vor-adf-1-right' ? 'vor-adf2' : 'vor-adf1')?.axis; if (src) ax = g.axis = { pivot: [src.pivot[0], src.pivot[1], g.box.getCenter(this.cv3).z], direction: src.direction }; }
+    ax ??= this.axisOf(g);
+    const th = lever ? NAV_SWITCH_SIGN * e.nav[m.fn === 'nav1' ? 1 : 0] * 0.5 : (ax.direction[0] > 0 ? -1 : 1) * (phi - (KNOB_REST_DEG[g.id] ?? 0)) * rad;
+    this.rotMat(g.xf, ax.pivot[0], ax.pivot[1], ax.pivot[2], ax.direction[0], ax.direction[1], ax.direction[2], th);
+    const dz = push - g.press * 0.0015;
+    if (dz) { const n = g.nrm ??= this.panelNormal(g.box.getCenter(new THREE.Vector3())); this.tB.makeTranslation(n.x * dz, n.y * dz, n.z * dz); g.xf.premultiply(this.tB); }
+    this.pose(g); return true;
   }
 
   // ====================================================================== posing (all matrices are model-space, allocation-free)
@@ -620,6 +715,7 @@ export class Cockpit {
   }
   private animate(g: Group, inp: CockpitInputs, d: PanelData) {
     const s = this.sys, ctl = this.host?.fm.ctl;
+    if (EFIS_MAP[g.id] && this.animateEfis(g)) return;
     switch (g.id) {
       case 'thr_l_body': return this.rotAbout(g, [0, -0.09, 0.022], [0, 0, 1], inp.throttle * 0.8);
       case 'thr_r_body': return this.rotAbout(g, [0, -0.09, -0.022], [0, 0, 1], Math.min(1, Math.max(0, inp.throttle + (ctl?.thrOffset ?? 0))) * 0.8);
@@ -674,13 +770,11 @@ export class Cockpit {
   private ledOn(base: string): boolean {
     const s = this.sys, h = this.host!, d = this.ctx.d; if (!s.dc) return false; if (s.lampTest > 0) return true;
     switch (base) {
-      case 'ap1': return h.ap.on; case 'ap2': return false; case 'a-thr': return h.ap.on || s.athrArmed; case 'appr': return h.ap.appr; case 'loc': return !!s.sw.loc; case 'exped': return s.exped; case 'fd1': return s.fd[0]; case 'fd2': return s.fd[1];
-      case 'arpt': case 'arpt.001': return s.ndOverlay.arpt; case 'cstr': case 'cstr.001': return s.ndOverlay.cstr; case 'wpt': case 'wpt.001': return s.ndOverlay.wpt; case 'vord': case 'vord.001': return s.ndOverlay.vord; case 'ndb': case 'ndb.001': return s.ndOverlay.ndb; case 'ils': case 'ils2': return s.ndOverlay.ls;
-      case 'master_warning': return s.masterWarn || d.warn.some((w) => /STALL|FIRE|PULL|OVERSPEED/i.test(w)); case 'master_caution': return s.masterCaut; case 'autoland_light': return h.ap.on && h.ap.appr && !!d.ils?.valid;
+      case 'ap1': return s.apEng[0]; case 'ap2': return s.apEng[1]; case 'a-thr': return h.ap.on || s.athrArmed; case 'appr': return h.ap.appr; case 'loc': return s.locArmed; case 'exped': return s.exped; case 'fd1': return s.efis[0].fd; case 'fd2': return s.efis[1].fd; case 'terr_on_nd_on_l': return s.terrOnNd[0]; case 'terr_on_nd_on_r': return s.terrOnNd[1];
+      case 'arpt': case 'cstr': case 'wpt': case 'vord': case 'ndb': return s.efis[0].opt === base; case 'arpt.001': case 'cstr.001': case 'wpt.001': case 'vord.001': case 'ndb.001': return s.efis[1].opt === base.replace('.001', ''); case 'ils': return s.efis[0].ls; case 'ils2': return s.efis[1].ls;
+      case 'master_warning': return s.warnLit; case 'master_caution': return s.masterCaut; case 'autoland_light': return h.ap.on && h.ap.appr && !!d.ils?.valid;
       case 'abs_low': return s.autobrake === 1; case 'abs_med': return s.autobrake === 2; case 'abs_max': return s.autobrake === 3; case 'dec_low': case 'dec_med': case 'dec_max': return false;
-      case 'ecam_eng': return (s.page ?? s.pageAuto) === 'ENG'; case 'ecam_bleed': return (s.page ?? s.pageAuto) === 'BLEED'; case 'ecam_press': return (s.page ?? s.pageAuto) === 'PRESS'; case 'ecam_elec': return (s.page ?? s.pageAuto) === 'ELEC'; case 'ecam_hyd': return (s.page ?? s.pageAuto) === 'HYD';
-      case 'ecam_fuel': return (s.page ?? s.pageAuto) === 'FUEL'; case 'ecam_apu': return (s.page ?? s.pageAuto) === 'APU'; case 'ecam_cond': return (s.page ?? s.pageAuto) === 'COND'; case 'ecam_door': return (s.page ?? s.pageAuto) === 'DOOR'; case 'ecam_wheel': return (s.page ?? s.pageAuto) === 'WHEEL';
-      case 'ecam_fctl': return (s.page ?? s.pageAuto) === 'F/CTL'; case 'ecam_sts': return (s.page ?? s.pageAuto) === 'STS';
+      case 'ecam_eng': case 'ecam_bleed': case 'ecam_press': case 'ecam_elec': case 'ecam_hyd': case 'ecam_fuel': case 'ecam_apu': case 'ecam_cond': case 'ecam_door': case 'ecam_wheel': case 'ecam_fctl': case 'ecam_sts': case 'ecam_clr_l': case 'ecam_clr_r': case 'ecam_emer_canc': return s.ecam.lit(base);
       case 'brk_fan': case 'brk_hot': return false;
     }
     if (/^radio_(on|vhf1|nav)(\.|$)/.test(base)) return true;
@@ -692,7 +786,7 @@ export class Cockpit {
     if (this.fallback) { this.fallback.update(dt, time, data, inp, ui, visible); return; }
     if (!visible || !this.loaded || !this.host) return;
     this.lastInp = inp; const h = this.host, s = this.sys; this.frameNo++;
-    s.update(dt, h, data);
+    s.update(dt, h, data); this.syncFcu(dt, h, data);
     this.ctx.d = data; this.ctx.host = h; this.ctx.t = time; this.ctx.utc = new Date(simNowMs());
     for (const m of this.mcdu) m.attach(h);
     // lighting (day/night)
@@ -700,12 +794,14 @@ export class Cockpit {
     // screens: culled, resolution-scaled and time-sliced (PFD first, secondary pages at 10-20 Hz, clock 2 Hz) – see scheduleScreens()
     this.camera.updateMatrixWorld(); this.pv.multiplyMatrices(this.camera.projectionMatrix, this.camera.matrixWorldInverse); this.frustum.setFromProjectionMatrix(this.pv);
     this.scheduleScreens(time, s);
-    this.updateEfb(time, s, h);
+    this.updateEfb(time, s, h); this.drawBaros(s);
     if (this.fcuCanvas && this.fcuTex) {
-      const key = [data.apSpd, data.apHdg, data.apAlt, s.ac, s.vsMode, s.vsTarget, s.metric, s.spdMach, s.spdManaged, s.hdgManaged].join('|');
+      const key = [data.apSpd, data.apHdg, data.apAlt, s.ac, s.vsMode, s.vsTarget, s.fpaTarget, s.trkFpa, s.spdMach, s.spdManaged, s.hdgManaged, s.spdPre > 0, s.hdgPre > 0, s.vsPre > 0, s.spdPreVal, s.hdgPreVal, s.bright.fcu, Math.round(this.machFactor())].join('|');
       if (key !== this.fcuKey) { this.fcuKey = key; const cv = this.fcuCanvas, g = cv.getContext('2d')!; drawFCU(g, cv.width, cv.height, this.ctx, (z) => (this.fcuZ.c + this.fcuZ.w / 2 - z) / this.fcuZ.w); this.fcuTex.needsUpdate = true; }
     }
+    this.updateFcuInd(s, data);
     // animation – every control is posed about its own pivot axis; static switches / buttons are only re-posed when their state changes
+    this.syncEfisGroups();
     for (const g of this.animOrder) {
       if (g.still) { const k = g.pos * 7 + g.press * 13 + g.angle * 3; if (k === g.lastKey) { if (g.press > 0 && !this.active) g.press = Math.max(0, g.press - dt * 6); continue; } g.lastKey = k; }
       this.animate(g, inp, data); for (const p of g.parts) p.node.matrixWorldNeedsUpdate = true;
@@ -713,7 +809,12 @@ export class Cockpit {
     }
     // lamps (20 Hz is plenty for annunciators)
     if (this.frameNo % 3 === 0) for (const l of this.lampNodes) {
-      if (l.kind === 'led') { l.node.visible = this.ledOn(l.base); continue; }
+      if (l.kind === 'led') {
+        l.node.visible = this.ledOn(l.base);
+        const kg = this.groups.get(l.base);
+        if (kg && kg.kind === 'push' && l.node.visible) { if (!l.m0) { l.node.updateMatrix(); l.m0 = l.node.matrix.clone(); l.node.matrixAutoUpdate = false; } l.node.matrix.multiplyMatrices(kg.xf, l.m0); l.node.matrixWorldNeedsUpdate = true; }
+        continue;
+      }
       const g = this.groups.get(l.base); if (!g) continue; const [on, col] = this.legendLit(g, l.letter, l.row); const mt = l.node.material as THREE.MeshStandardMaterial;
       mt.emissive.setHex(on ? col : 0x000000); mt.emissiveIntensity = on ? 1.6 : 0;
     }
@@ -729,12 +830,13 @@ export class Cockpit {
   private byUrgency = (a: Screen, b: Screen) => b.urgency - a.urgency;
   private projPx(sphere: THREE.Sphere) { const d = Math.max(0.05, sphere.center.distanceTo(this.camera.position) - sphere.radius * 0.2), tv = Math.tan(this.camera.fov * Math.PI / 360); return (sphere.radius * 2 / (d * 2 * tv)) * this.vpH; }
   private scheduleScreens(time: number, s: A320Systems) {
-    const br = this.brMap; br.pfd = s.bright.pfd; br.nd = s.bright.nd; br.uecam = s.bright.uecam; br.lecam = s.bright.lecam;
+    const br = this.brMap; br.pfd = briOf(s.bright.pfd[0]); br.pfd2 = briOf(s.bright.pfd[1]); br.nd = briOf(s.bright.nd[0]); br.nd2 = briOf(s.bright.nd[1]); br.uecam = s.bright.uecam; br.lecam = s.bright.lecam;
     if (this.frameNo === 1) this.group.updateMatrixWorld(true);
     this.due.length = 0;
     for (const sc of this.screens) {
-      sc.mat.color.setScalar((br[sc.key] ?? 1) * (s.dc ? 1 : 0.0));
-      if (!s.dc) { sc.next = 0; continue; }                                  // powered down: black, no repaint at all
+      const lvl = br[sc.key] ?? 1, off = (sc.key === 'uecam' || sc.key === 'lecam') && lvl <= 0.04;
+      sc.mat.color.setScalar(off ? 0 : lvl * (s.dc ? 1 : 0.0));
+      if (!s.dc || off) { sc.next = 0; continue; }                                  // powered down: black, no repaint at all
       if ((this.frameNo + sc.idx) % 5 === 0 || sc.px === 0) {                // visibility + needed resolution: re-evaluated at 12 Hz
         // a Screen can drive several meshes (CAPT + F/O PFD, ND, E/WD): visible if any is in view, sized for the largest
         sc.vis = false; sc.px = 0.001;
@@ -765,7 +867,7 @@ export class Cockpit {
   // game draw the (very expensive) world – terrain, city, sky, clouds – only through the windows: hidden fragments are rejected before shading.
   // Per-material stencil flags (instead of an override material) keep alpha-cut-out shapes exact; transparent parts never write the mask.
   private maskMats: THREE.Material[] = [];
-  private collectMaskMats() { const set = new Set<THREE.Material>(); this.scene.traverse((o) => { const m = o as THREE.Mesh; if (!m.isMesh) return; for (const mt of Array.isArray(m.material) ? m.material : [m.material]) if (!mt.transparent) set.add(mt); }); this.maskMats = [...set]; }
+  private collectMaskMats() { const set = new Set<THREE.Material>(); this.scene.traverse((o) => { const m = o as THREE.Mesh; if (!m.isMesh) return; for (const mt of Array.isArray(m.material) ? m.material : [m.material]) if (!mt.transparent) set.add(mt); }); for (const sc of this.screens) set.add(sc.mat); this.maskMats = [...set]; }
   get canMask() { return this.loaded && !this.fallback && this.maskMats.length > 0; }
   /** Colour-less pass that stamps stencil = 1 wherever the opaque flight deck is visible. */
   renderMask(r: THREE.WebGLRenderer) {
@@ -797,4 +899,109 @@ export class Cockpit {
   dispose() { this.fallback?.dispose(); this.scene.traverse((o) => { const m = o as THREE.Mesh; m.geometry?.dispose?.(); }); for (const s of this.screens) { s.tex.dispose(); s.mat.dispose(); } }
   /** First-person seat positions in body space (captain / first officer). */
   eyeBody(fo = false) { const e = fo ? FO_EYE_M : EYE_M; const [ex, ey, ez] = this.spec.eye; const tx = ex + EYE_M.z, ty = ey - EYE_M.y, tz = ez - EYE_M.x; return new THREE.Vector3(-e.z + tx, e.y + ty, e.x + tz); }
+
+  /** Per-frame FCU logic that does not belong to a single control: AP channel bookkeeping, preselect time-outs, V/S capture, LOC capture. */
+  private syncFcu(dt: number, h: CockpitHost, d: PanelData) {
+    const s = this.sys, ap = h.ap;
+    s.spdPre = Math.max(0, s.spdPre - dt); s.hdgPre = Math.max(0, s.hdgPre - dt); s.vsPre = Math.max(0, s.vsPre - dt);
+    if (!ap.on) { s.apEng[0] = s.apEng[1] = false; s.exped = false; ap.vsHoldFpm = null; }
+    else { if (!s.apEng[0] && !s.apEng[1]) s.apEng[0] = true; s.hdgManaged = ap.nav; }
+    s.vsMode = ap.on && ap.vsHoldFpm != null;
+    ap.expedite = s.exped; ap.spdSelected = !s.spdManaged; ap.altSelected = !s.altManaged;
+    if (s.locArmed && ap.on && d.ils?.valid && !ap.appr) { s.locArmed = false; h.action('appr'); }
+  }
+  /** FCU window legends (SPD/MACH, HDG/TRK, V/S/FPA, LVL/CH) and the managed dots are meshes of the model; they are lit by state. */
+  private updateFcuInd(s: A320Systems, d: PanelData) {
+    const on = s.ac || s.acEss, ap = this.host!.ap; const show = (n: string, v: boolean) => { const m = this.fcuInd.get(n); if (m) m.visible = on && v; };
+    show('spd.ind', !s.spdMach); show('mach.ind', s.spdMach); show('hdg.ind', !s.trkFpa); show('trk.ind', s.trkFpa); show('hdg2.ind', !s.trkFpa); show('trk2.ind', s.trkFpa);
+    show('vs.ind', !s.trkFpa); show('fpa.ind', s.trkFpa); show('vs.ind.001', !s.trkFpa); show('fpa.ind.001', s.trkFpa);
+    show('spd.fmgc', s.spdManaged); show('lat.fmgc', s.hdgManaged && ap.on); show('ver.fmgc', s.altManaged && ap.on);
+    show('lvlch.ind', ap.on && !s.vsMode && Math.abs(d.apAlt - d.altFt) > 150);
+  }
+  private drawBaros(s: A320Systems) {
+    for (const b of this.baro) {
+      const e = s.efis[b.side];
+      const key = [s.dc, e.std, e.unitInHg, e.hpa, e.inHg, s.bright.integ].join('|'); if (key === b.key) continue; b.key = key;
+      drawBaro(b.cv.getContext('2d')!, b.cv.width, b.cv.height, this.ctx, b.side); b.tex.needsUpdate = true;
+    }
+  }
+
+  /** PUSH / PULL of a rotary encoder (FCOM DSC-22_10: push = managed / level-off / QNH, pull = selected / open / V/S / STD). */
+  private activateKnob(g: Group, how: 'push' | 'pull') {
+    const h = this.host!, s = this.sys; this.slideDir.set(g.id, how === 'push' ? 1 : -1);
+    switch (g.id) {
+      case 'spd-sel':
+        if (how === 'push') { s.spdManaged = true; s.spdPre = 0; h.toast('SPEED: managed (FMGS)', 'info'); }
+        else { const pre = s.spdManaged && s.spdPre > 0; s.spdManaged = false; h.ap.spdSelected = true; if (pre) h.setApTarget('spd', s.spdPreVal); s.spdPre = 0; h.toast('SPEED: selected', 'info'); }
+        break;
+      case 'hdg_sel':
+        if (how === 'push') { s.hdgManaged = true; s.hdgPre = 0; if (h.ap.on && !h.ap.nav) h.action('apnav'); h.toast(h.ap.on ? 'NAV: managed lateral guidance' : 'NAV armed (engage AP)', 'info'); }
+        else { s.hdgManaged = false; if (s.hdgPre > 0) h.setApTarget('hdg', s.hdgPreVal); else if (h.ap.on && h.ap.nav) h.action('aphdg'); s.hdgPre = 0; h.toast('HDG: selected heading', 'info'); }
+        break;
+      case 'alt-sel':
+        if (how === 'push') { s.altManaged = true; h.ap.altSelected = false; h.toast('ALT: managed climb / descent (VNAV profile)', 'info'); }
+        else { s.altManaged = false; h.ap.altSelected = true; h.toast('ALT: open climb / descent to FCU altitude', 'info'); }
+        break;
+      case 'vs-sel':
+        if (!h.ap.on) { h.toast('V/S: engage AP1 / AP2 first', 'warn'); break; }
+        s.vsMode = true; s.vsPre = 0;
+        if (how === 'push') { s.vsTarget = 0; s.fpaTarget = 0; h.ap.vsHoldFpm = 0; h.toast('V/S 0 – level off', 'info'); } else { this.applyVsHold(); h.toast('V/S mode engaged', 'info'); }
+        break;
+      case 'qnh_cpt_knb': s.efisBaroSet(0, how === 'pull'); break;
+      case 'qnh_fo_knb': s.efisBaroSet(1, how === 'pull'); break;
+    }
+  }
+  private clampN(v: number, a: number, b: number) { return Math.max(a, Math.min(b, v)); }
+  /** IAS per Mach at the current flight condition (sea-level 661.5 kt/M on the ground) – converts the FCU Mach window to the autopilot's knot target. */
+  private machFactor() { const d = this.ctx.d; return d.mach > 0.05 && d.kias > 30 ? d.kias / d.mach : 661.5; }
+  private applyVsHold() { const h = this.host!, s = this.sys; h.ap.vsHoldFpm = s.trkFpa ? Math.round(Math.tan(s.fpaTarget * Math.PI / 180) * Math.max(100, this.ctx.d.gsKt) * 1.0127) * 100 : s.vsTarget; }
+  /** One click of an FCU encoder (32 clicks per turn). Managed windows show a preselection (10 s SPD, 45 s HDG / V/S) until the knob is pulled. */
+  private fcuTurn(g: Group, dir: number, shift: boolean) {
+    const h = this.host!, s = this.sys; g.angle += dir * Math.PI / 16;
+    switch (g.id) {
+      case 'spd-sel': {
+        if (s.spdManaged && s.spdPre <= 0) { s.spdPreVal = h.ap.spd; s.spdPre = 10; return; }
+        const f = this.machFactor(), cur = s.spdManaged ? s.spdPreVal : h.ap.spd;
+        const next = Math.round(s.spdMach ? this.clampN(Math.round(cur / f * 100) + dir, 10, 99) / 100 * f : this.clampN(cur + dir * (shift ? 10 : 1), 100, 399));
+        if (s.spdManaged) { s.spdPreVal = next; s.spdPre = 10; } else h.setApTarget('spd', next);
+        return;
+      }
+      case 'hdg_sel': {
+        const cur = ((Math.round(h.ap.hdg + h.magVar(h.ap.hdg)) % 360) + 360) % 360;
+        if (s.hdgManaged && s.hdgPre <= 0) { s.hdgPreVal = cur; s.hdgPre = 45; return; }
+        const next = ((s.hdgManaged ? s.hdgPreVal : cur) + dir * (shift ? 10 : 1) + 360) % 360;
+        if (s.hdgManaged) { s.hdgPreVal = next; s.hdgPre = 45; } else h.setApTarget('hdg', next);
+        return;
+      }
+      case 'alt-sel': {
+        const t = this.clampN(Math.round((h.ap.altFt + dir * (shift ? 1000 : s.altStep1000 ? 1000 : 100)) / 100) * 100, 100, 49000);
+        if (s.altManaged && h.ap.on && h.ap.nav) { s.altManaged = false; h.toast('ALT: FCU target set – open climb / descent (push ALT for managed)', 'info'); }
+        h.ap.altSelected = !s.altManaged; h.setApTarget('alt', t); return;
+      }
+      case 'vs-sel': {
+        if (s.trkFpa) s.fpaTarget = Math.round(this.clampN(s.fpaTarget + dir * 0.1, -9.9, 9.9) * 10) / 10; else s.vsTarget = this.clampN(s.vsTarget + dir * (shift ? 500 : 100), -6000, 6000);
+        if (s.vsMode) this.applyVsHold(); else s.vsPre = 45;
+        return;
+      }
+    }
+  }
+  /** AP1 / AP2 pushbuttons: each channel engages and disengages on its own; the autopilot stays on while either is engaged (dual-AP for approach). */
+  private apPress(i: 0 | 1) {
+    const h = this.host!, s = this.sys, other = s.apEng[1 - i];
+    if (s.apEng[i]) { s.apEng[i] = false; if (!other && h.ap.on) h.action('ap'); return; }
+    if (h.ap.on) { s.apEng[i] = true; return; }
+    h.action('ap'); if (h.ap.on) s.apEng[i] = true;
+  }
+  private routeDisplays() {
+    const d = this.screenDefs, sw = this.sys.switching; if (!d.pfd) return;
+    const own = sw.attHdg !== 1 || sw.airData !== 1;
+    const target: Record<string, string> = {
+      'pfd1.screen': 'pfd', 'pfd2.screen': own ? 'pfd2' : 'pfd', 'ND.screen': sw.ndXfr === 0 ? 'lecam' : 'nd', 'ND_R.screen': sw.ndXfr === 2 ? 'lecam' : own ? 'nd2' : 'nd',
+      'uecam.screen': 'uecam', 'uecam.screen2': 'uecam', 'lecam.screen': 'lecam', 'mcdu1.screen': 'mcdu1', 'mcdu2.screen': 'mcdu2', iesi_screen: 'isis', clock_display: 'clock',
+    };
+    for (const sc of Object.values(d) as Screen[]) sc.meshes.length = 0;
+    for (const [name, m] of this.screenMesh) { const sc = d[target[name]]; if (!sc) continue; sc.meshes.push(m); m.material = sc.mat; }
+    for (const sc of Object.values(d) as Screen[]) sc.px = 0;
+  }
+
 }
