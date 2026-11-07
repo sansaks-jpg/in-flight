@@ -13,6 +13,10 @@ import type { FlightTool, FlightWorkspace, WorkspaceAction } from './flightWorks
 import { NavigationMap, type MapFocus } from './FlightMap';
 import { AirportMiniMap } from './AirportMiniMap';
 import { FlightToggle, IconButton, PanelHeader, RunwaySelect } from './FlightWidgets';
+import { CockpitTooltipOverlay, FreelookReticle } from './MsfsWindows';
+import type { CockpitPreset } from '../sim/cockpit';
+
+const COCKPIT_PANEL_VIEWS: [CockpitPreset, string][] = [['pilot', 'Captain'], ['copilot', 'First Officer'], ['instruments', 'Main panel'], ['pfd', 'PFD'], ['nd', 'ND'], ['ecam', 'ECAM'], ['fcu', 'FCU / EFIS'], ['overhead', 'Overhead'], ['pedestal', 'Pedestal'], ['mcdu', 'MCDU'], ['efb', 'EFB tablet']];
 import { FLIGHT_PHASE_LABELS, HUD_MODES, HUD_MODE_LABELS, flightUiScale, flightUnits, formatAltitude, formatSpeed, formatDistance, formatEte, formatHeading, primaryAlert } from './navigation';
 
 function useFlightViewport() {
@@ -199,8 +203,8 @@ function CameraPanel({ game, hud, onDone }: { game: Game; hud: HudState; onDone:
   return <div className="flight-panel-content"><span className="flight-eyebrow">Camera view <kbd>C</kbd></span><div className="flight-camera-views">
     {CAMERA_VIEWS.slice(0, 2).map((view) => <button key={view.id} aria-pressed={hud.view === view.id} onClick={() => { game.setView(view.id); onDone(); }}><FlightIcon name={view.icon} size={20} />
       <span><strong>{view.label}</strong><small>{view.description}</small></span>{hud.view === view.id && <FlightIcon name="check" size={16} />}</button>)}
-    </div><details className="flight-disclosure"><summary>More camera views</summary><div className="flight-camera-views">{CAMERA_VIEWS.slice(2).map((view) => <button key={view.id} data-active={hud.view === view.id} aria-pressed={hud.view === view.id} onClick={() => { game.setView(view.id); onDone(); }}><FlightIcon name={view.icon} size={20} /><span><strong>{view.label}</strong><small>{view.description}</small></span></button>)}</div></details><button className="flight-reset-view" onClick={() => { game.resetView(); onDone(); }}><FlightIcon name="reset" size={15} />Reset camera position<kbd>Home</kbd></button>
-    <p className="flight-panel-description">Hold right mouse and drag to look around, including over cockpit controls. Left-click to interact with the cockpit.</p>
+    </div><details className="flight-disclosure"><summary>More camera views</summary><div className="flight-camera-views">{CAMERA_VIEWS.slice(2).map((view) => <button key={view.id} data-active={hud.view === view.id} aria-pressed={hud.view === view.id} onClick={() => { game.setView(view.id); onDone(); }}><FlightIcon name={view.icon} size={20} /><span><strong>{view.label}</strong><small>{view.description}</small></span></button>)}</div></details>{['cockpit', 'aisle', 'window'].includes(hud.view) && <><span className="flight-eyebrow" style={{ marginTop: 12, display: 'block' }}>Flight-deck panels</span><div className="flight-panel-chips" style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 8 }}>{COCKPIT_PANEL_VIEWS.map(([id, label]) => <button key={id} style={{ padding: '6px 10px', border: '1px solid #bccfe230', borderRadius: 5, background: '#bcd2e50d', color: '#cfe0ee', fontSize: 12 }} onClick={() => { game.setCockpitSubview(id); onDone(); }}>{label}</button>)}</div></>}<button className="flight-reset-view" onClick={() => { game.resetView(); onDone(); }}><FlightIcon name="reset" size={15} />Reset camera position<kbd>Home</kbd></button>
+    <p className="flight-panel-description">Drag with the left or right mouse on empty panel space to look around · Shift-drag or middle-drag leans your head · wheel zooms (over a knob it turns it) · double-click a control to fly to it, double-click empty space to return · hover any control for its name and function.</p>
   </div>;
 }
 
@@ -330,6 +334,8 @@ export function Hud({ game, hud, toasts, settings, setSettings, onMap, mapOpen, 
     data-touch={viewport.touch} data-compact-nav={compactNav} data-mode={mode} data-interior={interior} data-edge={edgeInstruments} data-tool-open={!!tool} data-mini-map={miniMap}
     style={{ '--flight-text-scale': scale } as CSSProperties}>
     <div className="flight-screen-shade" />
+    {interior && <CockpitTooltipOverlay tooltip={hud.cockpitTooltip ?? null} />}
+    {interior && <FreelookReticle active={!!hud.freelookActive} />}
     <header className="flight-header">
       <button className="flight-route-identity" aria-label="Open flight plan" onClick={() => openNavigation('plan')} data-flight-ui>
         <span className="flight-brand-symbol"><FlightIcon name="route" size={18} /></span><span><span className="flight-route-codes">{from.icao}<span>→</span>{to.icao}</span><span className="flight-aircraft-name" title={hud.activeWp?.name ?? hud.destId}>Next: {hud.activeWp?.name ?? hud.destId} · {formatDistance(hud.activeWp?.distNm ?? hud.distNm)} NM</span></span>

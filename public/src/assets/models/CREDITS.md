@@ -11,4 +11,4 @@
 - The original zip snapshots this project was recovered from never contained the `.glb` binaries. `c172.glb` and `a320.glb` were restored from the repository history (commit `d15e2bb`). `atr72.glb` was re-acquired via the [Godeye](https://github.com/Darksayd1224/Godeye) mirror of Oyan3D's Sketchfab model (CC-BY 4.0); that derivative strips textures, so the ATR 72 renders with flat materials. The propeller meshes (`Cylinder.024_Black_0`, `Cylinder.024_Yellow_0`) are preserved, which is what `glbAircraft.ts` splits to spin them.
 
 
-| `public/models/a320/cockpit.glb` | Airbus A320 flight deck | FlightGear A320-family contributors | GPL-2.0 | See `public/models/a320/NOTICE.txt`. |
+| `public/models/a320/cockpit.glb` | Airbus A320 flight deck | FlightGear A320-family contributors (via radebit/flight-simulator conversion) | GPL-2.0 | See `public/models/a320/NOTICE.txt`. Textures WebP, geometry meshopt-compressed. |

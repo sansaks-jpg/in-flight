@@ -10,8 +10,9 @@ const base = (import.meta as unknown as { env?: { BASE_URL?: string } }).env?.BA
 export const COCKPIT_GLB_URLS = [
   `${base}models/a320/cockpit.glb`,
   `./models/a320/cockpit.glb`,
-  `https://cdn.jsdelivr.net/gh/radebit/flight-simulator@${SHA}/public/models/a320/cockpit.glb`,
+  // jsDelivr refuses files > 50 MB (HTTP 403 for the 50.6 MB original) – verified – so the raw GitHub URL is the working permanent mirror.
   `https://raw.githubusercontent.com/radebit/flight-simulator/${SHA}/public/models/a320/cockpit.glb`,
+  `https://rawcdn.githack.com/radebit/flight-simulator/${SHA}/public/models/a320/cockpit.glb`,
 ];
 export const COCKPIT_MANIFEST_URLS = [
   `${base}models/a320/cockpit-manifest.json`,

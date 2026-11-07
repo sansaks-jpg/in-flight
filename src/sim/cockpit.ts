@@ -12,32 +12,43 @@ import { A320Systems, CockpitHost, EcamPage } from './a320/systems';
 import { Ctx, Mcdu, drawPFD, drawND, drawEWD, drawSD, drawISIS, drawFCU, drawClock } from './a320/displays';
 import { ProceduralCockpit, CockpitInputs, CockpitUi, View } from './a320/proceduralCockpit';
 import { simNowMs } from './clock';
+import { describeControl } from './a320/controlInfo';
+import { Efb } from './a320/efb';
 
 export type { CockpitInputs, CockpitUi, View, CockpitHost };
-export interface CockpitHover { id: string; label: string; value: string; hint: string; }
+export interface CockpitHover { id: string; label: string; value: string; hint: string; desc: string; }
 export interface PressResult { id: string; handled: boolean; }
 
 const EYE_M = new THREE.Vector3(0.22, 0.66, 0.52);       // captain's design eye point (model metres)
 const FO_EYE_M = new THREE.Vector3(0.22, 0.66, -0.52);
 const V = (x: number, y: number, z: number) => new THREE.Vector3(x, y, z);
 /** Named camera presets: eye + look-at point in model coordinates and a vertical FOV. */
+// Panel presets are built from the panel centre and its outward normal (model metres), so the camera always looks square-on at the
+// panel (no skew / roll) from a distance that frames the whole panel. Eye = centre + normal * distance (see framePanel()).
+const N = (x: number, y: number, z: number) => new THREE.Vector3(x, y, z).normalize();
+export const COCKPIT_PANELS = {
+  fcu: { c: V(-0.37, 0.485, 0.0), n: N(0.957, 0.289, 0), w: 0.5, h: 0.15 },
+  pfd: { c: V(-0.556, 0.224, 0.553), n: N(1, 0.12, 0), w: 0.2, h: 0.2 },
+  nd: { c: V(-0.556, 0.224, 0.353), n: N(1, 0.12, 0), w: 0.2, h: 0.2 },
+  ecam: { c: V(-0.556, 0.06, -0.013), n: N(1, 0.12, 0), w: 0.2, h: 0.4 },
+  instruments: { c: V(-0.55, 0.16, 0.0), n: N(1, 0.1, 0), w: 1.2, h: 0.4 },
+  mcdu: { c: V(-0.41, -0.06, 0.18), n: N(0.25, 1, 0), w: 0.2, h: 0.32 },
+  efb: { c: V(-0.0636, 0.3244, 0.9221), n: N(0.588, 0.196, -0.784), w: 0.27, h: 0.2 },
+} as const;
+/** Named camera presets: eye + look-at point in model coordinates and a vertical FOV (pilot / seat / wide views). */
 export const COCKPIT_PRESETS = {
   pilot: { eye: EYE_M, at: V(-0.6, 0.2, 0.42), fov: 68 },
   copilot: { eye: FO_EYE_M, at: V(-0.6, 0.2, -0.42), fov: 68 },
-  instruments: { eye: V(0.1, 0.5, 0.0), at: V(-0.56, 0.14, 0.0), fov: 62 },
-  pfd: { eye: V(0.0, 0.46, 0.52), at: V(-0.58, 0.22, 0.53), fov: 30 },
-  nd: { eye: V(0.0, 0.46, 0.34), at: V(-0.58, 0.22, 0.35), fov: 30 },
-  ecam: { eye: V(0.0, 0.46, 0.0), at: V(-0.55, 0.14, -0.01), fov: 38 },
-  fcu: { eye: V(0.12, 0.66, 0.1), at: V(-0.37, 0.47, 0.0), fov: 34 },
-  overhead: { eye: V(0.1, 0.7, 0.0), at: V(0.25, 1.05, 0.0), fov: 78 },
+  // the overhead panel text reads with the top of the characters towards the tail: look FORWARD and up from behind the seats
+  overhead: { eye: V(0.64, 0.58, 0.0), at: V(0.2, 1.1, 0.0), fov: 84 },
   pedestal: { eye: V(0.3, 0.55, 0.0), at: V(-0.05, -0.05, 0.0), fov: 56 },
-  mcdu: { eye: V(0.05, 0.45, 0.2), at: V(-0.41, -0.06, 0.18), fov: 38 },
 } as const;
-export type CockpitPreset = keyof typeof COCKPIT_PRESETS;
+export type CockpitPanelId = keyof typeof COCKPIT_PANELS;
+export type CockpitPreset = keyof typeof COCKPIT_PRESETS | CockpitPanelId;
 
 type Kind = 'push' | 'switch' | 'knob' | 'guard' | 'lever' | 'key' | 'stick' | 'toggle';
 interface Part { node: THREE.Mesh; m0: THREE.Matrix4; }
-interface Group { id: string; kind: Kind; parts: Part[]; axis?: Axis; pos: number; angle: number; press: number; label: string; steps: number; box: THREE.Box3; lamps: { node: THREE.Mesh; letter: string; row: number }[]; }
+interface Group { id: string; kind: Kind; parts: Part[]; axis?: Axis; pos: number; angle: number; press: number; label: string; steps: number; box: THREE.Box3; lamps: { node: THREE.Mesh; letter: string; row: number }[]; nrm?: THREE.Vector3; }
 
 // ---- naming helpers ----
 const MCDU_KEYS = new Set(['init', 'f-pln', 'f-pln2', 'radnav', 'fuel-pred', 'prog', 'perf', 'data', 'dir', 'airport', 'clr', 'sp', 'left', 'right', 'up', 'down', 'opt1', 'opt2', 'overfly', '+/-', '/', '.', 'mcdu', 'sec-fpln']);
@@ -111,6 +122,8 @@ export class Cockpit {
   private async load() {
     const { scene: model, manifest } = await loadCockpitAssets();
     this.root.add(model); model.updateMatrixWorld(true);
+    // GLTFLoader sanitises node names (drops '.'), but every control id below uses the ORIGINAL glTF name (e.g. 'pfd1.screen', 'ap1.cpt'):
+    model.traverse((o) => { const u = o.userData as { name?: string; sourceName?: string }; const real = u.name || u.sourceName; if (real) o.name = real; });
     const maxA = 16; const nodes = new Map<string, THREE.Mesh>(); const all: THREE.Mesh[] = [];
     model.traverse((o) => { if ((o as THREE.Mesh).isMesh) { const m = o as THREE.Mesh; all.push(m); nodes.set(m.name, m); const mt = m.material as THREE.MeshStandardMaterial; if (mt.map) { mt.map.anisotropy = maxA; mt.map.needsUpdate = true; } } });
     // ---- classify ----
@@ -125,7 +138,9 @@ export class Cockpit {
       if (SCREENS[n]) continue; if (FCU_IND.has(n)) { m.visible = false; used.add(m); continue; }
       const leg = baseOfLegend(n);
       if (leg) { this.lampNodes.push({ node: m, base: leg.base, kind: 'leg', letter: leg.letter, row: leg.row }); used.add(m); continue; }
-      if (isLed(n)) { this.lampNodes.push({ node: m, base: n.replace(/(_led|_on|_lit|_illuminated)(\.\w+)?$/, ''), kind: 'led', letter: '', row: 0 }); m.visible = false; used.add(m); continue; }
+      const lb = n.match(/^(.*?)_(?:led|lit)(\.cpt|\.fo|\.ovh)?(\.\d+)?$/);
+      if (lb || isLed(n)) { this.lampNodes.push({ node: m, base: lb ? lb[1] + (lb[2] ?? '') : n.replace(/(_led|_on|_lit|_illuminated)(\.\w+)?$/, ''), kind: 'led', letter: '', row: 0 }); m.visible = false; used.add(m); continue; }
+      if (n === 'atc_screen' || n === 'main_panel_screen') { used.add(m); continue; }
     }
     for (const m of all) {
       if (used.has(m) || SCREENS[m.name]) continue; const n = m.name;
@@ -160,7 +175,7 @@ export class Cockpit {
     for (const m of all) {
       if (used.has(m) && !lampSet.has(m)) { if (HIDE.test(m.name) || FCU_IND.has(m.name)) { m.visible = false; } else if (this.byNode.has(m)) continue; }
       if (this.byNode.has(m) || lampSet.has(m) || SCREENS[m.name] || !m.visible) continue;
-      m.updateWorldMatrix(true, false); const arr = byMat.get(m.material as THREE.Material) ?? []; arr.push(flatten(m.geometry, rel.copy(this.root.matrixWorld).invert().multiply(m.matrixWorld))); // model space, relative to this.root byMat.set(m.material as THREE.Material, arr); toRemove.push(m);
+      m.updateWorldMatrix(true, false); const arr = byMat.get(m.material as THREE.Material) ?? []; arr.push(flatten(m.geometry, rel.copy(this.root.matrixWorld).invert().multiply(m.matrixWorld))); /* model space, relative to this.root */ byMat.set(m.material as THREE.Material, arr); toRemove.push(m);
     }
     for (const m of toRemove) { m.parent?.remove(m); m.geometry.dispose(); }
     const merged = new THREE.Group();
@@ -169,7 +184,7 @@ export class Cockpit {
     // ---- screens ----
     this.buildScreens(nodes);
     // ---- FCU overlay (digits) ----
-    this.buildFcu(nodes);
+    this.buildFcu(nodes); this.buildEfb();
     this.ctx = { d: null as unknown as PanelData, sys: this.sys, host: null as unknown as CockpitHost, t: 0, mcdu: this.mcdu[0], utc: new Date() };
     this.loaded = true; this.setPreset('pilot', true);
   }
@@ -191,7 +206,7 @@ export class Cockpit {
 
   private buildFcu(nodes: Map<string, THREE.Mesh>) {
     // strip aligned with the original seven-segment meshes (model coords; panel normal = (0.957, 0.289, 0))
-    const zc = 0.0035, w = 0.208, h = 0.017; this.fcuZ = { c: zc, w };
+    const zc = -0.0005, w = 0.25, h = 0.017; // plane wider than the 3 windows so no digit is clipped this.fcuZ = { c: zc, w };
     const cv = document.createElement('canvas'); cv.width = 2048; cv.height = Math.round(2048 * h / w); const tex = new THREE.CanvasTexture(cv); tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = 16;
     const mesh = new THREE.Mesh(new THREE.PlaneGeometry(w, h), new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false, toneMapped: false }));
     const n = new THREE.Vector3(0.957, 0.289, 0).normalize(), up = new THREE.Vector3(-0.289, 0.957, 0), xa = new THREE.Vector3(0, 0, -1);
@@ -199,37 +214,87 @@ export class Cockpit {
     this.root.add(mesh); this.fcuCanvas = cv; this.fcuTex = tex; void nodes;
   }
 
-  // ====================================================================== camera
-  setPreset(p: CockpitPreset, instant = false) {
-    const pr = COCKPIT_PRESETS[p]; this.focus(pr.eye, pr.at, pr.fov, instant);
+  // ====================================================================== EFB tablet (captain's side window mount)
+  efb = new Efb(); private efbMesh?: THREE.Mesh; private efbCanvas?: HTMLCanvasElement; private efbTex?: THREE.CanvasTexture; private efbNext = 0;
+  /** Overlay the live EFB page on the real tablet face of the model (EFB_cpt: panel plane located from the mesh, see COCKPIT_PANELS.efb). */
+  private buildEfb() {
+    const cv = document.createElement('canvas'); cv.width = Efb.W; cv.height = Efb.H;
+    const tex = new THREE.CanvasTexture(cv); tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = 16;
+    const P = COCKPIT_PANELS.efb, w = 0.24, h = w * (Efb.H / Efb.W);
+    const mat = new THREE.MeshBasicMaterial({ map: tex, toneMapped: false, polygonOffset: true, polygonOffsetFactor: -3, polygonOffsetUnits: -3 });
+    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(w, h), mat);
+    const hx = new THREE.Vector3(-0.8, 0, -0.6), up = new THREE.Vector3(-0.118, 0.981, 0.157).normalize();
+    mesh.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(hx, up, P.n)); mesh.position.copy(P.c).addScaledVector(P.n, 0.0015).addScaledVector(hx, 0.0075); mesh.renderOrder = 4; mesh.name = 'efb_screen';
+    this.root.add(mesh); this.efbMesh = mesh; this.efbCanvas = cv; this.efbTex = tex;
   }
-  /** Point the cockpit camera: eye + target in model coordinates. */
+  private pickEfb(ray: THREE.Raycaster): { u: number; v: number; dist: number } | null {
+    if (!this.efbMesh) return null; const h = ray.intersectObject(this.efbMesh, false)[0]; if (!h || !h.uv) return null;
+    return { u: h.uv.x, v: 1 - h.uv.y, dist: h.distance };
+  }
+
+  // ====================================================================== camera rig
+  // Two layers: `views.cockpit` is the eased BASE view (seat / panel preset, set by focus()); `look` is the pilot's free-look + lean offset
+  // on top of it (follows the mouse tightly). focus() always clears `look`, so panel views are framed exactly as designed.
+  private look = { yaw: 0, pitch: 0, x: 0, y: 0 }; private lookCur = { yaw: 0, pitch: 0, x: 0, y: 0 };
+  private out = { pos: new THREE.Vector3(), yaw: 0, pitch: 0, fov: 68 };
+  setPreset(p: CockpitPreset, instant = false) {
+    if (p in COCKPIT_PANELS) { this.framePanel(p as CockpitPanelId, instant); return; }
+    const pr = COCKPIT_PRESETS[p as keyof typeof COCKPIT_PRESETS]; this.focus(pr.eye, pr.at, pr.fov, instant);
+  }
+  /** Look square-on at a panel from the distance that frames it fully for the current aspect ratio. */
+  framePanel(id: CockpitPanelId, instant = false) {
+    const p = COCKPIT_PANELS[id], fov = id === 'instruments' ? 56 : 36, tv = Math.tan(fov * Math.PI / 360), asp = Math.max(0.5, this.camera.aspect || 1.78);
+    const d = Math.max(p.h / 2 / tv, p.w / 2 / (tv * asp)) * 1.12;
+    this.focus(p.c.clone().addScaledVector(p.n, d), p.c, fov, instant);
+  }
+  /** Point the cockpit camera: eye + target in model coordinates. Clears free-look so the framing is exact. */
   focus(eye: THREE.Vector3, at: THREE.Vector3, fov: number, instant = false) {
     const [ex, ey, ez] = this.spec.eye; const tx = ex + EYE_M.z, ty = ey - EYE_M.y, tz = ez - EYE_M.x;
     const b = (v: THREE.Vector3, o: THREE.Vector3) => o.set(-v.z + tx, v.y + ty, v.x + tz);
     const E = b(eye, this.t), A = b(at, this.tBody); const dx = A.x - E.x, dy = A.y - E.y, dz = A.z - E.z;
     const vw = this.views.cockpit; vw.pos.copy(E); vw.yaw = Math.atan2(-dx, -dz); vw.pitch = Math.atan2(dy, Math.hypot(dx, dz));
-    this.fovT = fov; this.zoomT = 1; if (instant) { this.cur.pos.copy(vw.pos); this.cur.yaw = vw.yaw; this.cur.pitch = vw.pitch; this.fovCur = fov; this.zoom = 1; }
+    this.fovT = fov; this.zoomT = 1; this.look.yaw = this.look.pitch = this.look.x = this.look.y = 0;
+    if (instant) { this.cur.pos.copy(vw.pos); this.cur.yaw = vw.yaw; this.cur.pitch = vw.pitch; this.fovCur = fov; this.zoom = 1; Object.assign(this.lookCur, this.look); }
+  }
+  /** Outward normal of the panel a control sits on (model frame) – used to frame double-clicked controls squarely. */
+  private panelNormal(c: THREE.Vector3): THREE.Vector3 {
+    if (c.z > 0.7) return COCKPIT_PANELS.efb.n.clone();
+    if (c.y > 0.8) return N(0.25, -1, 0);                                          // overhead: view from below, looking forward
+    if (c.x < -0.3 && c.x > -0.43 && c.y > 0.38 && c.y < 0.6) return COCKPIT_PANELS.fcu.n.clone(); // glareshield / FCU / EFIS
+    if (c.x < -0.44) return N(1, 0.15, 0);                                          // main instrument panel
+    if (Math.abs(c.z) < 0.34 && c.y < 0.2) return N(0.25, 1, 0);                    // pedestal & thrust quadrant: view from above
+    return N(0.35, 0.45, -Math.sign(c.z || 1) * Math.min(1, Math.abs(c.z) * 2));    // side consoles etc.: from the cockpit centre
   }
   /** Fly the camera to a control group (double-click). */
   focusGroup(g: Group) {
-    const c = g.box.getCenter(new THREE.Vector3()), size = g.box.getSize(new THREE.Vector3()).length();
-    const from = this.views.cockpit.pos.clone(); // body -> model
-    const [ex, ey, ez] = this.spec.eye; const tx = ex + EYE_M.z, ty = ey - EYE_M.y, tz = ez - EYE_M.x;
-    const eyeM = new THREE.Vector3(from.z - tz, from.y - ty, -(from.x - tx)).clone(); // inverse of body mapping
-    const dir = eyeM.clone().sub(c).normalize(), dist = Math.max(0.28, size * 7);
-    const e = c.clone().addScaledVector(dir, dist); this.focus(e, c, 34);
+    const c = g.box.getCenter(new THREE.Vector3()), size = Math.max(...g.box.getSize(new THREE.Vector3()).toArray());
+    const n = this.panelNormal(c), dist = Math.min(0.62, Math.max(0.26, size * 4.5));
+    this.focus(c.clone().addScaledVector(n, dist), c, 38);
   }
-  /** Smoothly damped camera state (body frame) for the game's camera rig. */
+  /** Free-look: drag deltas in pixels. Sensitivity follows the current field of view so the scene tracks the cursor at any zoom. */
+  lookBy(dx: number, dy: number) {
+    const k = (this.out.fov * Math.PI / 180) / 720 * 2.0, vw = this.views.cockpit, L = this.look;
+    L.yaw -= dx * k; L.pitch -= dy * k;
+    L.yaw = Math.max(-2.7 - vw.yaw, Math.min(2.7 - vw.yaw, L.yaw)); L.pitch = Math.max(-1.35 - vw.pitch, Math.min(1.35 - vw.pitch, L.pitch));
+  }
+  /** Lean / pan the head sideways and up-down (middle-drag or Shift-drag), a few tens of centimetres around the base position. */
+  panBy(dx: number, dy: number) {
+    const k = 0.0011 / this.zoom, L = this.look; L.x = Math.max(-0.3, Math.min(0.3, L.x + dx * k)); L.y = Math.max(-0.2, Math.min(0.2, L.y - dy * k));
+  }
+  resetLook() { this.look.yaw = this.look.pitch = this.look.x = this.look.y = 0; }
+  /** Smoothly damped camera state (body frame) for the game's camera rig: eased panel transitions, tight free-look, smooth zoom. */
   smooth(dt: number) {
-    const vw = this.views.cockpit, k = 1 - Math.exp(-dt * 5.5);
-    this.cur.pos.lerp(vw.pos, k); this.cur.yaw += (vw.yaw - this.cur.yaw) * k; this.cur.pitch += (vw.pitch - this.cur.pitch) * k;
-    this.zoom += (this.zoomT - this.zoom) * (1 - Math.exp(-dt * 8));
-    this.fovCur += (this.fovT - this.fovCur) * k;
-    const fov = 2 * Math.atan(Math.tan(this.fovCur * Math.PI / 360) / this.zoom) * 180 / Math.PI;
-    return { pos: this.cur.pos, yaw: this.cur.yaw, pitch: this.cur.pitch, fov };
+    dt = Math.min(Math.max(dt, 0), 0.05);
+    const vw = this.views.cockpit, kb = 1 - Math.exp(-dt * 4.6), kl = 1 - Math.exp(-dt * 16), kz = 1 - Math.exp(-dt * 9), o = this.out, c = this.cur, l = this.lookCur, L = this.look;
+    c.pos.lerp(vw.pos, kb); c.yaw += (vw.yaw - c.yaw) * kb; c.pitch += (vw.pitch - c.pitch) * kb; this.fovCur += (this.fovT - this.fovCur) * kb;
+    l.yaw += (L.yaw - l.yaw) * kl; l.pitch += (L.pitch - l.pitch) * kl; l.x += (L.x - l.x) * kl; l.y += (L.y - l.y) * kl;
+    this.zoom += (this.zoomT - this.zoom) * kz;
+    const yaw = c.yaw + l.yaw; o.pos.copy(c.pos); o.pos.x += Math.cos(yaw) * l.x; o.pos.z -= Math.sin(yaw) * l.x; o.pos.y += l.y;
+    o.yaw = yaw; o.pitch = c.pitch + l.pitch; o.fov = 2 * Math.atan(Math.tan(this.fovCur * Math.PI / 360) / this.zoom) * 180 / Math.PI;
+    return o;
   }
-  zoomBy(deltaY: number) { this.zoomT = Math.min(14, Math.max(1, this.zoomT * Math.exp(-deltaY * 0.0016))); }
+  /** Wheel zoom (field of view 1x–8x, exponential so every notch feels the same). */
+  zoomBy(deltaY: number) { this.zoomT = Math.min(8, Math.max(1, this.zoomT * Math.exp(-Math.max(-300, Math.min(300, deltaY)) * 0.0014))); }
   resetZoom() { this.zoomT = 1; }
   setQuality(q: QualityPreset) { this.quality = q; this.fallback?.setQuality(q); }
 
@@ -241,9 +306,12 @@ export class Cockpit {
     return null;
   }
   hover(ray: THREE.Raycaster): CockpitHover | null {
-    if (this.fallback) { const p = this.fallback.pick(ray, true); return p ? { id: p.id, label: p.id.toUpperCase(), value: '', hint: 'Click' } : null; }
-    const p = this.pickGroup(ray); if (!p) return null;
-    return { id: p.g.id, label: p.g.label, value: this.stateText(p.g), hint: this.hint(p.g) };
+    if (this.fallback) { const p = this.fallback.pick(ray, true); return p ? { id: p.id, label: p.id.toUpperCase(), value: '', hint: 'Click', desc: 'Flight-deck control.' } : null; }
+    const p = this.pickGroup(ray), e = this.pickEfb(ray);
+    if (e && (!p || e.dist < p.hit.distance)) { const tip = this.efb.hover(e.u, e.v); return { id: 'efb', label: 'EFB TABLET (CAPT)', value: tip ?? `Page: ${this.efb.page}`, hint: tip ? 'Click' : 'Click to operate · wheel scrolls · double-click to zoom', desc: 'Electronic Flight Bag – flight plan, checklists, airport data, radio frequencies, weather and procedures.' }; }
+    if (!p) return null;
+    const info = describeControl(p.g.id);
+    return { id: p.g.id, label: p.g.kind === 'key' ? p.g.label : info.name, value: this.stateText(p.g), hint: this.hint(p.g), desc: info.text };
   }
   private hint(g: Group) { return g.kind === 'knob' || g.id === 'spd-sel' || g.id === 'hdg_sel' || g.id === 'alt-sel' ? 'Wheel / drag to turn · click = push · right-click = pull' : g.kind === 'lever' ? 'Drag to move' : g.kind === 'stick' ? 'Drag to fly' : g.kind === 'key' ? 'Click to press' : 'Click to operate · double-click to zoom'; }
   stateText(g: Group): string {
@@ -264,13 +332,18 @@ export class Cockpit {
       case 'BeaconLtSwtch': return h?.lights.beacon ? 'ON' : 'OFF'; case 'SeatBeltSwtch': return h?.seatbelt ? 'ON' : 'OFF';
     }
     if (g.kind === 'key') return '';
-    return ['AUTO / ON', 'OFF'][g.pos === 1 ? 0 : 1];
+    if (g.kind === 'switch') return SWITCH3.has(g.id) ? (['OFF / LOW', 'AUTO / MID', 'ON / HIGH'][g.pos] ?? '') : g.pos ? 'ON' : 'OFF';
+    if (g.kind === 'guard') return g.pos ? 'OPEN' : 'CLOSED';
+    if (g.kind === 'knob') return `position ${g.pos + 1}`;
+    return this.stateOn(g.id) ? 'ON / ENGAGED' : 'OFF / NORMAL';
   }
 
   /** Pointer down: returns null when no control was hit; `handled:false` ids ('yoke') are completed by the game. */
   press(ray: THREE.Raycaster, button: number, shift: boolean): PressResult | null {
     if (this.fallback) { const p = this.fallback.pick(ray); return p ? { id: p.id, handled: false } : null; }
-    const p = this.pickGroup(ray); if (!p || !this.host) return null; const g = p.g; const h = this.host;
+    const p = this.pickGroup(ray), e = this.pickEfb(ray);
+    if (e && (!p || e.dist < p.hit.distance)) { this.efb.click(e.u, e.v); return { id: 'efb', handled: true }; }
+    if (!p || !this.host) return null; const g = p.g; const h = this.host;
     if (g.kind === 'stick') return { id: 'yoke', handled: false };
     if (g.id === 'gear_lever') { h.action('gear'); return { id: g.id, handled: true }; }
     if (g.id === 'ParkBrk') { h.action('park'); return { id: g.id, handled: true }; }
@@ -305,12 +378,14 @@ export class Cockpit {
   }
   wheel(ray: THREE.Raycaster, deltaY: number, shift: boolean): boolean {
     if (this.fallback) return false;
-    const p = this.pickGroup(ray); if (!p) return false; const g = p.g;
+    const p = this.pickGroup(ray), e = this.pickEfb(ray);
+    if (e && (!p || e.dist < p.hit.distance)) { this.efb.wheel(deltaY); return true; }
+    if (!p) return false; const g = p.g;
     const isK = g.kind === 'knob' || /^(spd-sel|hdg_sel|alt-sel|vs-sel)$/.test(g.id) || g.id === 'eng_mode';
     if (g.kind === 'lever' && this.host) { const c = this.host.fm.ctl, d = deltaY > 0 ? -0.05 : 0.05; if (g.id === 'thr_l_body') { const R = c.throttle + c.thrOffset; c.throttle = Math.min(1, Math.max(0, c.throttle + d)); c.thrOffset = R - c.throttle; } else if (g.id === 'thr_r_body') c.thrOffset += d; else if (g.id === 'FlapsLever') c.flapsIdx = Math.min(4, Math.max(0, c.flapsIdx + (deltaY > 0 ? 1 : -1))); else return false; return true; }
     if (!isK) return false; this.stepKnob(g, deltaY > 0 ? -1 : 1, shift); return true;
   }
-  focusAt(ray: THREE.Raycaster): boolean { if (this.fallback) return false; const p = this.pickGroup(ray); if (!p) return false; this.focusGroup(p.g); return true; }
+  focusAt(ray: THREE.Raycaster): boolean { if (this.fallback) return false; const p = this.pickGroup(ray), e = this.pickEfb(ray); if (e && (!p || e.dist < p.hit.distance)) { this.framePanel('efb'); return true; } if (!p) return false; this.focusGroup(p.g); return true; }
   private leverValue(g: Group) { const c = this.host!.fm.ctl; return g.id === 'thr_l_body' ? c.throttle : g.id === 'thr_r_body' ? c.throttle + c.thrOffset : g.id === 'FlapsLever' ? c.flapsIdx : g.id === 'SpdBrk' ? (this.sys.spoilerArm ? -0.3 : c.speedbrake) : 0; }
 
   private mcduKey(id: string) { const fo = id.startsWith('F:'), k = id.slice(2); const m = this.mcdu[fo ? 1 : 0]; m.key(k === 'mcdu' ? 'menu' : k); }
@@ -387,6 +462,15 @@ export class Cockpit {
       case 'chrono_btn': s.chronoRun = !s.chronoRun; s.chronoShow = true; return; case 'chrono_reset': s.chronoT = 0; s.chronoRun = false; s.chronoShow = false; return;
       case 'abs_low': s.autobrake = s.autobrake === 1 ? 0 : 1; return; case 'abs_med': s.autobrake = s.autobrake === 2 ? 0 : 2; return; case 'abs_max': s.autobrake = s.autobrake === 3 ? 0 : 3; return;
       case 'AnnunciatorLtSwtch': s.lampTest = 3; return; case 'APUFireTst': case 'Eng1FireTst': case 'Eng2FireTst': s.lampTest = 2; return;
+      case 'IDG1Btn': case 'IDG2Btn': { const i = id === 'IDG1Btn' ? 0 : 1; s.gen[i] = false; s.sw[id] = 1; h.toast(`IDG ${i + 1} DISCONNECTED – generator ${i + 1} lost`, 'warn'); return; }
+      case 'EmerElecManOnBtn': s.ratOut = true; h.toast('RAT deployed – emergency electrical power', 'warn'); return;
+      case 'GPWSBtn': s.gpws.sys = !s.gpws.sys; flip(); return; case 'GPWSGSBtn': s.gpws.gs = !s.gpws.gs; flip(); return;
+      case 'GPWSFlpBtn': s.gpws.flap = !s.gpws.flap; flip(); return; case 'GPWSTerrBtn': s.gpws.terr = !s.gpws.terr; flip(); return;
+      case 'FuelModeBtn': s.fuelMode = !s.fuelMode; flip(); return;
+      case 'EmerGenTest': case 'CVRTest': case 'CargoSmkTest': case 'LeftRainTest': case 'RightRainTest': s.lampTest = 1.5; return;
+      case 'EvacCommandBtn': flip(); h.toast(s.sw[id] ? 'EVAC COMMAND ON – evacuation horn' : 'EVAC COMMAND OFF', 'warn'); return;
+      case 'MaskManOnBtn': flip(); h.toast(s.sw[id] ? 'Passenger oxygen masks released' : 'Mask MAN ON reset', 'warn'); return;
+      case 'EmerCallBtn': case 'AllCabinCall': case 'FwdCabinCall': case 'AftCabinCall': case 'GroundCall': h.toast('Interphone call – ' + g.label, 'info'); return;
       case 'ecam_all': { const pages: EcamPage[] = ['ENG', 'BLEED', 'PRESS', 'ELEC', 'HYD', 'FUEL', 'APU', 'COND', 'DOOR', 'WHEEL', 'F/CTL', 'STS']; s.page = pages[(pages.indexOf(s.page ?? 'ENG') + 1) % pages.length]; return; }
       case 'ecam_clr_l': case 'ecam_clr_r': case 'ecam_emer_canc': case 'ecam_rcl': s.page = null; return; case 'ecam_to_config': s.lampTest = 1.5; return;
       case 'ecam_eng': s.page = 'ENG'; return; case 'ecam_bleed': s.page = 'BLEED'; return; case 'ecam_press': s.page = 'PRESS'; return; case 'ecam_elec': s.page = 'ELEC'; return; case 'ecam_hyd': s.page = 'HYD'; return;
@@ -426,11 +510,12 @@ export class Cockpit {
     if (/Rudder(Pedal)/.test(g.id)) return;
     const t = g.kind === 'knob' || g.id === 'spd-sel' || g.id === 'hdg_sel' || g.id === 'alt-sel' || g.id === 'vs-sel';
     if (t) { const n = g.steps; const a = n >= 12 ? g.angle + g.pos * 0.26 : ((g.pos - (n - 1) / 2) * (n <= 3 ? 0.7 : 0.5)); g.press += 0; return this.setRot(g, a + (g.id === 'hdg_sel' ? (d.apHdg * Math.PI / 180) : g.id === 'alt-sel' ? d.apAlt / 100 * 0.26 : g.id === 'spd-sel' ? d.apSpd * 0.26 : 0)); }
-    if (g.kind === 'switch') { const n = SWITCH3.has(g.id) ? 3 : 2; return this.setRot(g, (g.pos - (n - 1) / 2) * 0.6 * (n === 2 ? 2 : 1)); }
+    if (g.kind === 'switch') { const n = SWITCH3.has(g.id) ? 3 : 2; return this.setRot(g, (g.pos - (n - 1) / 2) * (n === 2 ? 0.8 : 0.42)); }
     if (g.kind === 'guard') return this.setRot(g, g.pos ? 1.7 : 0);
     // push buttons / keys: 1.5 mm depress while pressed (toward the panel, along the knob axis or the panel normal)
     const dep = (g.press ? 0.0018 : 0) + (g.kind === 'push' && !ON_WHEN_IN.has(g.id) && g.pos === 0 ? 0.0009 : 0);
-    const m = new THREE.Matrix4().makeTranslation(dep * 0.2, dep * 0.9, 0); for (const p of g.parts) p.node.matrix.multiplyMatrices(m, p.m0);
+    const nrm = g.nrm ??= this.panelNormal(g.box.getCenter(new THREE.Vector3()));
+    const m = new THREE.Matrix4().makeTranslation(-nrm.x * dep, -nrm.y * dep, -nrm.z * dep); for (const p of g.parts) p.node.matrix.multiplyMatrices(m, p.m0);
   }
 
   private legendLit(g: Group, letter: string, row: number): [boolean, number] {
@@ -469,6 +554,7 @@ export class Cockpit {
       case 'ecam_fctl': return (s.page ?? s.pageAuto) === 'F/CTL'; case 'ecam_sts': return (s.page ?? s.pageAuto) === 'STS';
       case 'brk_fan': case 'brk_hot': return false;
     }
+    if (/^radio_(on|vhf1|nav)(\.|$)/.test(base)) return true;
     const g = this.groups.get(base); return !!g && g.pos === 1 && g.kind === 'push' && !!s.sw[base];
   }
 
@@ -481,7 +567,7 @@ export class Cockpit {
     this.ctx.d = data; this.ctx.host = h; this.ctx.t = time; this.ctx.utc = new Date(simNowMs());
     for (const m of this.mcdu) m.attach(h);
     // lighting (day/night)
-    const dl = this.daylight; this.hemi.intensity = 0.55 + 1.5 * dl; this.sun.intensity = 1.6 * dl;
+    const dl = this.daylight; this.hemi.intensity = 0.55 + 1.5 * dl + (1 - dl) * 0.9 * s.bright.flood; /* panel / flood lights at night */ this.sun.intensity = 1.6 * dl;
     // screens
     this.camera.updateMatrixWorld(); this.pv.multiplyMatrices(this.camera.projectionMatrix, this.camera.matrixWorldInverse); this.frustum.setFromProjectionMatrix(this.pv);
     const br: Record<string, number> = { pfd: s.bright.pfd, nd: s.bright.nd, uecam: s.bright.uecam, lecam: s.bright.lecam };
@@ -489,6 +575,10 @@ export class Cockpit {
       sc.mat.color.setScalar((br[sc.key] ?? 1) * (s.dc ? 1 : 0.0));
       if (time < sc.next) continue; const visibleNow = sc.meshes.some((m) => this.frustum.intersectsObject(m)); if (!visibleNow) continue;
       sc.next = time + sc.period; sc.render();
+    }
+    if (this.efbMesh && this.efbCanvas && this.efbTex) {
+      (this.efbMesh.material as THREE.MeshBasicMaterial).color.setScalar((0.3 + 0.7 * this.daylight) * (s.dc ? 1 : 0.08));
+      if ((time >= this.efbNext || this.efb.dirty) && this.frustum.intersectsObject(this.efbMesh)) { this.efbNext = time + 0.5; this.efb.draw(this.efbCanvas.getContext('2d')!, h.efbInfo?.() ?? null, this.daylight); this.efbTex.needsUpdate = true; }
     }
     if (this.fcuCanvas && this.fcuTex) {
       const key = [data.apSpd, data.apHdg, data.apAlt, s.ac, s.vsMode, s.vsTarget, s.metric, s.spdMach, s.spdManaged, s.hdgManaged].join('|');

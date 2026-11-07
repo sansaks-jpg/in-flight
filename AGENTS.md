@@ -189,6 +189,10 @@ To prevent garbage collection (GC) micro-stutters:
    - Do not bypass type errors using untyped `@ts-ignore` without rigorous justification.
 4. **Performance & Quality Presets**:
    - Ensure changes respect the quality presets (`ultra`, `high`, `medium`, `low`) defined in `src/sim/quality.ts` — the `QualityPreset` type lives in `src/sim/storage.ts`. There is no `mobile` preset: mobile devices are handled through the `isMobile` flag in `resolveAutoQuality()` / `qualityProfile()`. Keep draw calls and geometry count within the defined budgets.
+5. **Asset Storage & CDN Rules**:
+   - **Do NOT bundle or commit heavy binary assets** (e.g. 3D GLB/GLTF models, large textures, binary datasets) directly into the repository files.
+   - All external 3D models and heavy assets must be loaded via **runtime auto-fetch from a permanent, reliable public URL/CDN** (e.g. pinned jsDelivr, GitHub releases, or Hugging Face CDN mirrors) with automated fallback (such as procedural geometry).
+   - Never alter `package.json` project name or delete root build scripts. Keep all dependencies and build configs aligned with Cloudflare Pages requirements.
 
 
 ---

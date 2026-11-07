@@ -14,6 +14,8 @@ export interface CockpitHost {
   route(): { name: string; lat: number; lon: number }[];
   position(): { lat: number; lon: number };
   magVar(hdg: number): number;
+  /** Live flight data for the captain's EFB tablet. */
+  efbInfo?(): import('./efb').EfbInfo | null;
 }
 
 export type EcamPage = 'ENG' | 'BLEED' | 'PRESS' | 'ELEC' | 'HYD' | 'FUEL' | 'APU' | 'COND' | 'DOOR' | 'WHEEL' | 'F/CTL' | 'STS' | 'CRZ';

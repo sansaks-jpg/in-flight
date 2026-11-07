@@ -317,7 +317,7 @@ export function drawISIS(g: G, W: number, H: number, c: Ctx) {
 /** FCU digits overlay: canvas covers the whole display strip; x positions map 1:1 to the model's `.ind` meshes. */
 export function drawFCU(g: G, W: number, H: number, c: Ctx, zToX: (z: number) => number) {
   g.clearRect(0, 0, W, H); const d = c.d, sys = c.sys; if (!sys.ac && !sys.acEss) return;
-  const px = H * 0.78, col = '#ffb23d';
+  const px = H * 0.68, col = '#ffb23d';
   const seg = (z: number, s: string) => { g.font = `bold ${px}px ${M}`; g.fillStyle = col; g.textAlign = 'center'; g.textBaseline = 'middle'; g.shadowColor = col; g.shadowBlur = H * 0.25; g.fillText(s, zToX(z) * W, H / 2); g.shadowBlur = 0; };
   seg(0.0985, sys.spdManaged ? '---' : sys.spdMach ? (d.apSpd / 600).toFixed(2).slice(1) : pad(d.apSpd, 3));
   seg(0.0575, sys.hdgManaged ? '---' : pad((d.apHdg + 360) % 360, 3));

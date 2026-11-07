@@ -263,3 +263,15 @@ in-flight/
 
 This project is licensed under the MIT License.
 Third-party 3D model assets are licensed under their respective authors (see `src/assets/LICENSE-kenney-nature.txt`).
+
+
+---
+
+## A320 flight deck (3D cockpit)
+
+- **Aircraft**: Airbus A320-200 only. Interactive 3D flight deck (FlightGear A320-family model, GPL-2.0) with about 570 operable controls wired to the electrical, APU, bleed/pack, hydraulic, fuel, engine-start, autoflight and flight-control simulation.
+- **Live displays**: PFD, ND, E/WD, SD (all pages), MCDU x2, ISIS, FCU digits and clock, driven by real-time telemetry.
+- **EFB tablet** (captain's window mount): flight plan, checklists, airport/runway data, radio frequencies, live METAR weather with runway wind components, and basic procedures. Click the tabs, tick checklist items, scroll with the wheel.
+- **Camera (MSFS-style)**: drag to look, Shift/middle-drag to lean, wheel to zoom, double-click a control to fly to it, double-click empty space to return; the camera panel offers PFD / ND / ECAM / FCU / overhead / pedestal / MCDU / EFB views.
+- **Tooltips**: hover any control for its real-world name, function and current state.
+- Model asset: `public/models/a320/cockpit.glb` (compressed, ships with the project) with pinned runtime fallbacks; see `public/models/a320/NOTICE.txt`.

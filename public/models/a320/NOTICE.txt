@@ -13,4 +13,4 @@ Modifications made for In-Flight:
   * no vertices, UVs, node names or coordinates were edited. cockpit-manifest.json is the unmodified upstream manifest
     (animation axes / part bounding boxes in the original model coordinates).
 
-The unmodified original is available at runtime from the permanent pinned fallbacks listed in src/sim/a320/assets.ts.
+The compressed model ships in this folder (cockpit.glb). The unmodified 50.6 MB original is available at runtime from the pinned raw.githubusercontent.com / githack fallbacks listed in src/sim/a320/assets.ts (jsDelivr cannot serve it: >50 MB).

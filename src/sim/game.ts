@@ -12,6 +12,7 @@ import { Projection, haversine, bearing, wrap180, wrap360, D2R, R2D, clamp, M_PE
 import { World, Threshold, TimeOfDay } from './world';
 import { AircraftVisual, loadAircraftVisual } from './aircraftModel';
 import { Cockpit, CockpitPreset, CockpitHost } from './cockpit';
+import type { EfbInfo } from './a320/efb';
 import { PanelData } from './instruments';
 import { Autopilot, IlsData } from './autopilot';
 import { advanceWaypoint } from './lnav';
@@ -41,6 +42,8 @@ export interface LandingInfo { vsFpm: number; kias: number; offset: number; dist
 export interface Result { outcome: 'landed' | 'diverted' | 'crashed'; score: number; grade: string; items: Breakdown[]; landing: LandingInfo | null; rank: number; reason: string; distanceKm: number; flightTime: number; comfort: number; newBest: boolean; }
 export interface CockpitTooltip {
   id: string;
+  /** Real-world function of the control (from a320/controlInfo.ts). */
+  description?: string;
   label: string;
   value: string;
   actionHint: string;
@@ -301,6 +304,7 @@ export class Game {
   radioMenuOpen = false;
   keys = new Set<string>(); private axes = { pitch: 0, roll: 0, yaw: 0 }; touch = { pitch: 0, roll: 0, yaw: 0, brake: false }; yokeDrag: { pitch: number; roll: number } | null = null; private pad = { pitch: 0, roll: 0, yaw: 0 };
   private brakeAxis = 0; private restartHold = 0; private apOverride = 0;
+  private panning = false;
   private drag: { id: string; sx: number; sy: number; v: number; look?: boolean } | null = null;
   private pointers = new Map<number, { x: number; y: number }>();
   // game state
@@ -801,6 +805,19 @@ export class Game {
       action: (id: string) => g.action(id), setApTarget: (t, v) => g.setApTarget(t, v), toast: (m, k) => g.toast(m, k ?? 'info'),
       route: () => g.flightPlan.slice(Math.max(0, g.activeWpIdx)).map((w) => ({ name: w.name, lat: w.lat, lon: w.lon })),
       position: () => ({ lat: g.lat(), lon: g.lon() }), magVar: (h: number) => g.magHdg(h) - h,
+      efbInfo: () => g.efbInfo(),
+    };
+  }
+
+  /** Live data for the captain's EFB tablet in the 3D flight deck (flight plan, checklist, airports, weather). */
+  efbInfo(): EfbInfo | null {
+    if (!this.cfg || !this.fm || !this.world) return null;
+    const h = this.hud(), la = this.lat(), lo = this.lon();
+    return {
+      dep: this.cfg.from, arr: this.cfg.to, depRwy: this.depRwy, arrRwy: h.apprRwy, callsign: this.callsign?.callsign ?? 'FLIGHT', phase: this.currentFlightPhase,
+      wx: this.liveWx, windFrom: this.windFrom, windKt: this.windKt, qnh: this.liveWx?.qnh ?? 1013, oatC: this.oat(),
+      route: this.flightPlan.map((w) => ({ name: w.name, type: w.type, distNm: haversine(la, lo, w.lat, w.lon) / M_PER_NM })), activeWp: this.activeWpIdx,
+      checklist: this.checklistItems, toggle: (id) => this.toggleChecklistItem(id), fuelKg: this.fm.fuel, distNm: h.distNm, eteMin: h.distNm / Math.max(h.gsKt, 250) * 60, utcMs: simNowMs(),
     };
   }
 
@@ -943,7 +960,7 @@ export class Game {
     if (this.depTh) this.depTh = null;
   }
   setView(v: ViewId) {
-    this.viewIdx = VIEWS.indexOf(v); this.lookYaw = 0; this.lookPitch = 0; this.orbitYaw = 0; this.orbitPitch = 0.12;
+    this.viewIdx = VIEWS.indexOf(v); this.lookYaw = 0; this.lookPitch = 0; this.orbitYaw = 0; this.orbitPitch = 0.12; this.cockpit?.resetLook();
     this.visual?.setInterior(this.isInterior());
   }
   resetView() {
@@ -1212,15 +1229,17 @@ export class Game {
   private lastClickT = 0; private lastHoverT = 0; private lastDX = 0; private lastDY = 0;
   private ndc(e: PointerEvent) { const r = this.canvas.getBoundingClientRect(); return new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1); }
   private onPointerDown = (e: PointerEvent) => {
-    if (e.button !== 0 && e.button !== 2) return;
+    if (e.button !== 0 && e.button !== 2 && e.button !== 1) return;
+    if (e.button === 1) e.preventDefault();
     this.audio.start();
     if (this.phase !== 'playing') return;
     this.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     this.canvas.setPointerCapture?.(e.pointerId);
-    if ((e.button === 0 || e.button === 2) && this.mode === 'play' && this.isInterior() && this.cockpit) {
+    this.panning = e.button === 1 || (e.shiftKey && e.button === 0 && this.isInterior());
+    if (!this.panning && (e.button === 0 || e.button === 2) && this.mode === 'play' && this.isInterior() && this.cockpit) {
       const now = performance.now(), dbl = now - this.lastClickT < 320; this.lastClickT = now;
       const cam = this.cockpit.activeCamera; cam.updateMatrixWorld(); this.raycaster.setFromCamera(this.ndc(e), cam);
-      if (dbl && e.button === 0 && this.cockpit.focusAt(this.raycaster)) { this.audio.click(); return; }
+      if (dbl && e.button === 0) { if (this.cockpit.focusAt(this.raycaster)) { this.audio.click(); return; } if (!this.cockpit.hover(this.raycaster)) { this.cockpit.setPreset('pilot'); this.cockpit.resetZoom(); return; } }
       const hit = this.cockpit.press(this.raycaster, e.button, e.shiftKey);
       if (hit) {
         const c = this.fm.ctl;
@@ -1247,7 +1266,7 @@ export class Game {
           this.lastHoverT = nowH;
           const cam = this.cockpit.activeCamera; cam.updateMatrixWorld(); this.raycaster.setFromCamera(this.ndc(e), cam);
           const hv = this.cockpit.hover(this.raycaster);
-          this.cockpitTooltip = hv ? { id: hv.id, label: hv.label, value: hv.value, actionHint: hv.hint, x: e.clientX, y: e.clientY } : null;
+          this.cockpitTooltip = hv ? { id: hv.id, label: hv.label, value: hv.value, actionHint: hv.hint, description: hv.desc, x: e.clientX, y: e.clientY } : null;
         }
       } else {
         this.cockpitTooltip = null;
@@ -1265,7 +1284,7 @@ export class Game {
         this.freelookActive = true;
         const p = this.pointers.get(e.pointerId); const mx = p ? e.clientX - p.x : 0, my = p ? e.clientY - p.y : 0;
         if (p) { p.x = e.clientX; p.y = e.clientY; }
-        if (this.isInterior()) { this.lookYaw = clamp(this.lookYaw - mx * 0.0045, -2.6, 2.6); this.lookPitch = clamp(this.lookPitch - my * 0.0045, -1.2, 1.2); }
+        if (this.isInterior()) { if (this.panning) this.cockpit?.panBy(mx, my); else this.cockpit?.lookBy(mx, my); }
         else { this.orbitYaw -= mx * 0.006; this.orbitPitch = clamp(this.orbitPitch + my * 0.005, -0.3, 1.3); }
       }
     }
@@ -1899,8 +1918,8 @@ export class Game {
     if (this.isInterior() && this.mode === 'play') {
       cam.near = 0.02;
       const vw = this.cockpit!.smooth(dt);
-      const lk = 1 / this.cockpit!.zoom; // look sensitivity follows the zoom so tiny details stay steerable
-      tmpE.set(vw.pitch + this.lookPitch * lk + sx * lk, vw.yaw + this.lookYaw * lk + sy * lk, sr, 'YXZ');
+      const lk = 1 / this.cockpit!.zoom; // camera shake is scaled with the zoom so magnified details stay steady
+      tmpE.set(vw.pitch + sx * lk, vw.yaw + sy * lk, sr, 'YXZ');
       const local = tmpQ.setFromEuler(tmpE); // scratch — no per-frame clone
       tmpV3.copy(vw.pos); tmpV3.y += gOff;  // head position in body frame (scratch)
       for (const cq of [this.cockpit!.camera, this.cockpit!.activeCamera]) { cq.position.copy(tmpV3); cq.quaternion.copy(local); cq.fov = this.fovFor(vw.fov); cq.updateProjectionMatrix(); } const cq = this.cockpit!.camera;

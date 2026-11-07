@@ -129,7 +129,7 @@ export function CockpitTooltipOverlay({ tooltip }: { tooltip: CockpitTooltip | n
       style={{ left: `${clampX}px`, top: `${clampY}px` }}
       className="fixed z-50 pointer-events-none -translate-x-1/2 -translate-y-full mb-3 flex flex-col items-center animate-[fadein_.1s_ease-out]"
     >
-      <div className="rounded-xl border border-cyan-400/50 bg-slate-950/90 backdrop-blur-md px-3 py-2 shadow-[0_8px_30px_rgba(6,182,212,0.3)] text-center min-w-[190px] max-w-[270px]">
+      <div className="rounded-xl border border-cyan-400/50 bg-slate-950/90 backdrop-blur-md px-3 py-2 shadow-[0_8px_30px_rgba(6,182,212,0.3)] text-center min-w-[200px] max-w-[320px]">
         <div className="flex items-center justify-center gap-1.5 text-[10px] font-black uppercase tracking-wider text-cyan-300">
           <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-ping" />
           {tooltip.label}
@@ -137,8 +137,13 @@ export function CockpitTooltipOverlay({ tooltip }: { tooltip: CockpitTooltip | n
         <div className="mt-1 text-xs font-bold text-white font-mono bg-white/5 py-0.5 px-2 rounded border border-white/10">
           {tooltip.value}
         </div>
+        {tooltip.description && (
+          <div className="mt-1.5 text-[10px] leading-snug text-slate-100 text-left">
+            {tooltip.description}
+          </div>
+        )}
         {tooltip.actionHint && (
-          <div className="mt-1 text-[9px] font-semibold text-slate-300/90">
+          <div className="mt-1 text-[9px] font-semibold text-cyan-200/80">
             {tooltip.actionHint}
           </div>
         )}
