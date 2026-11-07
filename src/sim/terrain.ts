@@ -12,29 +12,29 @@ export interface LodCfg { z: number; r: number; N: number; drop: number; }
 export const LOD_ULTRA: LodCfg[] = [
   { z: 15, r: 1, N: 81, drop: 0 },
   { z: 13, r: 2, N: 97, drop: 0 },
-  { z: 11, r: 2, N: 65, drop: 30 },
-  { z: 9, r: 1, N: 41, drop: 80 },
-  { z: 7, r: 1, N: 25, drop: 160 },
+  { z: 11, r: 2, N: 65, drop: 8 },
+  { z: 9, r: 1, N: 41, drop: 20 },
+  { z: 7, r: 1, N: 25, drop: 40 },
 ];
 export const LOD_HIGH: LodCfg[] = [
   { z: 15, r: 1, N: 65, drop: 0 },
   { z: 13, r: 2, N: 97, drop: 0 },
-  { z: 11, r: 1, N: 65, drop: 30 },
-  { z: 9, r: 1, N: 41, drop: 80 },
-  { z: 7, r: 1, N: 25, drop: 160 },
+  { z: 11, r: 1, N: 65, drop: 8 },
+  { z: 9, r: 1, N: 41, drop: 20 },
+  { z: 7, r: 1, N: 25, drop: 40 },
 ];
 export const LOD_MEDIUM: LodCfg[] = [
   { z: 15, r: 1, N: 49, drop: 0 },
   { z: 13, r: 1, N: 65, drop: 0 },
-  { z: 11, r: 1, N: 41, drop: 30 },
-  { z: 9, r: 1, N: 25, drop: 80 },
-  { z: 7, r: 1, N: 17, drop: 160 },
+  { z: 11, r: 1, N: 41, drop: 8 },
+  { z: 9, r: 1, N: 25, drop: 20 },
+  { z: 7, r: 1, N: 17, drop: 40 },
 ];
 export const LOD_LOW: LodCfg[] = [
   { z: 13, r: 1, N: 49, drop: 0 },
-  { z: 11, r: 1, N: 33, drop: 30 },
-  { z: 9, r: 1, N: 25, drop: 80 },
-  { z: 7, r: 1, N: 17, drop: 160 },
+  { z: 11, r: 1, N: 33, drop: 8 },
+  { z: 9, r: 1, N: 25, drop: 20 },
+  { z: 7, r: 1, N: 17, drop: 40 },
 ];
 
 const LOD_MAP: Record<QualityPreset, LodCfg[]> = {

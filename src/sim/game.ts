@@ -7,11 +7,10 @@ import { FlightModel, G, atmosphere, airState } from './physics';
 import { LiveWx, OFFLINE_WX, fetchLiveWeather, windProfile, windVector, isaDeviation, wxSummary } from './liveWeather';
 import { Precip } from './precip';
 import { chooseSpawn, Spawn } from './departure';
-import { AtcRadio, buildExchange, RadioLine, RadioCtx } from './atc';
+import { AtcRadio, buildAmbient, buildExchange, makeCallsign, phoneticLetter, AmbientPhase, RadioLine, RadioCtx } from './atc';
 import { Projection, haversine, bearing, wrap180, wrap360, D2R, R2D, clamp, M_PER_NM, MS_TO_KT, destination, greatCircle, FlightWaypoint } from './geo';
 import { World, Threshold, TimeOfDay } from './world';
-import { AircraftVisual } from './aircraftModel';
-import { loadAircraftVisual } from './glbAircraft';
+import { AircraftVisual, loadAircraftVisual } from './aircraftModel';
 import { Cockpit } from './cockpit';
 import { PanelData } from './instruments';
 import { Autopilot, IlsData } from './autopilot';
@@ -331,6 +330,10 @@ export class Game {
   private nextAtcId = 1;
   /** Automatic, voiced ATC <-> pilot radio (see atc.ts). */
   atcLive: AtcMessage | null = null; private atcLastCat = ''; private atisLetter = 'A';
+  /** Per-flight radio identity (see atc.ts): generated callsign, a seeded PRNG so exchanges and
+   *  ambient chatter replay identically for a flight, and the background-traffic timer. */
+  private callsignFlight = ''; private callsign = { callsign: 'Aero 101', spoken: 'Aero 101' };
+  private atcRng: () => number = Math.random; private ambientT = 40; private ambientLast = '';
   radio = new AtcRadio({
     onLine: (l) => this.logRadioLine(l),
     onLive: (l) => { this.atcLive = l ? { id: l.id, sender: l.who, text: l.text, time: this.time, label: l.label } : null; },
@@ -364,6 +367,9 @@ export class Game {
     canvas.addEventListener('wheel', this.onWheel, { passive: true }); canvas.addEventListener('contextmenu', (e) => e.preventDefault());
     document.addEventListener('visibilitychange', () => { if (document.hidden && this.phase === 'playing') this.pause(); });
     this.last = performance.now(); this.raf = requestAnimationFrame(this.loop);
+    // A hidden tab stops the RAF loop, so the per-frame radio gate would never run again: pause the
+    // frequency the moment the tab is hidden, and re-gate it when the tab comes back.
+    document.addEventListener('visibilitychange', () => { if (typeof document !== 'undefined') this.radio.setPaused(!this.radioMayTransmit()); });
     (window as any).sim = this;
   }
   get isMobile() { return matchMedia('(pointer: coarse)').matches || Math.min(screen.width, screen.height) < 700; }
@@ -525,13 +531,14 @@ export class Game {
     this.speedTrendSmoothed = 0;
     this.prevKias = this.fm ? this.fm.ias / 0.514444 : 0;
     this.radio.cancel(); this.atcMessages = []; this.atcReply = null; this.atcLastCat = '';
+    this.reseedRadio();
     const rwyInit = this.depRwy || '09';
     if (startMode === 'runway') {
       this.addAtc('ATIS', this.atisText(from, rwyInit), false);
     } else if (startMode === 'final') {
-      this.addAtc('TOWER', `Aero 101, ${to.icao} Tower. Established final approach runway ${this.apprKey || '27'}, cleared to land.`, true);
+      this.addAtc('TOWER', `${this.callsign.callsign}, ${to.icao} Tower. Established final approach runway ${this.apprKey || '27'}, cleared to land.`, true);
     } else {
-      this.addAtc('ENROUTE', `Aero 101, radar contact at ${Math.round(spec.cruiseAlt / 0.3048)} ft, cleared enroute ${to.icao}.`, false);
+      this.addAtc('ENROUTE', `${this.callsign.callsign}, radar contact at ${Math.round(spec.cruiseAlt / 0.3048)} ft, cleared enroute ${to.icao}.`, false);
     }
     this.lastLL = [this.lat(), this.lon()]; this.bestRem = dist; this.chaseInit = false; this.shakeImpulse = 0; this.lookYaw = this.lookPitch = 0; this.zoom = 1;
     this.effects?.update(0);
@@ -613,11 +620,20 @@ export class Game {
     return f ? ` on ${f.mhz.toFixed(3).replace(/0$/, '')}` : '';
   }
   private atisText(ap: Airport, rwy: string) {
-    const wx = this.liveWx; const letter = String.fromCharCode(65 + (Math.floor(simNowMs() / 3600000) % 26));
-    if (!wx || !wx.ok) return `${ap.icao} information ${letter}. Weather unavailable (offline) – assume calm, ISA. Runway ${rwy} in use. ${this.qnh(ap)}.`;
+    const wx = this.liveWx, hour = Math.floor(simNowMs() / 3600000), letter = phoneticLetter(hour);
+    this.atisLetter = letter; const faa = /^(K|P[AFGHJKMW]|C[A-Z])/.test(ap.id), r = this.atcRng;
+    const name = (ap.city || ap.name || ap.icao).replace(/\s*(international|intl|airport|airfield|regional|domestic).*$/i, '').trim() || ap.icao;
+    const head = faa ? `${name} airport information ${letter}` : `${name} information ${letter}`;
+    if (!wx || !wx.ok) return `${head}. Weather unavailable. Runway ${rwy} in use. ${this.qnh(ap)}. Advise on initial contact you have information ${letter}.`;
     const gust = wx.gustKt > wx.windKt + 4 ? `, gusting ${Math.round(wx.gustKt)}` : '';
-    const vis = wx.visM >= 10000 ? 'visibility 10 kilometres or more' : `visibility ${(wx.visM / 1000).toFixed(1)} kilometres`;
-    return `${ap.icao} information ${letter} (${wx.metar ? 'METAR ' + wx.icao : 'model data'}). Runway ${rwy} in use. Wind ${String(this.windFrom).padStart(3, '0')}° ${this.windKt} knots${gust}. ${vis}. ${wx.condition}. Temperature ${Math.round(wx.tempC)}, ${this.qnh(ap)}.`;
+    const windS = wx.windKt < 1 ? 'Wind calm' : faa ? `Wind ${String(this.windFrom).padStart(3, '0')} at ${this.windKt}${gust}` : `Wind ${String(this.windFrom).padStart(3, '0')}° ${this.windKt} knots${gust}`;
+    const vis = wx.visM >= 9999 ? (faa ? 'visibility one zero' : 'visibility 10 kilometres or more') : (faa ? `visibility ${Math.max(1, Math.round(wx.visM / 1609))}` : `visibility ${(wx.visM / 1000).toFixed(1)} kilometres`);
+    const sky = wx.baseAglM !== null ? `${wx.cover[0] > 0.75 ? 'overcast' : wx.cover[0] > 0.45 ? 'broken' : 'scattered'} clouds ${Math.round(wx.baseAglM / 0.3048 / 100) * 100} feet` : wx.cover[1] + wx.cover[2] > 0.5 ? 'few clouds at altitude' : 'sky clear';
+    const phen = wx.thunder ? 'Thunderstorms in the vicinity' : wx.snow > 0.05 ? 'Snow' : wx.rain > 0.6 ? 'Heavy rain' : wx.rain > 0.05 ? 'Light rain' : wx.fog > 0.5 ? 'Fog' : wx.fog > 0.2 ? 'Mist' : '';
+    const temp = `temperature ${Math.round(wx.tempC)}, dew point ${Math.round(wx.dewC)}`;
+    const use = faa ? `Landing and departing runway ${rwy}` : `Runway ${rwy} in use`;
+    const tail = r() < 0.5 ? `Advise on initial contact you have information ${letter}` : `Read back all hold short instructions. Advise you have ${letter}`;
+    return `${head}${wx.metar ? ' (METAR ' + wx.icao + ')' : ''}. ${windS}. ${vis}. ${phen ? phen + '. ' : ''}${sky}. ${temp}. ${this.qnh(ap)}. ${use}. ${tail}.`;
   }
   private depFreq() { return this.atcFreq(this.cfg.from, 'GND'); }
   /** Pilot start-up sequence, one real step per press: battery → (mixture) → beacon → starter, engine by engine. */
@@ -649,7 +665,7 @@ export class Game {
     if (this.pushback.active || this.pushback.done) { this.toast(this.pushback.active ? 'Pushback in progress' : 'Pushback already completed', 'info'); return; }
     if (!c.battery || !this.lights.beacon) { this.toast('Battery and BEACON must be ON before pushback', 'warn'); return; }
     this.pushback = { active: true, t: 0, done: false }; c.parking = false;
-    this.addAtc('GROUND', `Aero 101, pushback approved, tail towards the taxiway${this.depFreq()}. Start-up at your discretion.`, false);
+    this.addAtc('GROUND', `${this.callsign.callsign}, pushback approved, tail towards the taxiway${this.depFreq()}. Start-up at your discretion.`, false);
     this.toast('PUSHBACK – tug connected, parking brake released', 'good');
   }
   /** ATC departure flow driven by what the pilot actually does (clearance → start → taxi → line-up → take-off). */
@@ -659,29 +675,29 @@ export class Game {
     const ev = fm.eng.slice(0, s.engines);
     switch (this.depStage) {
       case 0:
-        if (this.depT > 4) { this.addAtc('CLEARANCE', `Aero 101, ${this.cfg.from.icao} Delivery. Cleared to ${this.cfg.to.icao} as filed, runway ${rwy} departure, initial climb ${s.kind === 'piston' ? '3000' : '5000'} feet, squawk ${1000 + Math.floor(Math.abs(Math.sin(this.cfg.from.lat * 91.7 + this.cfg.from.lon * 13.3)) * 6999)}. ${this.qnh(this.cfg.from)}.`, true); this.depStage = 1; }
+        if (this.depT > 4) { this.addAtc('CLEARANCE', `${this.callsign.callsign}, ${this.cfg.from.icao} Delivery. Cleared to ${this.cfg.to.icao} as filed, runway ${rwy} departure, initial climb ${s.kind === 'piston' ? '3000' : '5000'} feet, squawk ${1000 + Math.floor(Math.abs(Math.sin(this.cfg.from.lat * 91.7 + this.cfg.from.lon * 13.3)) * 6999)}. ${this.qnh(this.cfg.from)}.`, true); this.depStage = 1; }
         break;
       case 1:
         if (ev.some((e) => e.state > 0) || this.pushback.active) {
-          this.addAtc('GROUND', this.spawn?.pushback && !this.pushback.done ? `Aero 101, start-up approved.` : `Aero 101, ${this.cfg.from.icao} Ground. Start-up approved${this.depFreq()}.`, false); this.depStage = 2;
+          this.addAtc('GROUND', this.spawn?.pushback && !this.pushback.done ? `${this.callsign.callsign}, start-up approved.` : `${this.callsign.callsign}, ${this.cfg.from.icao} Ground. Start-up approved${this.depFreq()}.`, false); this.depStage = 2;
         }
         break;
       case 2:
         if (ev.every((e) => e.state === 2) && !c.parking && !this.pushback.active) {
-          this.addAtc('GROUND', `Aero 101, taxi to holding point runway ${rwy}${this.taxiVia()}. ${this.qnh(this.cfg.from)}.`, true); this.depStage = 3;
+          this.addAtc('GROUND', `${this.callsign.callsign}, taxi to holding point runway ${rwy}${this.taxiVia()}. ${this.qnh(this.cfg.from)}.`, true); this.depStage = 3;
           const it = this.checklistItems.find((x) => x.id === 'atc_ground'); if (it) it.done = true;
         }
         break;
       case 3: {
         const d = Math.hypot(fm.pos.x - th.startX, fm.pos.z - th.startZ);
-        if (d < 160 && fm.gs < 8) { this.addAtc('TOWER', `Aero 101, ${this.cfg.from.icao} Tower${this.atcFreq(this.cfg.from, 'TWR')}. Runway ${rwy}, line up and wait.`, true); this.depStage = 4; }
+        if (d < 160 && fm.gs < 8) { this.addAtc('TOWER', `${this.callsign.callsign}, ${this.cfg.from.icao} Tower${this.atcFreq(this.cfg.from, 'TWR')}. Runway ${rwy}, line up and wait.`, true); this.depStage = 4; }
         break;
       }
       case 4: {
         const r = w.runwayAt(fm.pos.x, fm.pos.z, 0), hd = Math.abs(wrap180(fm.heading - th.hdg));
         if (r && hd < 14 && Math.abs(r.across) < th.wid / 2 && fm.gs < 20) {
           const gust = this.liveWx && this.liveWx.gustKt > this.liveWx.windKt + 4 ? ` gusting ${Math.round(this.liveWx.gustKt)}` : '';
-          this.addAtc('TOWER', `Aero 101, wind ${String(this.windFrom).padStart(3, '0')}° ${this.windKt} knots${gust}, runway ${rwy}, cleared for take-off.`, true); this.audio.chirp(); this.depStage = 5;
+          this.addAtc('TOWER', `${this.callsign.callsign}, wind ${String(this.windFrom).padStart(3, '0')}° ${this.windKt} knots${gust}, runway ${rwy}, cleared for take-off.`, true); this.audio.chirp(); this.depStage = 5;
         }
         break;
       }
@@ -1110,7 +1126,7 @@ export class Game {
     }
   }
   dispose() {
-    cancelAnimationFrame(this.raf); this.disposeScenario(); this.audio.silence(); this.radio.cancel();
+    cancelAnimationFrame(this.raf); this.disposeScenario(); this.stopRadio();
     window.removeEventListener('resize', this.resize); window.removeEventListener('keydown', this.onKeyDown); window.removeEventListener('keyup', this.onKeyUp); window.removeEventListener('blur', this.onBlur);
     this.renderer.dispose();
     if ((window as any).sim === this) delete (window as any).sim;
@@ -1172,8 +1188,18 @@ export class Game {
       }
     }
   }
-  setPhase(p: Phase) { if (this.phase === p) return; if (p === 'paused') this.radio.setPaused(true); else if (this.phase === 'paused') this.radio.setPaused(false); this.phase = p; this.hooks.onPhase(p); }
+  setPhase(p: Phase) {
+    if (this.phase === p) return; this.phase = p;
+    // flight over / reloading: nothing on the frequency is relevant any more
+    if (p === 'crashed' || p === 'complete' || p === 'loading') this.radio.cancel();
+    this.radio.setPaused(!this.radioMayTransmit());
+    this.hooks.onPhase(p);
+  }
+  /** True only while the player is actually flying (not paused, in a menu, loading or in a hidden tab). */
+  private radioMayTransmit() { return this.mode === 'play' && this.phase === 'playing' && !this.suspended && !document.hidden && !!this.world; }
   pause() { if (this.phase !== 'playing') return; this.clearInput(); this.setPhase('paused'); this.audio.silence(); }
+  /** Hard stop of all voice traffic and sound: back to the menu / planner / a new scenario. */
+  stopRadio() { this.radio.cancel(); this.audio.silence(); this.radio.setPaused(true); }
   resume() { if (this.phase !== 'paused') return; this.setPhase('playing'); this.last = performance.now(); }
   restart() {
     if (!this.world) return;
@@ -1602,7 +1628,10 @@ export class Game {
       return;
     }
     if (this.mode === 'attract') { this.time += rdt; this.attractCamera(rdt); this.world.update(this.camera, this.fm.pos, 1, this.time); this.visual?.update(this.fm, rdt, this.time, this.lights); this.visual!.root.position.copy(this.fm.pos); this.visual!.root.quaternion.copy(this.fm.quat); this.effects?.update(rdt); this.render(); return; }
-    if (this.phase === 'playing') this.simulate(rdt);
+    // The radio may only transmit while a real flight is running (not paused, in a menu, loading,
+    // in the attract scene or in a hidden tab). Checked per frame — covers every state change for free.
+    this.radio.setPaused(!this.radioMayTransmit());
+    if (this.phase === 'playing') { this.simulate(rdt); this.tickAmbient(rdt); }
     else if (this.phase === 'crashed' || this.phase === 'complete') this.postEnd(rdt);
     else if (this.phase === 'paused') { this.audio.update(this.audioState(true), rdt); }
     // While the full-screen chart covers the cockpit the HUD is invisible: 4 Hz is plenty and spares React ~7 re-renders/s.
@@ -1749,7 +1778,7 @@ export class Game {
       this.pushback.t += dt; const v = Math.min(1.6, this.pushback.t * 0.9) * (this.pushback.t > 24 ? Math.max(0, 1 - (this.pushback.t - 24) * 0.9) : 1), pd = this.spawn.pushDir * D2R;
       fm.ctl.parking = false; fm.ctl.brake = 0; fm.ctl.throttle = 0;
       fm.vel.x = Math.sin(pd) * v; fm.vel.z = -Math.cos(pd) * v; fm.w.y = 0;
-      if (this.pushback.t > 25) { this.pushback = { active: false, t: 0, done: true }; fm.ctl.parking = true; fm.vel.set(0, 0, 0); this.addAtc('GROUND', `Aero 101, pushback complete, tug disconnected – set parking brake. Report ready to taxi.`, false); this.toast('Pushback complete – set parking brake [B] and start engines [I]', 'good'); }
+      if (this.pushback.t > 25) { this.pushback = { active: false, t: 0, done: true }; fm.ctl.parking = true; fm.vel.set(0, 0, 0); this.addAtc('GROUND', `${this.callsign.callsign}, pushback complete, tug disconnected – set parking brake. Report ready to taxi.`, false); this.toast('Pushback complete – set parking brake [B] and start engines [I]', 'good'); }
     }
     const h = 1 / 120; this.acc += dt * this.timeScale; let steps = 0;
     while (this.acc >= h && steps < 140) { fm.step(h); this.acc -= h; steps++; if (fm.events.length) this.handleEvents(); if (fm.crashed) break; }
@@ -2179,48 +2208,83 @@ export class Game {
       case 'taxi':
         if (this.landing || this.depStage < 5) {
           if (!this.landing) break;
-          this.addAtc('GROUND', `Aero 101, welcome to ${toIcao}. Taxi to the apron, vacate the runway and contact Ground${this.atcFreq(this.cfg.to, 'GND')}.`, true);
+          this.addAtc('GROUND', `${this.callsign.callsign}, welcome to ${toIcao}. Taxi to the apron, vacate the runway and contact Ground${this.atcFreq(this.cfg.to, 'GND')}.`, true);
         } else {
-          this.addAtc('GROUND', `Aero 101, ${fromIcao} Ground. Taxi to holding point runway ${depRwy}${this.taxiVia()}.`, true);
+          this.addAtc('GROUND', `${this.callsign.callsign}, ${fromIcao} Ground. Taxi to holding point runway ${depRwy}${this.taxiVia()}.`, true);
         }
         break;
       case 'takeoff':
-        if (this.depStage < 5) { this.addAtc('TOWER', `Aero 101, ${fromIcao} Tower${this.atcFreq(this.cfg.from, 'TWR')}. Runway ${depRwy}, wind ${wind}, cleared for takeoff.`, true); this.audio.chirp(); this.depStage = 5; }
+        if (this.depStage < 5) { this.addAtc('TOWER', `${this.callsign.callsign}, ${fromIcao} Tower${this.atcFreq(this.cfg.from, 'TWR')}. Runway ${depRwy}, wind ${wind}, cleared for takeoff.`, true); this.audio.chirp(); this.depStage = 5; }
         break;
       case 'climb':
-        this.addAtc('DEPARTURE', `Aero 101, airborne, radar contact. Climb and maintain ${Math.round(this.spec.cruiseAlt / 0.3048)} ft, contact Departure${this.atcFreq(this.cfg.from, 'DEP') || this.atcFreq(this.cfg.from, 'APP')}.`, false);
+        this.addAtc('DEPARTURE', `${this.callsign.callsign}, airborne, radar contact. Climb and maintain ${Math.round(this.spec.cruiseAlt / 0.3048)} ft, contact Departure${this.atcFreq(this.cfg.from, 'DEP') || this.atcFreq(this.cfg.from, 'APP')}.`, false);
         break;
       case 'cruise':
-        this.addAtc('ENROUTE', `Aero 101, reaching cruise altitude. Traffic clear, monitor ${this.atcFreq(this.cfg.to, 'APP').trim() || 'enroute frequency'}.`, false);
+        this.addAtc('ENROUTE', `${this.callsign.callsign}, reaching cruise altitude. Traffic clear, monitor ${this.atcFreq(this.cfg.to, 'APP').trim() || 'enroute frequency'}.`, false);
         break;
       case 'descent':
-        this.addAtc('APPROACH', `Aero 101, ${toIcao} Approach. Descend and maintain 3,500 ft, ${this.qnh(this.cfg.to)}. Expect ILS runway ${arrRwy}.`, true);
+        this.addAtc('APPROACH', `${this.callsign.callsign}, ${toIcao} Approach. Descend and maintain 3,500 ft, ${this.qnh(this.cfg.to)}. Expect ILS runway ${arrRwy}.`, true);
         this.audio.chime();
         break;
       case 'final':
-        this.addAtc('TOWER', `Aero 101, ${toIcao} Tower${this.atcFreq(this.cfg.to, 'TWR')}. Runway ${arrRwy}, wind ${wind}, cleared to land.`, true);
+        this.addAtc('TOWER', `${this.callsign.callsign}, ${toIcao} Tower${this.atcFreq(this.cfg.to, 'TWR')}. Runway ${arrRwy}, wind ${wind}, cleared to land.`, true);
         this.audio.chime();
         break;
       case 'rollout':
-        this.addAtc('TOWER', `Aero 101, rollout safe. Vacate the runway when able and contact Ground${this.atcFreq(this.cfg.to, 'GND')}.`, false);
+        this.addAtc('TOWER', `${this.callsign.callsign}, rollout safe. Vacate the runway when able and contact Ground${this.atcFreq(this.cfg.to, 'GND')}.`, false);
         break;
     }
   }
 
+  /** New radio identity per flight (airport pair + aircraft kind), seeded for deterministic replay. */
+  private reseedRadio() {
+    const key = `${this.cfg.from.id}>${this.cfg.to.id}>${this.spec.id}`;
+    if (this.callsignFlight === key) return;
+    this.callsignFlight = key;
+    let st = (Math.random() * 0xffffffff) >>> 0;
+    this.atcRng = () => { st = (st + 0x6d2b79f5) | 0; let x = Math.imul(st ^ (st >>> 15), 1 | st); x ^= x + Math.imul(x ^ (x >>> 7), x | 61); return ((x ^ (x >>> 14)) >>> 0) / 4294967296; };
+    this.callsign = makeCallsign(this.spec.kind, this.cfg.from.country, this.atcRng);
+    this.ambientT = 40; this.ambientLast = '';
+  }
+  /** Everything the radio needs to word a message for *this* flight, airport and weather. */
+  private radioCtx(atDest: boolean): RadioCtx {
+    const from = this.cfg.from, to = this.cfg.to, wx = this.liveWx;
+    const nm = (a: Airport) => (a.city || a.name || a.icao).replace(/\s*(international|intl|airport|airfield|regional|domestic).*$/i, '').trim() || a.icao;
+    const towered = (a: Airport) => frequenciesFor(a.id).some((f) => f.type === 'TWR');
+    const ap = atDest ? to : from, sunEl = this.world?.sunElevation ?? 45;
+    const ceil = wx && wx.baseAglM !== null ? wx.baseAglM / 0.3048 : null;
+    return {
+      callsign: this.callsign.callsign, spoken: this.callsign.spoken, fromIcao: from.icao, toIcao: to.icao, fromName: nm(from), toName: nm(to), letter: this.atisLetter,
+      spot: this.spawn?.label ?? 'the apron', atDest, lastCat: this.atcLastCat, rwyFallback: (atDest ? this.apprKey : this.depRwy) || '',
+      style: /^(K|P[AFGHJKMW]|C[A-Z])/.test(ap.id) ? 'FAA' : 'ICAO', kind: this.spec.kind, fromTowered: towered(from), toTowered: towered(to),
+      wx: { dir: this.windFrom, kt: this.windKt, gust: wx?.gustKt ?? 0, visKm: (wx?.visM ?? 30000) / 1000, ceilFt: ceil, rain: wx?.rain ?? 0, snow: wx?.snow ?? 0, thunder: !!wx?.thunder, night: sunEl < -3, ok: !!wx?.ok },
+      rnd: this.atcRng,
+    };
+  }
   /** Queue a controller message: it is voiced as a complete standard exchange (pilot call, instruction, readback). */
   addAtc(sender: string, text: string, _needsAck = false) {
     if (!this.cfg) return;
-    const cs = 'Aero 101', from = this.cfg.from, to = this.cfg.to;
     const m = /information ([A-Z])\b/.exec(text); if (sender === 'ATIS' && m) this.atisLetter = m[1];
     const atDest = !!this.landing || /welcome to|cleared to land|descend and maintain|rollout safe|expect ils|approach/i.test(text) || (this.currentFlightPhase !== 'taxi' && this.takeoffDone && this.distToDest() < this.distToOrigin());
-    const nm = (a: Airport) => (a.city || a.name || a.icao).replace(/\s*(international|intl|airport|airfield|regional|domestic).*$/i, '').trim() || a.icao;
-    const ctx: RadioCtx = { callsign: cs, fromIcao: from.icao, toIcao: to.icao, fromName: nm(from), toName: nm(to), letter: this.atisLetter, spot: this.spawn?.label ?? 'the apron', atDest, lastCat: this.atcLastCat, rwyFallback: (atDest ? this.apprKey : this.depRwy) || '' };
+    const ctx = this.radioCtx(atDest);
     const { lines, cat } = buildExchange(sender, text, ctx, () => this.nextAtcId++);
     this.atcLastCat = cat;
     // Airport-background attract mode must never SPEAK (or queue) over the menu: the exchange is
     // dropped entirely before it reaches the radio — nothing is logged and nothing is voiced.
     if (this.mode === 'attract') return;
     this.radio.enqueue(lines);
+  }
+  /** Background traffic: other aircraft on the same frequencies, matched to where the player is in the flight. */
+  private tickAmbient(dt: number) {
+    if (!this.cfg || this.radio.isPaused) return;
+    this.ambientT -= dt; if (this.ambientT > 0 || this.radio.pending > 0) return;
+    this.ambientT = 38 + this.atcRng() * 55;
+    const fp = this.currentFlightPhase, fm = this.fm;
+    const ph: AmbientPhase | null = fp === 'taxi' ? (this.depStage >= 4 || this.landing ? 'departure' : 'ground') : fp === 'takeoff' ? 'departure' : fp === 'climb' ? 'climb' : fp === 'cruise' ? 'cruise' : fp === 'descent' ? 'descent' : (fp === 'final' || fp === 'rollout') ? 'arrival' : null;
+    if (!ph || (ph === this.ambientLast && this.atcRng() < 0.35)) return;
+    const atDest = ph === 'descent' || ph === 'arrival' || (ph === 'ground' && !!this.landing);
+    const amb = buildAmbient(ph, this.radioCtx(atDest), () => this.nextAtcId++, fm.pos.y / 0.3048);
+    if (!amb) return; this.ambientLast = ph; this.radio.enqueue(amb.lines);
   }
   /** A line goes on the air: it enters the transmission history (and the subtitle) exactly when it is spoken. */
   private logRadioLine(l: RadioLine) {

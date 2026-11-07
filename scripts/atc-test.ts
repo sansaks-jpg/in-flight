@@ -4,7 +4,7 @@
 // Runs headless in node: speechSynthesis is absent, so lines advance on the timer estimate.
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { AtcRadio, buildExchange, toRadioSpeech, RadioCtx, RadioLine } from '../src/sim/atc';
+import { AtcRadio, buildAmbient, buildExchange, makeCallsign, otherCallsign, toRadioSpeech, AmbientPhase, RadioCtx, RadioLine } from '../src/sim/atc';
 
 const ctx: RadioCtx = { callsign: 'Aero 101', fromIcao: 'WAHI', toIcao: 'WARR', fromName: 'Yogyakarta', toName: 'Surabaya', letter: 'B', spot: 'Hangar 2', atDest: false, lastCat: '', rwyFallback: '09' };
 const exchange = (sender: string, text: string, over: Partial<RadioCtx> = {}, idFrom = 1) =>
@@ -168,4 +168,56 @@ test('cancel() clears a stuck paused state (flight after pause-out is not mute)'
   h.radio.enqueue([h.short('TOWER')]);
   await h.wait(60);
   assert.equal(h.lines.length, 1, 'a fresh flight gets its ATC audio');
+});
+
+test('callsigns: piston registrations are phonetic, jet/turboprop use the livery telephony', () => {
+  let s = 0.42; const rnd = () => (s = (s * 9301 + 49297) % 233280) / 233280;
+  const piston = makeCallsign('piston', 'ID', rnd);
+  assert.match(piston.callsign, /^PK-[A-Z]{3}$/, 'Indonesian registration prefix');
+  assert.match(piston.spoken, /^Cessna Papa Kilo /, 'spoken form spells the registration phonetically');
+  const jet = makeCallsign('jet', 'ID', rnd);
+  assert.match(jet.callsign, /^Skyline \d{3}$/, 'jet uses the painted livery telephony');
+  assert.equal(jet.spoken, jet.callsign);
+  assert.notEqual(otherCallsign(rnd, jet.callsign), jet.callsign, 'background traffic avoids the player callsign');
+});
+
+test('FAA phraseology: position and hold / takeoff when the airfield country is FAA', () => {
+  const faa: Partial<RadioCtx> = { style: 'FAA', kind: 'jet', fromIcao: 'KSFO', toIcao: 'KLAX', fromName: 'San Francisco', toName: 'Los Angeles' };
+  const luaw = exchange('TOWER', 'San Francisco Tower. Runway 28L, line up and wait.', faa);
+  assert.match(luaw.lines.find((l) => l.who === 'TOWER')!.text, /position and hold/, 'FAA calls it "position and hold"');
+  const to = exchange('TOWER', 'San Francisco Tower. Runway 28L, wind 270 at 12, cleared for takeoff.', { ...faa, lastCat: 'luaw' });
+  assert.match(to.lines.find((l) => l.who === 'PILOT')!.text, /takeoff/, 'FAA spells "takeoff"');
+  // and the FAA readback wording differs from the ICAO default used elsewhere in this file
+  assert.ok(!to.lines.find((l) => l.who === 'PILOT')!.text.includes('take-off'), 'FAA readback never says "take-off"');
+});
+
+test('non-towered airfields are served by Information / Traffic instead of Delivery / Tower', () => {
+  const nt: Partial<RadioCtx> = { fromTowered: false, kind: 'piston' };
+  const cl = exchange('CLEARANCE', 'Aero 101, WAHI Delivery. Cleared to WARR as filed, runway 09 departure, initial climb 5000 feet, squawk 4215. QNH 1012.', nt);
+  const atcLine = cl.lines.find((l) => l.who === 'CLEARANCE')!;
+  assert.match(atcLine.text, /No clearance required, report ready for departure/, 'UNICOM-style self-announce procedure');
+  assert.equal(cl.lines.length, 3, 'no readback-correct ack without a real clearance');
+  const to = exchange('TOWER', 'Aero 101, wind 270° 12 knots, runway 09, cleared for take-off.', { ...nt, lastCat: 'luaw' });
+  assert.match(to.lines.find((l) => l.who === 'TOWER')!.text, /at your discretion/, 'no tower: departure at pilot discretion');
+});
+
+test('background traffic: every flight phase produces a complete exchange from another callsign', () => {
+  let s = 0.1; const rnd = () => { s = (s + 0.6180339887) % 1; return s; };
+  const phases: AmbientPhase[] = ['ground', 'departure', 'climb', 'cruise', 'descent', 'arrival'];
+  for (const ph of phases) {
+    const amb = buildAmbient(ph, { ...ctx, rnd, style: 'ICAO', kind: 'turboprop', rwyFallback: '09' }, () => 1000 + phases.indexOf(ph) * 10, 5000);
+    assert.ok(amb, `${ph}: ambient exchange built`);
+    assert.ok(amb.lines.length >= 2, `${ph}: at least a call and an answer`);
+    assert.ok(amb.lines.some((l) => l.who === 'PILOT'), `${ph}: the other pilot speaks`);
+    assert.ok(amb.lines.every((l) => !l.text.includes('Aero 101')), `${ph}: background traffic uses its own callsign, never the player's`);
+  }
+});
+
+test('weather reaches the radio: wind/gusts and remarks only appear when the live weather says so', () => {
+  const wx = { dir: 270, kt: 18, gust: 31, visKm: 3, ceilFt: 900, rain: 0.5, snow: 0, thunder: true, night: false, ok: true };
+  const r = exchange('TOWER', 'Aero 101, WAHI Tower. Runway 09, cleared for take-off.', { wx, kind: 'jet', lastCat: 'luaw' });
+  const atcLine = r.lines.find((l) => l.who === 'TOWER')!.text;
+  assert.match(atcLine, /wind 270° 18 knots gusting 31/i, 'gusts are spoken when they matter (> kt + 4)');
+  const calm = exchange('TOWER', 'Aero 101, WAHI Tower. Runway 09, cleared for take-off.', { wx: { ...wx, kt: 0, gust: 0 }, kind: 'jet', lastCat: 'luaw' });
+  assert.match(calm.lines.find((l) => l.who === 'TOWER')!.text, /wind calm/i, 'sub-1 kt reads as "wind calm"');
 });

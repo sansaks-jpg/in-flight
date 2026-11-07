@@ -108,7 +108,7 @@ export default function App() {
   }, [cfgOf]);
 
   const quick = useCallback(() => { launchPlan.current = false; startFlight(); }, [startFlight]);
-  const toMenu = useCallback(() => { setOpenHangarOnEnter(false); setTransitioningMenuExit(false); setScreen('start'); loadAttract(); }, [loadAttract]);
+  const toMenu = useCallback(() => { gameRef.current?.stopRadio(); setOpenHangarOnEnter(false); setTransitioningMenuExit(false); setScreen('start'); loadAttract(); }, [loadAttract]);
   const toPlanner = useCallback((withHangar = false) => {
     const g = gameRef.current;
     setOpenHangarOnEnter(withHangar);
@@ -121,7 +121,7 @@ export default function App() {
       window.setTimeout(() => setTransitioningMenuExit(false), 380);
     }
     setScreen('planner');
-    if (g) { g.suspended = true; g.audio.silence(); }
+    if (g) { g.suspended = true; g.stopRadio(); }
     setResult(null);
     setMapOpen(false);
   }, []);
@@ -130,7 +130,7 @@ export default function App() {
   useEffect(() => { if (screen === 'start' && gameRef.current && attractReady) { /* background already loaded for current departure */ } }, [screen, attractReady]);
 
   // planner → back to menu reloads attract if departure changed
-  const backFromPlanner = useCallback(() => { setOpenHangarOnEnter(false); setTransitioningMenuExit(false); setScreen('start'); loadAttract(); }, [loadAttract]);
+  const backFromPlanner = useCallback(() => { gameRef.current?.stopRadio(); setOpenHangarOnEnter(false); setTransitioningMenuExit(false); setScreen('start'); loadAttract(); }, [loadAttract]);
 
   // Selecting one endpoint never auto-fills the other one. If the user picks the airport that is
   // currently set on the opposite field, that opposite field is simply cleared (no silent WIII default).
@@ -285,7 +285,7 @@ export default function App() {
                   gInst.load(cfgOf(settingsRef.current), 'attract');
                 } else {
                   gInst.suspended = true;
-                  gInst.audio.silence();
+                  gInst.stopRadio();
                 }
               }
               return next;

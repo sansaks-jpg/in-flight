@@ -7,14 +7,15 @@
 // Airborne the chart keeps MSFS-mini-map / en-route-chart conventions instead of collapsing to an empty rose: the full
 // flight-plan polyline (great-circle densified beyond ~120 km legs) with labelled waypoints and origin/destination
 // markers, the flown track, nearby airports and NAVAIDs from the open databases, a lat/lon graticule, a rotating
-// compass rose with labelled range rings, heading/track bugs, a wind arrow and a one-minute track vector. The palette
+// magnetic compass rose (MSFS/ND: labels in degrees magnetic, gold cardinals) with labelled range rings,
+// heading/track/AP bugs, a wind arrow and a one-minute track vector with 1/2/3-minute run markers. The palette
 // mirrors MapPanel.tsx (magenta plan, cyan trail, gold IAF/FAF diamonds, pink TOD) so the mini map and the full-screen
 // chart ('M') read consistently.
 import { useEffect, useRef, useState } from 'react';
 import type { Game, HudState } from '../sim/game';
 import { getAirfield, airportsNear, navaidsNear, type Airport } from '../data/airports';
 import { synthGround, rectCorners, type XZ } from '../sim/airportGround';
-import { D2R, R2D, M_PER_NM, clamp, greatCircle, haversine, type FlightWaypoint } from '../sim/geo';
+import { D2R, R2D, M_PER_NM, clamp, greatCircle, haversine, wrap360, type FlightWaypoint } from '../sim/geo';
 
 const RANGES = [400, 800, 1500, 3000, 6000, 12000, 25000, 50000, 100000, 200000, 400000];
 const fmtRange = (m: number) => m >= 3000 ? `${(m / M_PER_NM).toFixed(m >= 9000 ? 0 : 1)} NM` : `${m >= 1000 ? (m / 1000).toFixed(1) + ' km' : Math.round(m) + ' m'}`;
@@ -181,17 +182,20 @@ export function AirportMiniMap({ game, hud }: { game: Game; hud: HudState }) {
       if (ground) {
         g.strokeStyle = '#ffffff14'; g.lineWidth = 1; for (let i = 1; i <= 2; i++) { g.beginPath(); g.arc(cx, cy, R * i / 2, 0, 7); g.stroke(); }
       } else {
+        // MSFS/ND-style MAGNETIC rose: labels are magnetic bearings (what the HUD and the AP fly),
+        // placed at their true angle (magnetic + local variation); gold cardinal letters.
+        const mv = game.magv;
         g.strokeStyle = '#ffffff18'; g.lineWidth = 1;
         g.beginPath(); g.arc(cx, cy, R, 0, 7); g.stroke();
         g.beginPath(); g.arc(cx, cy, R * 0.5, 0, 7); g.stroke();
         g.font = '600 8px ui-sans-serif, system-ui'; g.textAlign = 'center'; g.textBaseline = 'middle';
-        for (let deg = 0; deg < 360; deg += 10) {
-          const a = deg * D2R - up, sn = Math.sin(a), co = Math.cos(a), major = deg % 30 === 0;
+        for (let d = 0; d < 360; d += 5) { // d = the magnetic bearing printed on the label
+          const a = wrap360(d + mv) * D2R - up, sn = Math.sin(a), co = Math.cos(a), major = d % 30 === 0;
           g.strokeStyle = major ? '#ffffff3c' : '#ffffff1a';
           g.beginPath(); g.moveTo(cx + sn * (R - (major ? 7 : 3.5)), cy - co * (R - (major ? 7 : 3.5))); g.lineTo(cx + sn * R, cy - co * R); g.stroke();
           if (major && R >= 44) {
-            g.fillStyle = deg === 0 ? '#ff6a5a' : '#c3d0da';
-            g.fillText(deg === 0 ? 'N' : deg === 90 ? 'E' : deg === 180 ? 'S' : deg === 270 ? 'W' : String(deg / 10), cx + sn * (R - 15), cy - co * (R - 15));
+            g.fillStyle = d % 90 === 0 ? '#ffb347' : '#c3d0da';
+            g.fillText(d === 0 ? 'N' : d === 90 ? 'E' : d === 180 ? 'S' : d === 270 ? 'W' : String(d / 10), cx + sn * (R - 15), cy - co * (R - 15));
           }
         }
         // ring range labels, screen-anchored on the 45° diagonal so they never rotate away
@@ -403,6 +407,21 @@ export function AirportMiniMap({ game, hud }: { game: Game; hud: HudState }) {
         g.strokeStyle = '#35e0ff'; g.lineWidth = 1.6;
         g.beginPath(); g.moveTo(0, -(R - 3)); g.lineTo(-3.2, -(R - 11)); g.lineTo(3.2, -(R - 11)); g.closePath(); g.stroke();
         g.restore();
+        // AP heading bug (magnetic, like the HDG window it is set from) riding the same rose
+        if (game.ap.on) {
+          const ab = wrap360(game.ap.hdg + game.magv) * D2R - up;
+          g.save(); g.translate(cx + Math.sin(ab) * (R - 1), cy - Math.cos(ab) * (R - 1)); g.rotate(ab);
+          g.fillStyle = '#4cc3ff';
+          g.beginPath(); g.moveTo(0, -7); g.lineTo(-5.5, 2); g.lineTo(5.5, 2); g.closePath(); g.fill();
+          g.restore();
+        }
+        // 1/2/3-minute run markers along the predicted track
+        for (let m = 1; m <= 3; m++) {
+          const d = Math.max(fm.gs, 5) * 60 * m, mx = px + Math.sin(fm.track * D2R) * d, mz = pz - Math.cos(fm.track * D2R) * d;
+          const gx = sx(mx, mz), gy = sy(mx, mz);
+          if (Math.hypot(gx - cx, gy - cy) > R * 0.92) break;
+          g.fillStyle = '#35e0ff'; g.beginPath(); g.arc(gx, gy, 1.8, 0, 7); g.fill();
+        }
       }
       // north arrow (airport diagram keeps its own orientation cue; en-route the rose carries the N)
       if (ground) {

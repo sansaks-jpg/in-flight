@@ -79,8 +79,7 @@ To prevent garbage collection (GC) micro-stutters:
 | `src/ui/globeCamera.ts` | Google-Earth-style camera helpers: eased fly-to with pull-back arc, drag inertia, normalised wheel zoom. |
 | `src/ui/globeRunways.ts` | True-scale (metres) runway markings for the globe overlay with a metres-per-pixel fade gate. |
 | `src/ui/PreGameVisuals.tsx` | Interactive pre-flight globe and planner visuals: `InteractiveEarthGlobe`, runway-end anchors and airport framing helpers. |
-| `src/sim/glbAircraft.ts` | Real-aircraft exterior models loaded from open-source GLB files at true 1:1 dimensions and registered to the flight-model body frame (see `src/assets/models/CREDITS.md`). |
-| `src/sim/aircraftModel.ts` | Procedural exterior aircraft models in the body frame (+X right, +Y up, -Z forward, CG at origin). |
+| `src/sim/aircraftModel.ts` + `aircraftGeo.ts` | Original procedural exterior models (lofted fuselage, airfoil wings, hinged control surfaces, props, gear) built 1:1 from `specs.ts`; no imported 3D meshes. Body frame +X right, +Y up, -Z forward, CG at origin; wheel contact points come straight from `spec.gear`. |
 | `src/sim/cockpit.ts` | 3D interactive cockpit models, analog gauges, interactive throttle/stick, PFD and MFD displays. |
 | `src/sim/instruments.ts` | Canvas-drawn flight instruments used as textures inside the 3D cockpit. |
 | `src/sim/clock.ts` | Single real-world (UTC) time source, NOAA solar position, twilight phases and clock formatting. Never use a separate game clock for time of day. |
@@ -103,12 +102,12 @@ To prevent garbage collection (GC) micro-stutters:
 | `src/sim/clouds.ts` | Live-weather cloud field: three live-data-driven instanced layers (low = METAR ceiling, mid/cirrus = Open-Meteo geopotential bases) in a single draw call, advected by the live wind on the sim clock. |
 | `src/sim/lightning.ts` | Cloud-to-ground lightning for thunderstorm conditions: billboarded bolt ribbons, a dedicated flash light, and an `onStrike` hook wired to procedural thunder in `audio.ts`. |
 | `src/sim/audio.ts` | Web Audio API procedural synthesis for engines, slipstream wind noise, gear rattles, and GPWS callouts. |
-| `src/sim/atc.ts` | Fully automatic ATC <-> pilot radio exchanges with pilot readbacks and radio speech text. |
+| `src/sim/atc.ts` | Fully automatic ATC <-> pilot radio: per-flight generated callsigns, ICAO/FAA phraseology by airfield country, weather-aware remarks, non-towered "Information/Traffic" fields, background-traffic chatter matched to the flight phase, and the `AtcRadio` channel that transmits only while a flight is actually running (`Game.radioMayTransmit`). |
 | `src/sim/speech.ts` | Speech synthesis queue (`SpeechQueue`) for warnings, callouts and ATC announcements. |
 | `src/ui/CanvasMap.ts` | High-performance 2D HTML Canvas navigation moving map. |
 | `src/ui/FlightMap.tsx` | React navigation maps: `NavigationMap`, `MiniMap` and `FullMap`. |
 | `src/ui/MapPanel.tsx` | Planner navigation map panel sharing the `NavigationMapView` state. |
-| `src/ui/AirportMiniMap.tsx` | Dedicated airport/runway navigation display: runways with true widths, taxiways, stands, taxi route and final-approach course. |
+| `src/ui/AirportMiniMap.tsx` | Dedicated airport/runway navigation display: airport diagram on the ground; airborne a full en-route chart (flight-plan polyline, waypoints, nearby airports/NAVAIDs, graticule, magnetic compass rose with heading/track/AP bugs, minute markers, wind arrow). |
 | `src/ui/mapLayers.ts` | Persisted 2D-map layer preferences (base style + overlays). |
 | `src/ui/navigation.ts` | Single HUD/navigation display-mode order shared by the keyboard, gamepad and display menu. |
 | `src/ui/Hud.tsx` | Glass HUD overlay, airspeed tape, altimeter tape, artificial horizon, and system annunciators. |

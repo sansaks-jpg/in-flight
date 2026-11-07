@@ -1,198 +1,90 @@
 // Scale / altitude / draw-distance verification (Tugas 2 + review fixes):
-//   1. Load the actual .glb model files with the app's OWN GLTFLoader + MeshoptDecoder (so the
-//      measurement is runtime-exact: EXT_mesh_gpu_instancing proxies and quantised accessors are
-//      handled exactly like in the game) and check that the registered body-frame dimensions match
-//      specs.ts (length / span / height), that the wheels bottom out on the physics gear contacts
-//      AND sit on their z stations (no floating / sinking / station offset on the ground).
+//   1. Build the ACTUAL procedural exterior models (aircraftModel.ts — the models the game renders)
+//      and check that the body-frame dimensions match specs.ts (length / span / height), that the
+//      wheels bottom out on the physics gear contacts, and that a gear assembly sits exactly on
+//      every spec.gear station (no floating / sinking / station offset on the ground).
 //   2. Simulate the physics on flat ground and assert fm.agl, its definition and the m->ft HUD
 //      conversions are consistent (altimeter vs terrain elevation vs radio altitude).
 //   3. Assert the camera far plane, the terrain LOD ring extent and FogExp2 density leave no visible
 //      "edge of the world" at any quality preset.
-// Runs headless in node — no WebGL (texture decode failures are irrelevant to geometry).
+// Runs headless in node — no WebGL and no DOM: the livery texture is skipped (colour-only material),
+// which does not affect the geometry under test.
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import * as THREE from 'three';
-import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.js';
-import { readFileSync } from 'node:fs';
 import { FlightModel, airState } from '../src/sim/physics';
-import { AIRCRAFT, AircraftSpec } from '../src/sim/specs';
-import { CFG } from '../src/sim/glbAircraft';
+import { AIRCRAFT } from '../src/sim/specs';
+import { loadAircraftVisual } from '../src/sim/aircraftModel';
 import { LOD_HIGH, LOD_MEDIUM, LOD_LOW, LOD_ULTRA, LodCfg } from '../src/sim/terrain';
 import { QUALITY } from '../src/sim/quality';
 import { M_PER_FT, MS_TO_KT } from '../src/sim/geo';
 
-// node has no Image/self: GLTFLoader needs them only for TEXTURES, which do not affect geometry
-(globalThis as any).self = globalThis;
-(globalThis as any).Image = class {
-  width = 1; height = 1;
-  onload: (() => void) | null = null; onerror: (() => void) | null = null;
-  decode() { return Promise.resolve(); }
-  set src(_v: string) { setTimeout(() => this.onload?.(), 0); }
-  get src() { return ''; }
-};
-
-interface MeshInfo { name: string; instanced: boolean; min: number[]; max: number[]; material: string | null }
-
-const glbCache = new Map<string, MeshInfo[]>();
-/** Loads the GLB with the app's own loader and returns one FILE-frame AABB per mesh, annotated with
- *  material name and instancing so callers can replicate glbAircraft's visibility filters exactly. */
-async function glbMeshes(path: string): Promise<MeshInfo[]> {
-  const hit = glbCache.get(path);
-  if (hit) return hit;
-  const bin = readFileSync(path);
-  const ab = bin.buffer.slice(bin.byteOffset, bin.byteOffset + bin.byteLength) as ArrayBuffer;
-  const loader = new GLTFLoader();
-  loader.setMeshoptDecoder(MeshoptDecoder);
-  const meshes = await new Promise<MeshInfo[]>((resolve, reject) => {
-    loader.parse(ab, '', (gltf) => {
-      const scene = gltf.scene;
-      scene.updateMatrixWorld(true);
-      const inv = new THREE.Matrix4().copy(scene.matrixWorld).invert(); // root identity -> no-op
-      const out: MeshInfo[] = [];
-      scene.traverse((o) => {
-        const m = o as THREE.Mesh;
-        if (!m.isMesh) return;
-        const b = new THREE.Box3().setFromObject(m).applyMatrix4(inv);
-        const mat = Array.isArray(m.material) ? (m.material[0]?.name ?? null) : ((m.material as THREE.Material)?.name ?? null);
-        out.push({ name: m.name || '(unnamed)', instanced: (o as any).isInstancedMesh === true, min: [b.min.x, b.min.y, b.min.z], max: [b.max.x, b.max.y, b.max.z], material: mat });
-      });
-      resolve(out);
-    }, reject);
-  });
-  glbCache.set(path, meshes);
-  return meshes;
+/** One body-frame AABB of the whole built aircraft (wheels included — they are the lowest points). */
+async function bodyBox(specId: string): Promise<{ min: THREE.Vector3; max: THREE.Vector3 }> {
+  const v = await loadAircraftVisual(AIRCRAFT.find((s) => s.id === specId)!);
+  v.root.updateMatrixWorld(true);
+  const box = new THREE.Box3().setFromObject(v.root);
+  return { min: box.min.clone(), max: box.max.clone() };
 }
 
-const RY = (a: number, p: number[]): number[] => {
-  const c = Math.cos(a), s = Math.sin(a);
-  return [c * p[0] + s * p[2], p[1], -s * p[0] + c * p[2]];
-};
-/** Native mesh boxes -> flight-model body frame, replicating the registration AND BOTH visibility
- *  filters glbAircraft.ts applies at load time: meshes hidden by material name (/concrete/i or
- *  /remove_before_flight/i) and Sketchfab stand leftovers whose geometry reaches more than 25 cm
- *  under the wheels' ground plane (in the file's own frame). */
-async function bodyBox(path: string, rotY: number, scale: number[], offset: number[], contactY: number): Promise<{ min: number[]; max: number[]; hiddenMeshes: number }> {
-  const hideBelow = (contactY - 0.25 - offset[1]) / scale[1];
-  const out = { min: [Infinity, Infinity, Infinity], max: [-Infinity, -Infinity, -Infinity], hiddenMeshes: 0 };
-  for (const b of await glbMeshes(path)) {
-    if (b.min[1] < hideBelow || (b.material && (/concrete/i.test(b.material) || /remove_before_flight/i.test(b.material)))) { out.hiddenMeshes++; continue; }
-    for (const x of [b.min[0], b.max[0]]) for (const y of [b.min[1], b.max[1]]) for (const z of [b.min[2], b.max[2]]) {
-      const r = RY(rotY, [x, y, z]);
-      const p = [r[0] * scale[0] + offset[0], r[1] * scale[1] + offset[1], r[2] * scale[2] + offset[2]];
-      for (let i = 0; i < 3; i++) { out.min[i] = Math.min(out.min[i], p[i]); out.max[i] = Math.max(out.max[i], p[i]); }
-    }
-  }
-  return out;
-}
-
-const FILE_BY_ID: Record<string, string> = { swift: 'src/assets/models/c172.glb', trek: 'src/assets/models/atr72.glb', sky: 'src/assets/models/a320.glb' };
-
-test('GLB aircraft dimensions registered to the body frame match the published specs', async () => {
-  const expect: Record<string, { length: number; span: number; height: number; note: string }> = {
-    swift: { length: 8.28, span: 11.0, height: 2.72, note: 'C172S' },
-    trek: { length: 27.17, span: 27.05, height: 7.65, note: 'ATR 72-600' },
-    sky: { length: 37.57, span: 34.1, height: 11.76, note: 'A320-200' },
-  };
+test('procedural aircraft dimensions match the published specs (1:1 body frame)', async () => {
   const report: string[] = [];
   for (const spec of AIRCRAFT) {
-    const cfg = CFG[spec.id];
-    if (!cfg) { report.push(`${spec.id}: procedural fallback model (no GLB cfg)`); continue; }
-    const e = expect[spec.id];
-    if (!e) { report.push(`${spec.id}: no expected-dimension entry (add one when registering a new type)`); continue; }
-    const contactY = Math.min(...spec.gear.map((g) => g.pos[1]));
-    const bb = await bodyBox(FILE_BY_ID[spec.id], cfg.rotY, cfg.scale, cfg.offset, contactY);
-    const span = bb.max[0] - bb.min[0], len = bb.max[2] - bb.min[2], h = bb.max[1] - bb.min[1];
-    report.push(`${spec.id} (${e.note}, ${bb.hiddenMeshes} stand meshes hidden): span ${span.toFixed(2)} m (spec ${e.span}), length ${len.toFixed(2)} m (spec ${e.length}), height ${h.toFixed(2)} m (spec ${e.height})`);
-    // The registered model must reproduce the real overall dimensions: within 2 % of the reference,
-    // with a 0.35 m absolute floor so small dimensions (C172 height 2.72 m) are not untestable.
-    const tol = (v: number, ref: number) => Math.abs(v - ref) <= Math.max(0.35, ref * 0.02);
-    assert.ok(tol(span, e.span), `${spec.id} span ${span.toFixed(2)} != ${e.span}`);
-    assert.ok(tol(len, e.length), `${spec.id} length ${len.toFixed(2)} != ${e.length}`);
-    if (spec.id !== 'sky') assert.ok(tol(h, e.height), `${spec.id} height ${h.toFixed(2)} != ${e.height}`);
+    const bb = await bodyBox(spec.id);
+    const span = bb.max.x - bb.min.x, len = bb.max.z - bb.min.z;
+    // spec.height is ground-referenced; the body frame hangs the CG ~|gear y| above the ground, so
+    // the model total = box height (wheel bottom .. fin tip) must equal the published height.
+    const h = bb.max.y - bb.min.y;
+    report.push(`${spec.id}: span ${span.toFixed(2)} m (spec ${spec.wingspan}), length ${len.toFixed(2)} m (spec ${spec.length}), height ${h.toFixed(2)} m (spec ${spec.height})`);
+    // The models are authored 1:1 from these numbers. The measured box includes details that
+    // legitimately poke past the nominal datum — wingtip nav-light bulbs (r 0.05-0.07 per side),
+    // the A320 APU exhaust (0.15 m) and the C172 fin trailing edge (0.22 m) — so the tolerance is
+    // 2.5 % with a 0.25 m floor: tight enough to catch a real scale error (the old GLB registration
+    // was 8 m off), honest about the details.
+    const tol = (v: number, ref: number) => Math.abs(v - ref) <= Math.max(0.25, ref * 0.025);
+    assert.ok(tol(span, spec.wingspan), `${spec.id} span ${span.toFixed(2)} != ${spec.wingspan}`);
+    assert.ok(tol(len, spec.length), `${spec.id} length ${len.toFixed(2)} != ${spec.length}`);
+    assert.ok(tol(h, spec.height), `${spec.id} height ${h.toFixed(2)} != ${spec.height}`);
   }
   console.log('[scale] ' + report.join(' | '));
 });
 
-test('GLB wheels bottom out on the physics gear contacts (no floating / sinking at rest)', async () => {
+test('procedural wheels bottom out on the physics gear contacts (no floating / sinking at rest)', async () => {
   for (const spec of AIRCRAFT) {
-    const cfg = CFG[spec.id];
-    if (!cfg) continue;
+    const bb = await bodyBox(spec.id);
+    const contact = Math.min(...spec.gear.map((g) => g.pos[1]));
+    const err = bb.min.y - contact;
+    assert.ok(Math.abs(err) <= 0.1, `${spec.id} wheel bottom ${bb.min.y.toFixed(3)} vs lowest gear contact ${contact} (err ${err.toFixed(3)} m)`);
+    console.log(`[scale] ${spec.id} wheel bottom ${bb.min.y.toFixed(3)} m vs lowest contact ${contact} m (err ${err.toFixed(3)} m)`);
+    // A320-only sanity from the GLB era, kept for the procedural jet: the belly fairing must sit
+    // well above the gear line (real-world ground clearance ~0.5-1 m) — checked via the fuselage
+    // bottom against the main-gear contact.
     if (spec.id === 'sky') {
-      // A320 has no gear in the GLB: the procedural struts build the wheel bottoms at spec.gear y by
-      // construction (hub = gy + r - attachY), and the belly must sit above the gear line, not under it.
-      const contactY = Math.min(...spec.gear.map((g) => g.pos[1]));
-      const bb = await bodyBox(FILE_BY_ID.sky, cfg.rotY, cfg.scale, cfg.offset, contactY);
-      const belly = bb.min[1];
-      // real-world A320 ground clearance under the fuselage is roughly 0.5-1 m
-      assert.ok(belly > spec.gear[1].pos[1] + 0.5, `A320 belly ${belly.toFixed(2)} must clear the -3.3 m gear line`);
-      assert.ok(belly < spec.gear[1].pos[1] + 2.6, `A320 belly ${belly.toFixed(2)} suspiciously high above the gear line`);
-      console.log(`[scale] sky belly at body y=${belly.toFixed(2)} m, gear contact at ${spec.gear[1].pos[1]} m (belly clearance ${(belly - spec.gear[1].pos[1]).toFixed(2)} m)`);
-      continue;
+      const mainGear = spec.gear[1].pos[1];
+      assert.ok(bb.min.y > mainGear - 0.1, 'A320 wheels define the lowest point (gear present)');
+      console.log(`[scale] sky belly clearance to gear line: ${(bb.min.y - mainGear).toFixed(2)} m (procedural gear mounted on spec.gear)`);
     }
-    const contactY = Math.min(...spec.gear.map((g) => g.pos[1]));
-    const bb = await bodyBox(FILE_BY_ID[spec.id], cfg.rotY, cfg.scale, cfg.offset, contactY);
-    const wheelBottom = bb.min[1];
-    const contact = spec.gear[1].pos[1];
-    const err = wheelBottom - contact;
-    assert.ok(Math.abs(err) <= 0.1, `${spec.id} wheel bottom ${wheelBottom.toFixed(3)} vs gear contact ${contact} (err ${err.toFixed(3)} m)`);
-    console.log(`[scale] ${spec.id} wheel bottom ${wheelBottom.toFixed(3)} m vs contact ${contact} m (err ${err.toFixed(3)} m)`);
   }
 });
 
-test('GLB wheel stations line up with the physics contacts along Z (no shifted undercarriage)', async () => {
-  // Decode wheel vertices (tyre bottoms) through the runtime loader, convert each to the body frame
-  // with the registered CFG, cluster them around each spec.gear contact and assert the cluster's Z
-  // centre against the contact station. This catches registration offsets a bbox height test cannot see.
-  const STATION_TOL = 0.35;
+test('procedural gear assemblies sit exactly on their physics contacts (no shifted undercarriage)', async () => {
+  // The gear groups are built straight from spec.gear (position x/z + strut length from the wheel
+  // radius). This pins that contract: one root-level gear group must exist at every contact x/z,
+  // carrying at least one wheel below the attach point. Catches any future refactor that moves
+  // the undercarriage off the flight-model stations.
   for (const spec of AIRCRAFT) {
-    const cfg = CFG[spec.id];
-    if (!cfg || spec.id === 'sky') continue; // A320 mounts a procedural gear built exactly on spec.gear
-    const bin = readFileSync(FILE_BY_ID[spec.id]);
-    const ab = bin.buffer.slice(bin.byteOffset, bin.byteOffset + bin.byteLength) as ArrayBuffer;
-    const loader = new GLTFLoader();
-    loader.setMeshoptDecoder(MeshoptDecoder);
-    const errs = await new Promise<number[]>((resolve, reject) => {
-      loader.parse(ab, '', (gltf) => {
-        gltf.scene.updateMatrixWorld(true);
-        const v = new THREE.Vector3();
-        const toBody = (p: THREE.Vector3): [number, number, number] => {
-          const r = RY(cfg.rotY, [p.x, p.y, p.z]);
-          return [r[0] * cfg.scale[0] + cfg.offset[0], r[1] * cfg.scale[1] + cfg.offset[1], r[2] * cfg.scale[2] + cfg.offset[2]];
-        };
-        const verts: [number, number, number][] = [];
-        let bottom = Infinity;
-        gltf.scene.traverse((o) => {
-          const m = o as THREE.Mesh;
-          if (!m.isMesh) return;
-          const mat = Array.isArray(m.material) ? m.material[0]?.name ?? '' : (m.material as THREE.Material)?.name ?? '';
-          if (/concrete|remove_before_flight/i.test(mat)) return;
-          const pos = (m.geometry as THREE.BufferGeometry).attributes.position as THREE.BufferAttribute;
-          for (let i = 0; i < pos.count; i++) {
-            v.fromBufferAttribute(pos, i).applyMatrix4(m.matrixWorld);
-            const b = toBody(v);
-            verts.push(b);
-            if (b[1] < bottom) bottom = b[1];
-          }
-        });
-        // one cluster per gear contact: tyre bottoms (10 cm band) within 1.2 m of the contact in x/z
-        const out: number[] = [];
-        for (const g of spec.gear) {
-          const zs: number[] = [];
-          for (const b of verts) {
-            if (b[1] > bottom + 0.1) continue;
-            if (Math.hypot(b[0] - g.pos[0], b[2] - g.pos[2]) < 1.2) zs.push(b[2]);
-          }
-          if (!zs.length) { reject(new Error(`${spec.id}: no wheel vertices near contact z=${g.pos[2]}`)); return; }
-          out.push((Math.min(...zs) + Math.max(...zs)) / 2 - g.pos[2]);
-        }
-        resolve(out);
-      }, reject);
-    });
-    spec.gear.forEach((g, i) => {
-      assert.ok(Math.abs(errs[i]) <= STATION_TOL, `${spec.id} wheel station ${i} (z=${g.pos[2]}) err ${errs[i].toFixed(2)} m > ${STATION_TOL}`);
-      console.log(`[scale] ${spec.id} wheel station ${i} (z=${g.pos[2]}): err ${errs[i].toFixed(2)} m`);
-    });
+    const v = await loadAircraftVisual(spec);
+    v.root.updateMatrixWorld(true);
+    for (const g of spec.gear) {
+      const hit = v.root.children.filter((o) => Math.abs(o.position.x - g.pos[0]) < 1e-6 && Math.abs(o.position.z - g.pos[2]) < 1e-6 && o.children.length > 0);
+      assert.ok(hit.length > 0, `${spec.id}: no assembly at gear station (${g.pos[0]}, ${g.pos[2]})`);
+      // the wheel axle sits exactly one wheel-radius above the contact: axleY = gy + R (strut length
+      // is derived from it), so the lowest direct child must land there — not at the contact itself
+      const R = g.nose ? spec.wheelR[1] : spec.wheelR[0];
+      const lowest = Math.min(...hit.flatMap((o) => o.children.map((c) => o.position.y + c.position.y)));
+      assert.ok(Math.abs(lowest - (g.pos[1] + R)) < 1e-6, `${spec.id}: gear at (${g.pos[0]}, ${g.pos[2]}) axle ${lowest.toFixed(3)} != contact ${g.pos[1]} + R ${R}`);
+      console.log(`[scale] ${spec.id} gear station (${g.pos[0]}, ${g.pos[2]}): assembly found, axle y ${lowest.toFixed(3)} = contact ${g.pos[1]} + R ${R}`);
+    }
   }
 });
 

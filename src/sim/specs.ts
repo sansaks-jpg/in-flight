@@ -61,7 +61,7 @@ export const AIRCRAFT: AircraftSpec[] = [
     power: 3690000, thrust: 0, staticV0: 48, propEff: 0.82, spoolUp: 2.2, spoolDown: 2.6, idle: 0.18, ceiling: 7620,
     flapDetents: 2, vfe: [999, 170, 150], vle: 185, vne: 250, vs1: 111, vs0: 90, vr: 105, vapp: 111,
     maxPitchRate: 0.16, maxRollRate: 0.6, maxSteer: 0.45, propTorque: 0.02,
-    gear: [{ pos: [0, -2.06, -9.9], share: 0.1, nose: true }, { pos: [-2.05, -2.06, 1.1], share: 0.45 }, { pos: [2.05, -2.06, 1.1], share: 0.45 }],
+    gear: [{ pos: [0, -2.06, -9.66], share: 0.1, nose: true }, { pos: [-2.05, -2.06, 1.1], share: 0.45 }, { pos: [2.05, -2.06, 1.1], share: 0.45 }],
     hull: [[0, -1.2, -11.0], [0, 0.0, 14.6], [-13.5, 1.2, 1.5], [13.5, 1.2, 1.5], [0, -1.5, 2.0]], gearTravel: 0.4, maxSink: 4.2,
     pax: 70, cruiseAlt: 5200, cruiseKt: 275, rangeKm: 1528, hasSpeedbrake: false, hasReverse: true, hasGlass: true,
     eye: [-0.45, 1.25, -9.7], color: 0xf2f2ee, accent: 0xd8512a, length: 27.17,
