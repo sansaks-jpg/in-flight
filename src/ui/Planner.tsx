@@ -1024,7 +1024,7 @@ export function Planner({
           )}
         </div>
 
-        {/* Bottom-Center: Switch to Panels | NUM SUB / NUM PLUS Zoom */}
+        {/* Bottom-Center: Switch to Panels | − / + Zoom */}
         <div className="pointer-events-auto hidden md:flex items-center gap-2 px-4 py-1.5 bg-[#1a2029]/90 border border-white/10 text-xs text-slate-200 shadow-xl">
           <button
             type="button"
@@ -1039,7 +1039,7 @@ export function Planner({
             className="px-1.5 py-0.5 bg-white/15 hover:bg-white/25 font-mono text-[10px] font-bold text-white"
             aria-label="Zoom out world globe"
           >
-            NUM SUB
+            −
           </button>
           <span>/</span>
           <button
@@ -1048,7 +1048,7 @@ export function Planner({
             className="px-1.5 py-0.5 bg-white/15 hover:bg-white/25 font-mono text-[10px] font-bold text-white"
             aria-label="Zoom in world globe"
           >
-            NUM PLUS
+            +
           </button>
           <span className="font-bold">Zoom</span>
         </div>

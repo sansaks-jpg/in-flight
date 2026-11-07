@@ -150,13 +150,13 @@ export function CockpitTooltipOverlay({ tooltip, game }: { tooltip: CockpitToolt
   );
 }
 
-/** Camera focus hot-bar: one click (or keypad 0-9) flies the camera to a panel – nothing on the panel is operated. */
+/** Camera focus hot-bar: one click (or number keys 0-9) flies the camera to a panel – nothing on the panel is operated. */
 export function CockpitFocusBar({ game, items }: { game: Game; items: { id: string; label: string; key: string }[] }) {
   return (
     <div className="cp-focusbar" data-flight-ui role="toolbar" aria-label="Cockpit camera focus">
       <span className="cp-focusbar-title">FOCUS</span>
       {items.map((it) => (
-        <button key={it.id} type="button" title={`Fly camera to ${it.label} (keypad ${it.key})`} onClick={() => { game.setCockpitSubview(it.id as never); requestAnimationFrame(() => game.canvas.focus({ preventScroll: true })); }}>
+        <button key={it.id} type="button" title={`Fly camera to ${it.label} (key ${it.key})`} onClick={() => { game.setCockpitSubview(it.id as never); requestAnimationFrame(() => game.canvas.focus({ preventScroll: true })); }}>
           {it.label}<kbd>{it.key}</kbd>
         </button>
       ))}
@@ -409,7 +409,7 @@ export function CameraWindow({
               </button>
             ))}
           </div>
-          <p className="mt-1.5 text-[9px] text-slate-400">Wheel zooms smoothly (up to 8×) · keypad 0–9 or the FOCUS bar flies to a panel · Alt-click frames a control without operating it · wheel over a knob turns it (Ctrl-wheel always zooms).</p>
+          <p className="mt-1.5 text-[9px] text-slate-400">Wheel zooms smoothly (up to 8×) · number keys 0–9 (top row or keypad) or the FOCUS bar flies to a panel · Alt-click frames a control without operating it · wheel over a knob turns it (Ctrl-wheel always zooms).</p>
         </div>
 
         {/* External & Cinematic Showcase */}

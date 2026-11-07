@@ -44,7 +44,7 @@ export const COCKPIT_PRESETS = {
   pedestal: { eye: V(0.3, 0.55, 0.0), at: V(-0.05, -0.05, 0.0), fov: 56 },
 } as const;
 export type CockpitPanelId = keyof typeof COCKPIT_PANELS;
-/** Dedicated camera-focus shortcuts (hot-bar buttons + numeric keypad). Focusing never touches a control, so zooming can no longer flip a switch. */
+/** Dedicated camera-focus shortcuts (hot-bar buttons + number row 0-9 / numeric keypad). Focusing never touches a control, so zooming can no longer flip a switch. */
 export const COCKPIT_FOCUS: { id: CockpitPreset; label: string; key: string }[] = [
   { id: 'pilot', label: 'Seat', key: '0' }, { id: 'fcu', label: 'FCU', key: '1' }, { id: 'pfd', label: 'PFD', key: '2' }, { id: 'nd', label: 'ND', key: '3' }, { id: 'ecam', label: 'ECAM', key: '4' },
   { id: 'mcdu', label: 'MCDU', key: '5' }, { id: 'efb', label: 'EFB', key: '6' }, { id: 'overhead', label: 'OVHD', key: '7' }, { id: 'pedestal', label: 'PED', key: '8' }, { id: 'instruments', label: 'PANEL', key: '9' },
@@ -61,7 +61,39 @@ interface Group { id: string; kind: Kind; parts: Part[]; axis?: Axis; pos: numbe
 const DYNAMIC = new Set(['gear_lever', 'ParkBrk', 'tiller', 'tillerFo', 'rev_l', 'rev_r', 'thr_l_button', 'thr_r_button', 'brakes_lb_psi', 'brakes_rb_psi', 'brakes_accum_psi']);
 const LEADER: Record<string, string> = { thr_l_button: 'thr_l_body', thr_r_button: 'thr_r_body', rev_l: 'thr_l_body', rev_r: 'thr_r_body' };
 /** Real (model-space) corners of the captain's EFB screen face – bottom-left, bottom-right, top-right, top-left as seen by the pilot. */
-const EFB_CORNERS: [number, number, number][] = [[0.0200, 0.2274, 0.9626], [-0.1778, 0.2644, 0.8307], [-0.1747, 0.4396, 0.8752], [0.0245, 0.4031, 1.0052]];
+const EFB_CORNERS: [number, number, number][] = [[0.01997, 0.22737, 0.96257], [-0.17911, 0.264, 0.83253], [-0.17586, 0.43924, 0.87692], [0.02322, 0.40261, 1.00695]]; // exact vertices of the glass quad in the GLB (planar parallelogram)
+/** Reference frame the bezel-button positions (EFB_BTNS, mm) were measured in: origin = bottom-left, u = towards bottom-right, v = towards top-left. */
+const EFB_BTN_FRAME: [number, number, number][] = [[0.0200, 0.2274, 0.9626], [-0.1778, 0.2644, 0.8307], [-0.1747, 0.4396, 0.8752], [0.0245, 0.4031, 1.0052]];
+
+/** The model's tablet has a stray, slightly tilted "glass" quad (about 5 mm proud of the real screen face on one side, and half of it facing the wrong way).
+ *  It poked through the live page and showed up as a black triangle over the display. Every large triangle that is parallel to the screen but NOT on the
+ *  screen plane is removed from the EFB_cpt mesh (the true screen face and the whole bezel / buttons / mount are untouched). */
+function stripEfbGlass(mesh: THREE.Mesh): number {
+  const geo = mesh.geometry, idx = geo.index, pos = geo.attributes.position; if (!idx || !pos) return 0;
+  const c = EFB_CORNERS.map((p) => new THREE.Vector3(...p)), eu = c[1].clone().sub(c[0]), ev = c[3].clone().sub(c[0]), n = new THREE.Vector3().crossVectors(eu, ev).normalize();
+  const lu = eu.lengthSq(), lv = ev.lengthSq(), d = new THREE.Vector3(), P = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()], e1 = new THREE.Vector3(), e2 = new THREE.Vector3(), tn = new THREE.Vector3();
+  const near = (p: THREE.Vector3) => { d.copy(p).sub(c[0]); const a = d.dot(eu) / lu, b = d.dot(ev) / lv; return a > -0.15 && a < 1.15 && b > -0.15 && b < 1.15 && Math.abs(d.dot(n)) < 0.02; };
+  const keep: number[] = []; let dropped = 0;
+  for (let t = 0; t < idx.count; t += 3) {
+    for (let k = 0; k < 3; k++) P[k].fromBufferAttribute(pos, idx.getX(t + k));
+    e1.subVectors(P[1], P[0]); e2.subVectors(P[2], P[0]); tn.crossVectors(e1, e2); const area = tn.length() / 2; tn.normalize();
+    const big = area > 0.008 && Math.abs(tn.dot(n)) > 0.99 && P.every(near), off = Math.max(...P.map((p) => Math.abs(d.copy(p).sub(c[0]).dot(n))));
+    if (big && off > 0.0007) { dropped++; continue; }
+    keep.push(idx.getX(t), idx.getX(t + 1), idx.getX(t + 2));
+  }
+  if (dropped) geo.setIndex(keep);
+  return dropped;
+}
+/** Bezel controls of the captain's EFB display unit, in millimetres in the screen frame (u right, v up from the bottom-left corner of the glass).
+ *  The model bakes them into the tablet mesh, so they are picked through invisible hot-spots registered to the real button caps. */
+const EFB_BTNS: { id: string; u: number; v: number; w: number; h: number; label: string; desc: string }[] = [
+  { id: 'efb_usb1', u: -26, v: 176.1, w: 14, h: 14, label: 'EFB USB PORT 1', desc: 'USB data port of the captain\'s EFB display unit (keyboard / data load). No device is connected in the simulator.' },
+  { id: 'efb_pwr', u: -27, v: 155.3, w: 12, h: 12, label: 'EFB DISPLAY (PWR)', desc: 'Switches the EFB display backlight on / off. The EFB itself stays active when the backlight is off; pressing again restores the last BRT/DIM setting.' },
+  { id: 'efb_brt', u: -27.5, v: 132.4, w: 10, h: 10, label: 'EFB BRT', desc: 'Increases the EFB display backlight intensity (BRT / DIM switch).' },
+  { id: 'efb_dim', u: -27.4, v: 118.8, w: 10, h: 10, label: 'EFB DIM', desc: 'Decreases the EFB display backlight intensity (BRT / DIM switch).' },
+  { id: 'efb_view', u: -25, v: 57.7, w: 13, h: 12, label: 'EFB VIEW OFFSIDE', desc: 'Shows the first officer\'s (offside) EFB page on this display, read-only. Press again to return to your own EFB.' },
+  { id: 'efb_usb2', u: -25.6, v: 8.1, w: 14, h: 14, label: 'EFB USB PORT 2', desc: 'Second USB data port of the captain\'s EFB display unit. No device is connected in the simulator.' },
+];
 
 // ---- naming helpers ----
 const MCDU_KEYS = new Set(['init', 'f-pln', 'f-pln2', 'radnav', 'fuel-pred', 'prog', 'perf', 'data', 'dir', 'airport', 'clr', 'sp', 'left', 'right', 'up', 'down', 'opt1', 'opt2', 'overfly', '+/-', '/', '.', 'mcdu', 'sec-fpln']);
@@ -143,6 +175,8 @@ export class Cockpit {
     this.root.add(model); model.updateMatrixWorld(true);
     // GLTFLoader sanitises node names (drops '.'), but every control id below uses the ORIGINAL glTF name (e.g. 'pfd1.screen', 'ap1.cpt'):
     model.traverse((o) => { const u = o.userData as { name?: string; sourceName?: string }; const real = u.name || u.sourceName; if (real) o.name = real; });
+    model.traverse((o) => { if ((o as THREE.Mesh).isMesh && o.name === 'EFB_cpt') stripEfbGlass(o as THREE.Mesh); });
+    this.efbFo.page = 'PLAN'; this.efbFo.readOnly = true; this.efbFo.banner = 'OFFSIDE · F/O EFB (read-only)';
     const maxA = 16; const nodes = new Map<string, THREE.Mesh>(); const all: THREE.Mesh[] = [];
     model.traverse((o) => { if ((o as THREE.Mesh).isMesh) { const m = o as THREE.Mesh; all.push(m); nodes.set(m.name, m); const mt = m.material as THREE.MeshStandardMaterial; if (mt.map) { mt.map.anisotropy = maxA; mt.map.needsUpdate = true; } } });
     // ---- classify ----
@@ -239,7 +273,9 @@ export class Cockpit {
   }
 
   // ====================================================================== EFB tablet (captain's side window mount)
-  efb = new Efb(); private efbMesh?: THREE.Mesh; private efbCanvas?: HTMLCanvasElement; private efbTex?: THREE.CanvasTexture; private efbNext = 0;
+  efb = new Efb(); efbFo = new Efb(); efbPower = true; efbBright = 1; efbOffside = false; private efbBtnMeshes: THREE.Mesh[] = []; private efbFlash = new Map<string, number>();
+  private get efbShown() { return this.efbOffside ? this.efbFo : this.efb; }
+  private efbMesh?: THREE.Mesh; private efbCanvas?: HTMLCanvasElement; private efbTex?: THREE.CanvasTexture; private efbNext = 0;
   /** Overlay the live EFB page exactly on the glass of the model's tablet (EFB_cpt). The four corners are the real (slightly non-coplanar, 9.3° rotated)
    *  vertices of the screen face, decoded from the GLB, so the page can neither skew nor sit behind the bezel. Model coordinates (m). */
   private buildEfb() {
@@ -248,12 +284,35 @@ export class Cockpit {
     const mat = new THREE.MeshBasicMaterial({ map: tex, toneMapped: false, polygonOffset: true, polygonOffsetFactor: -3, polygonOffsetUnits: -3 });
     const c = EFB_CORNERS.map((p) => new THREE.Vector3(...p)); // BL, BR, TR, TL as seen by the pilot
     const ctr = c[0].clone().add(c[1]).add(c[2]).add(c[3]).multiplyScalar(0.25), n = new THREE.Vector3().crossVectors(c[1].clone().sub(c[0]), c[3].clone().sub(c[0])).normalize();
-    const inset = 0.965, lift = 0.0022, pos: number[] = [];
+    const inset = 0.975, lift = 0.003, pos: number[] = [];
     for (const p of c) { const q = p.clone().sub(ctr).multiplyScalar(inset).add(ctr).addScaledVector(n, lift); pos.push(q.x, q.y, q.z); }
     const geo = new THREE.BufferGeometry(); geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-    geo.setAttribute('uv', new THREE.Float32BufferAttribute([0, 0, 1, 0, 1, 1, 0, 1], 2)); geo.setIndex([0, 1, 2, 0, 2, 3]); geo.computeVertexNormals(); geo.computeBoundingSphere();
+    geo.setAttribute('uv', new THREE.Float32BufferAttribute([0, 0, 1, 0, 1, 1, 0, 1], 2)); geo.setIndex([0, 1, 3, 1, 2, 3]); /* same TL-BR diagonal as the real glass, so the slightly non-planar quad can never show a seam */ geo.computeVertexNormals(); geo.computeBoundingSphere();
     const mesh = new THREE.Mesh(geo, mat); mesh.renderOrder = 4; mesh.name = 'efb_screen'; mesh.frustumCulled = false;
     this.root.add(mesh); this.efbMesh = mesh; this.efbCanvas = cv; this.efbTex = tex;
+    // bezel hot-spots, registered to the real button caps (frame: u along the bottom edge, v up the left edge, w out of the glass)
+    const fc = EFB_BTN_FRAME.map((p) => new THREE.Vector3(...p)), eu = fc[1].clone().sub(fc[0]).normalize(), ev = fc[3].clone().sub(fc[0]).normalize(), fn = new THREE.Vector3().crossVectors(eu, ev).normalize(), q = new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(eu, ev, fn));
+    for (const b of EFB_BTNS) {
+      const m = new THREE.Mesh(new THREE.PlaneGeometry(b.w / 1000, b.h / 1000), new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0, depthWrite: false, side: THREE.DoubleSide }));
+      m.position.copy(fc[0]).addScaledVector(eu, b.u / 1000).addScaledVector(ev, b.v / 1000).addScaledVector(fn, 0.006); m.quaternion.copy(q); m.name = b.id; m.renderOrder = 6; m.frustumCulled = false;
+      this.root.add(m); this.efbBtnMeshes.push(m);
+    }
+  }
+  private pickEfbBtn(ray: THREE.Raycaster): { id: string; dist: number } | null { const h = ray.intersectObjects(this.efbBtnMeshes, false)[0]; return h ? { id: h.object.name, dist: h.distance } : null; }
+  private efbBtnInfo(id: string) { return EFB_BTNS.find((b) => b.id === id)!; }
+  private efbBtnState(id: string): string {
+    switch (id) { case 'efb_pwr': return this.efbPower ? 'BACKLIGHT ON' : 'BACKLIGHT OFF'; case 'efb_brt': case 'efb_dim': return this.efbPower ? `BRIGHTNESS ${Math.round(this.efbBright * 100)} %` : 'BACKLIGHT OFF'; case 'efb_view': return this.efbOffside ? 'OFFSIDE (F/O) VIEW' : 'OWN VIEW'; default: return 'NO DEVICE'; }
+  }
+  private pressEfbBtn(id: string) {
+    const h = this.host!; this.efbFlash.set(id, 0.18);
+    switch (id) {
+      case 'efb_pwr': this.efbPower = !this.efbPower; h.toast(this.efbPower ? 'EFB display backlight ON' : 'EFB display backlight OFF', 'info'); break;
+      case 'efb_brt': if (this.efbPower) { this.efbBright = Math.min(1, Math.round((this.efbBright + 0.1) * 10) / 10); h.toast(`EFB brightness ${Math.round(this.efbBright * 100)} %`, 'info'); } break;
+      case 'efb_dim': if (this.efbPower) { this.efbBright = Math.max(0.1, Math.round((this.efbBright - 0.1) * 10) / 10); h.toast(`EFB brightness ${Math.round(this.efbBright * 100)} %`, 'info'); } break;
+      case 'efb_view': this.efbOffside = !this.efbOffside; h.toast(this.efbOffside ? 'EFB: offside (F/O) view – read-only' : 'EFB: own view', 'info'); break;
+      default: h.toast('USB port – no device connected', 'info');
+    }
+    this.efb.dirty = this.efbFo.dirty = true;
   }
   private pickEfb(ray: THREE.Raycaster): { u: number; v: number; dist: number } | null {
     if (!this.efbMesh) return null; const h = ray.intersectObject(this.efbMesh, false)[0]; if (!h || !h.uv) return null;
@@ -355,8 +414,9 @@ export class Cockpit {
   }
   hover(ray: THREE.Raycaster): CockpitHover | null {
     if (this.fallback) { const p = this.fallback.pick(ray, true); return p ? { id: p.id, label: p.id.toUpperCase(), value: '', hint: 'Click', desc: 'Flight-deck control.' } : null; }
-    const p = this.pickGroup(ray), e = this.pickEfb(ray);
-    if (e && (!p || e.dist < p.hit.distance)) { const tip = this.efb.hover(e.u, e.v); return { id: 'efb', label: 'EFB TABLET (CAPT)', value: tip ?? `Page: ${this.efb.page}`, hint: tip ? 'Click' : 'Click to operate · wheel scrolls', desc: 'Electronic Flight Bag – flight plan, checklists, airport data, radio frequencies, weather and procedures.' }; }
+    const p = this.pickGroup(ray), e = this.pickEfb(ray), eb = this.pickEfbBtn(ray);
+    if (eb && (!p || eb.dist < p.hit.distance)) { const b = this.efbBtnInfo(eb.id); return { id: eb.id, label: b.label, value: this.efbBtnState(eb.id), hint: eb.id.startsWith('efb_usb') ? 'Port' : 'Click to press', desc: b.desc }; }
+    if (e && (!p || e.dist < p.hit.distance)) { const tip = this.efbShown.hover(e.u, e.v); return { id: 'efb', label: 'EFB TABLET (CAPT)', value: tip ?? `Page: ${this.efbShown.page}${this.efbOffside ? ' (F/O)' : ''}`, hint: tip ? 'Click' : 'Click to operate · wheel scrolls', desc: 'Electronic Flight Bag – flight plan, checklists, airport data, radio frequencies, weather and procedures.' }; }
     if (!p) return null;
     const info = describeControl(p.g.id);
     return { id: p.g.id, label: p.g.kind === 'key' ? p.g.label : info.name, value: this.stateText(p.g), hint: this.hint(p.g), desc: info.text };
@@ -389,8 +449,9 @@ export class Cockpit {
   /** Pointer down: returns null when no control was hit; `handled:false` ids ('yoke') are completed by the game. */
   press(ray: THREE.Raycaster, button: number, shift: boolean): PressResult | null {
     if (this.fallback) { const p = this.fallback.pick(ray); return p ? { id: p.id, handled: false } : null; }
-    const p = this.pickGroup(ray), e = this.pickEfb(ray);
-    if (e && (!p || e.dist < p.hit.distance)) { this.efb.click(e.u, e.v); return { id: 'efb', handled: true }; }
+    const p = this.pickGroup(ray), e = this.pickEfb(ray), eb = this.pickEfbBtn(ray);
+    if (eb && this.host && (!p || eb.dist < p.hit.distance)) { this.pressEfbBtn(eb.id); return { id: eb.id, handled: true }; }
+    if (e && (!p || e.dist < p.hit.distance)) { this.efbShown.click(e.u, e.v); return { id: 'efb', handled: true }; }
     if (!p || !this.host) return null; const g = p.g; const h = this.host;
     if (g.kind === 'stick') return { id: 'yoke', handled: false };
     if (g.id === 'gear_lever') { h.action('gear'); return { id: g.id, handled: true }; }
@@ -428,7 +489,7 @@ export class Cockpit {
     if (this.fallback) return false;
     if (performance.now() - this.lastZoomT < 450) return false; // a zoom gesture in progress never turns a knob that slides under the cursor
     const p = this.pickGroup(ray), e = this.pickEfb(ray);
-    if (e && (!p || e.dist < p.hit.distance)) { this.efb.wheel(deltaY); return true; }
+    if (e && (!p || e.dist < p.hit.distance)) { this.efbShown.wheel(deltaY); return true; }
     if (!p) return false; const g = p.g;
     const isK = g.kind === 'knob' || /^(spd-sel|hdg_sel|alt-sel|vs-sel)$/.test(g.id) || g.id === 'eng_mode';
     if (g.kind === 'lever' && this.host) { const c = this.host.fm.ctl, d = deltaY > 0 ? -0.05 : 0.05; if (g.id === 'thr_l_body') { const R = c.throttle + c.thrOffset; c.throttle = this.stepDetent(c.throttle, d); c.thrOffset = R - c.throttle; } else if (g.id === 'thr_r_body') c.thrOffset = this.stepDetent(c.throttle + c.thrOffset, d) - c.throttle; else if (g.id === 'FlapsLever') c.flapsIdx = Math.min(4, Math.max(0, c.flapsIdx + (deltaY > 0 ? 1 : -1))); else return false; return true; }
@@ -716,13 +777,14 @@ export class Cockpit {
   private efbScale = 1; private efbLast = 0;
   private updateEfb(time: number, s: A320Systems, h: CockpitHost) {
     const m = this.efbMesh; if (!m || !this.efbCanvas || !this.efbTex) return;
-    (m.material as THREE.MeshBasicMaterial).color.setScalar((0.3 + 0.7 * this.daylight) * (s.dc ? 1 : 0.08));
+    (m.material as THREE.MeshBasicMaterial).color.setScalar((0.3 + 0.7 * this.daylight) * (s.dc ? 1 : 0.08) * (this.efbPower ? 0.25 + 0.75 * this.efbBright : 0)); // PWR = backlight, BRT/DIM = intensity
+    for (const b of this.efbBtnMeshes) { const f = Math.max(0, (this.efbFlash.get(b.name) ?? 0) - 1 / 60); this.efbFlash.set(b.name, f); (b.material as THREE.MeshBasicMaterial).opacity = f > 0 ? 0.45 : 0; } // brief shadow = button pressed in
     if (this.frameNo % 5 === 0 || !this.efbSphere.radius) { this.efbSphere.copy(m.geometry.boundingSphere ?? (m.geometry.computeBoundingSphere(), m.geometry.boundingSphere!)).applyMatrix4(m.matrixWorld); this.efbVis = this.frustum.intersectsSphere(this.efbSphere); this.efbPx = this.efbVis ? this.projPx(this.efbSphere) : 0; }
     if (!this.efbVis || this.efbPx < 14) return;
     const want = this.efbPx * Math.max(1, this.dpr) / 1.2 > 1024 ? 2 : this.efbPx * Math.max(1, this.dpr) / 1.2 > 640 ? 1.5 : 1; // tablet face ≈ 83 % of the sphere diameter
-    if (want !== this.efbScale) { this.efbScale = want; this.efbCanvas.width = Math.round(Efb.W * want); this.efbCanvas.height = Math.round(Efb.H * want); this.efbTex.dispose(); this.efb.dirty = true; this.efbNext = 0; }
-    const gap = this.efb.dirty ? 1 / 20 : 0.5;                              // clicks repaint at ≤ 20 Hz, idle refresh (clock / METAR) at 2 Hz
-    if (time >= this.efbNext || (this.efb.dirty && time - this.efbLast > gap)) { this.efbNext = time + 0.5; this.efbLast = time; this.efb.draw(this.efbCanvas.getContext('2d')!, h.efbInfo?.() ?? null, this.daylight, this.efbScale); this.efbTex.needsUpdate = true; }
+    if (want !== this.efbScale) { this.efbScale = want; this.efbCanvas.width = Math.round(Efb.W * want); this.efbCanvas.height = Math.round(Efb.H * want); this.efbTex.dispose(); this.efb.dirty = this.efbFo.dirty = true; this.efbNext = 0; }
+    const dirty = this.efbShown.dirty, gap = dirty ? 1 / 20 : 0.5;                              // clicks repaint at ≤ 20 Hz, idle refresh (clock / METAR) at 2 Hz
+    if (time >= this.efbNext || (dirty && time - this.efbLast > gap)) { this.efbNext = time + 0.5; this.efbLast = time; this.efbShown.draw(this.efbCanvas.getContext('2d')!, h.efbInfo?.() ?? null, this.daylight, this.efbScale); this.efbTex.needsUpdate = true; }
   }
   private efbSphere = new THREE.Sphere(); private efbVis = false; private efbPx = 0;
 

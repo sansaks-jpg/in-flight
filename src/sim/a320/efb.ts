@@ -46,15 +46,17 @@ const hhmm = (ms: number) => { const d = new Date(ms); return `${String(d.getUTC
 export class Efb {
   static readonly W = 1024; static readonly H = 768;
   page: EfbPage = 'CHECK'; dirty = true;
+  /** Offside (F/O) view on the captain's display is read-only: the captain can look at the F/O's pages but not operate them. */
+  readOnly = false; banner = '';
   private list = -1; private scroll: Record<string, number> = {};
   private com = { active: 118.1, stby: 121.5 };
   private hits: (Rect & { tip: string; fn: () => void })[] = [];
   private wxCache = new Map<string, { wx: LiveWx | null; state: 'loading' | 'ok' | 'fail'; at: number }>();
 
   /** Click at normalised screen coordinates (0..1, origin top-left). Returns true if a button was hit. */
-  click(u: number, v: number): boolean { const h = this.at(u, v); if (!h) return false; h.fn(); this.dirty = true; return true; }
-  hover(u: number, v: number): string | null { return this.at(u, v)?.tip ?? null; }
-  wheel(dy: number) { const k = this.key(); this.scroll[k] = Math.max(0, (this.scroll[k] ?? 0) + (dy > 0 ? 1 : -1)); this.dirty = true; }
+  click(u: number, v: number): boolean { if (this.readOnly) return false; const h = this.at(u, v); if (!h) return false; h.fn(); this.dirty = true; return true; }
+  hover(u: number, v: number): string | null { return this.readOnly ? null : this.at(u, v)?.tip ?? null; }
+  wheel(dy: number) { if (this.readOnly) return; const k = this.key(); this.scroll[k] = Math.max(0, (this.scroll[k] ?? 0) + (dy > 0 ? 1 : -1)); this.dirty = true; }
   private key() { return this.page === 'CHECK' ? 'CHECK' + this.list : this.page; }
   private at(u: number, v: number) { const x = u * Efb.W, y = v * Efb.H; for (let i = this.hits.length - 1; i >= 0; i--) { const h = this.hits[i]; if (x >= h.x && x <= h.x + h.w && y >= h.y && y <= h.y + h.h) return h; } return null; }
   private btn(r: Rect, tip: string, fn: () => void) { this.hits.push({ ...r, tip, fn }); }
@@ -76,7 +78,8 @@ export class Efb {
     g.fillStyle = COL.rail; g.fillRect(0, 0, W, 56); g.fillStyle = COL.line; g.fillRect(0, 55, W, 1);
     g.fillStyle = COL.accent; rr(g, 18, 14, 28, 28, 7); g.fill(); g.fillStyle = '#04121d'; g.font = `800 17px ${SANS}`; g.textAlign = 'center'; g.fillText('A', 32, 29);
     g.textAlign = 'left'; g.fillStyle = COL.txt; g.font = `700 22px ${SANS}`; g.fillText('A320 EFB', 58, 28);
-    if (info) {
+    if (this.banner) { g.textAlign = 'left'; g.font = `800 14px ${SANS}`; const bw = g.measureText(this.banner).width + 24; g.fillStyle = COL.amber; rr(g, 214, 17, bw, 24, 12); g.fill(); g.fillStyle = '#251a00'; g.fillText(this.banner, 226, 29); }
+    if (info && !this.banner) {
       g.textAlign = 'center'; g.fillStyle = COL.dim; g.font = `600 18px ${MONO}`; g.fillText(`${info.dep.icao}  ➜  ${info.arr.icao}`, W / 2, 28);
       g.textAlign = 'right'; g.fillStyle = COL.txt; g.font = `600 18px ${MONO}`; g.fillText(`${info.callsign}   ${hhmm(info.utcMs)}`, W - 20, 28);
     }

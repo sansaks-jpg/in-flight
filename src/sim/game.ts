@@ -1052,8 +1052,13 @@ export class Game {
     if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement || (e.target instanceof HTMLElement && e.target.isContentEditable)) return;
     // Native keyboard navigation belongs to the focused UI, not to the flight controls.
     if (e.target instanceof HTMLElement && e.target.closest('[data-flight-ui]') && [' ', 'Enter', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown'].includes(e.key)) return;
-    if (/^Numpad[0-9]$/.test(e.code) && this.phase === 'playing' && this.mode === 'play' && this.cockpit && this.isInterior()) {
-      const f = COCKPIT_FOCUS.find((x) => x.key === e.code.slice(6)); if (f) { e.preventDefault(); this.setCockpitSubview(f.id); return; } // keypad 0-9 = camera focus shortcuts
+    // Flight-deck camera shortcuts: the number ROW (Digit0-9, works on laptops) and the numeric keypad (Numpad0-9) fly the camera to a panel.
+    // They use the physical key position (e.code), so they also work on AZERTY / QWERTZ layouts where the digits need Shift. While the ATC reply menu
+    // is open, 1-4 still answer the controller. Outside the cockpit camera the digit row keeps its old job (manual throttle 10-100 %).
+    const digit = /^(?:Digit|Numpad)([0-9])$/.exec(e.code);
+    if (digit && this.phase === 'playing' && this.mode === 'play' && this.cockpit && this.isInterior() && !(this.radioMenuOpen && '1234'.includes(digit[1]))) {
+      const f = COCKPIT_FOCUS.find((x) => x.key === digit[1]);
+      if (f) { e.preventDefault(); if (!e.repeat) { this.setCockpitSubview(f.id); this.audio.click(); } return; }
     }
     const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
     if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', ' ', 'PageUp', 'PageDown', 'F1', 'F2', 'F3', 'F4', 'F5'].includes(k)) e.preventDefault();
