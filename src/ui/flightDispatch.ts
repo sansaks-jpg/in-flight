@@ -27,10 +27,16 @@ export const REPO_FACTS: RepoFacts = {
   vectorSource: 'OpenStreetMap & OpenFreeMap MVT',
 };
 
+/**
+ * Heavy menu photography is NOT stored in this repository (AGENTS.md section 5): it is fetched at runtime from a pinned,
+ * immutable jsDelivr URL (CORS-enabled, edge cached) of the upstream repository commit. Every consumer must tolerate a
+ * failed load (offline) — the tiles have solid dark backgrounds and the aircraft card falls back to a vector silhouette.
+ */
+const CDN_ASSET_BASE = 'https://cdn.jsdelivr.net/gh/sansaks-jpg/in-flight@520fdb9a6175c55c4fcf9d407a7a821bf5e73196/src/assets/images/';
 export const AIRCRAFT_STUDIO_IMAGES: Record<string, string> = {
-  sky: '/src/assets/images/aircraft_sky_320_1793903495799.jpg',
-  trek: '/src/assets/images/aircraft_trek_turboprop_1793903495847.jpg',
-  swift: '/src/assets/images/aircraft_swift_piston_1793903496888.jpg',
+  sky: CDN_ASSET_BASE + 'aircraft_sky_320_1793903495799.jpg',
+  trek: CDN_ASSET_BASE + 'aircraft_trek_turboprop_1793903495847.jpg',
+  swift: CDN_ASSET_BASE + 'aircraft_swift_piston_1793903496888.jpg',
 };
 
 export interface MenuBentoTile {
@@ -48,14 +54,14 @@ export const MENU_BENTO_TILES: MenuBentoTile[] = [
     title: 'World Photographer',
     subtitle: `${AIRPORTS.length.toLocaleString()} Real Airports · ${AIRPORTS.filter((a) => a.country === 'ID').length} in Indonesia · Satellite & DEM Relief`,
     badge: 'Esri World Imagery · AWS Terrarium DEM',
-    imageUrl: '/src/assets/images/menu_world_photographer_1793903487903.jpg',
+    imageUrl: CDN_ASSET_BASE + 'menu_world_photographer_1793903487903.jpg',
     action: 'planner',
   },
   {
     id: 'challenge_league',
     title: 'Challenge League',
     subtitle: '14 km ILS Final Approach',
-    imageUrl: '/src/assets/images/menu_challenge_league_1793903489548.jpg',
+    imageUrl: CDN_ASSET_BASE + 'menu_challenge_league_1793903489548.jpg',
     action: 'challenge',
   },
   {
@@ -63,28 +69,28 @@ export const MENU_BENTO_TILES: MenuBentoTile[] = [
     title: 'Activities',
     subtitle: '21 Curated Indonesia & World Routes',
     badge: 'ARCHIPELAGO & ALPS TOURS',
-    imageUrl: '/src/assets/images/menu_activities_1793903490541.jpg',
+    imageUrl: CDN_ASSET_BASE + 'menu_activities_1793903490541.jpg',
     action: 'planner',
   },
   {
     id: 'career',
     title: 'Career',
     subtitle: 'Pilot Logbook & Flight Certifications',
-    imageUrl: '/src/assets/images/menu_career_1793903492122.jpg',
+    imageUrl: CDN_ASSET_BASE + 'menu_career_1793903492122.jpg',
     action: 'career',
   },
   {
     id: 'free_flight',
     title: 'Free Flight',
     subtitle: 'World Map & Dispatch',
-    imageUrl: '/src/assets/images/menu_free_flight_1793903493342.jpg',
+    imageUrl: CDN_ASSET_BASE + 'menu_free_flight_1793903493342.jpg',
     action: 'planner',
   },
   {
     id: 'marketplace',
     title: 'Marketplace',
     subtitle: '3 Aircraft · 7 Liveries · Worldwide Scenery',
-    imageUrl: '/src/assets/images/menu_marketplace_1793903494323.jpg',
+    imageUrl: CDN_ASSET_BASE + 'menu_marketplace_1793903494323.jpg',
     action: 'hangar',
   },
 ];

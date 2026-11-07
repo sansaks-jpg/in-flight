@@ -753,10 +753,6 @@
 }
 
 /* ---- automatic radio: subtitles + on-air strip + history ---- */
-.flight-subtitle { position: fixed; left: 50%; bottom: 74px; transform: translateX(-50%); z-index: 40; max-width: min(760px, 92vw); display: flex; align-items: baseline; gap: 10px; padding: 9px 16px; border-radius: 8px; background: #0a121ce8; border: 1px solid #7fb4e040; color: #e8f1f8; font: 500 15px/1.35 ui-sans-serif, system-ui; pointer-events: none; box-shadow: 0 6px 22px #00000066; animation: flight-panel-in .2s ease-out; }
-.flight-subtitle svg { flex-shrink: 0; align-self: center; color: #6fc3ff; }
-.flight-subtitle strong { flex-shrink: 0; font-size: 11px; letter-spacing: .12em; color: #6fc3ff; }
-.flight-subtitle[data-pilot="true"] strong, .flight-subtitle[data-pilot="true"] svg { color: #9be59b; }
 .flight-radio-onair { margin: 8px 0; padding: 10px 12px; border-radius: 6px; background: #0e1a28; border: 1px solid #b6cadc26; min-height: 56px; color: #9fb5c7; font-size: 12.5px; }
 .flight-radio-onair[data-live="true"] { border-color: #6fc3ff80; color: #fff; }
 .flight-radio-onair strong { font-size: 10.5px; letter-spacing: .12em; color: #6fc3ff; }
@@ -766,7 +762,6 @@
 .flight-transmission[data-pilot="true"] strong { color: #9be59b; }
 .flight-radio-footer { display: flex; justify-content: space-between; align-items: center; margin-top: 8px; font-size: 11px; color: #8aa0b2; }
 .flight-radio-footer button { padding: 4px 10px; border-radius: 4px; border: 1px solid #b6cadc40; background: #162536; color: #cfe0ee; cursor: pointer; }
-@media (max-width: 700px) { .flight-subtitle { bottom: 120px; font-size: 13px; } }
 
 /* ---- dedicated airport / runway navigation display ---- */
 .flight-mini-map.flight-airport-map { --mini-size: 256px; }

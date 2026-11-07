@@ -1,4 +1,4 @@
-import { SpeechQueue, type SpeechKind } from './speech';
+import { VoiceBus, WebSpeechDriver, type VoiceHooks, type Utterance, type CaptionKind } from './speech';
 
 // Fully procedural WebAudio: engines, wind, rolling, warnings (stall / overspeed / GPWS / gear / bank), one-shots and voice callouts.
 export type WarnSound = 'stall' | 'overspeed' | 'pullup' | 'terrain' | 'gear' | 'bank' | 'sink' | 'config' | 'fuel' | null;
@@ -18,22 +18,20 @@ export class AudioEngine {
   muted = false; volume = 0.8;
   private voiceEnabled = true;
   get voiceOn() { return this.voiceEnabled; }
-  set voiceOn(on: boolean) { this.voiceEnabled = on; if (!on) this.speech.clear(); }
-  private readonly speech = new SpeechQueue({
-    speak: (request, finished) => {
-      const utterance = new SpeechSynthesisUtterance(request.text);
-      utterance.rate = request.rate; utterance.pitch = request.pitch; utterance.volume = request.volume;
-      utterance.onend = finished; utterance.onerror = finished;
-      speechSynthesis.speak(utterance);
-    },
-    cancel: () => { if (typeof speechSynthesis !== 'undefined') speechSynthesis.cancel(); },
-  });
+  set voiceOn(on: boolean) { this.voiceEnabled = on; this.voice.audibilityChanged(); }
+  /** True while the game is paused / in a menu: sound is suspended and every one-shot is refused. */
+  private halted = false;
+  /** The single owner of every spoken line (ATC, crew, PA, GPWS). `hooks.onLive/onLog` are wired by Game. */
+  readonly hooks: VoiceHooks = { audible: () => this.voiceEnabled && !this.muted && this.volume > 0 };
+  readonly voice = new VoiceBus(WebSpeechDriver.available() ? new WebSpeechDriver() : null, this.hooks);
+  private captionId = 1_000_000; // legacy speak() lines live in their own id range, away from ATC line ids
   private readonly oneShots = new Set<AudioScheduledSourceNode>();
   private cur: WarnSound = null; private warnT = 0;
 
   /** must be called from a user gesture */
   start() {
-    if (this.ctx) { this.ctx.resume(); return; }
+    this.halted = false;
+    if (this.ctx) { void this.ctx.resume(); return; }
     try { this.ctx = new (window.AudioContext || (window as any).webkitAudioContext)(); } catch { return; }
     const c = this.ctx;
     this.master = c.createGain(); this.master.gain.value = this.muted ? 0 : this.volume; this.master.connect(c.destination);
@@ -60,8 +58,8 @@ export class AudioEngine {
     wo1.connect(wgn); wo2.connect(wgn); wgn.connect(this.sfx); noiseSrc().connect(wnf).connect(nG).connect(this.sfx);
     wo1.start(); wo2.start(); this.warn = { o1: wo1, o2: wo2, g: wgn, ng: wgn, nf: wnf, nG };
   }
-  setVolume(v: number) { this.volume = v; if (v <= 0) this.speech.clear(); if (this.master) this.master.gain.setTargetAtTime(this.muted ? 0 : v, this.ctx!.currentTime, 0.05); }
-  setMuted(m: boolean) { this.muted = m; if (this.master) this.master.gain.setTargetAtTime(m ? 0 : this.volume, this.ctx!.currentTime, 0.05); if (m) this.speech.clear(); }
+  setVolume(v: number) { this.volume = v; this.voice.audibilityChanged(); if (this.master) this.master.gain.setTargetAtTime(this.muted ? 0 : v, this.ctx!.currentTime, 0.05); }
+  setMuted(m: boolean) { this.muted = m; if (this.master) this.master.gain.setTargetAtTime(m ? 0 : this.volume, this.ctx!.currentTime, 0.05); this.voice.audibilityChanged(); }
 
   update(s: AudioState, dt: number) {
     const c = this.ctx; if (!c || !this.eng) return;
@@ -115,12 +113,12 @@ export class AudioEngine {
 
   // ---------- one-shots ----------
   private burst(freq: number, dur: number, gain: number, type: OscillatorType = 'sine', slideTo?: number, delay = 0) {
-    const c = this.ctx; if (!c) return; const t = c.currentTime + delay;
+    const c = this.ctx; if (!c || this.halted) return; const t = c.currentTime + delay;
     const o = c.createOscillator(), g = c.createGain(); o.type = type; o.frequency.setValueAtTime(freq, t); if (slideTo) o.frequency.exponentialRampToValueAtTime(slideTo, t + dur);
     g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(gain, t + 0.01); g.gain.exponentialRampToValueAtTime(0.0001, t + dur); o.connect(g).connect(this.sfx); this.oneShots.add(o); o.onended = () => { this.oneShots.delete(o); o.disconnect(); g.disconnect(); }; o.start(t); o.stop(t + dur + 0.05);
   }
   private noiseBurst(dur: number, gain: number, f0: number, f1: number, type: BiquadFilterType = 'lowpass') {
-    const c = this.ctx; if (!c) return; const t = c.currentTime;
+    const c = this.ctx; if (!c || this.halted) return; const t = c.currentTime;
     const s = c.createBufferSource(); s.buffer = this.noise; const f = c.createBiquadFilter(); f.type = type; f.frequency.setValueAtTime(f0, t); f.frequency.exponentialRampToValueAtTime(Math.max(30, f1), t + dur);
     const g = c.createGain(); g.gain.setValueAtTime(gain, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur); s.connect(f).connect(g).connect(this.sfx); this.oneShots.add(s); s.onended = () => { this.oneShots.delete(s); s.disconnect(); f.disconnect(); g.disconnect(); }; s.start(t, Math.random()); s.stop(t + dur + 0.05);
   }
@@ -136,7 +134,7 @@ export class AudioEngine {
   scrape() { this.noiseBurst(0.25, 0.25, 3000, 900, 'bandpass'); }
   /** Long looping noise rumble (thunder body); nodes join `oneShots` so audio.silence() also stops it. */
   private rumble(delay: number, dur: number, gain: number, f0: number, f1: number, attack: number) {
-    const c = this.ctx; if (!c) return;
+    const c = this.ctx; if (!c || this.halted) return;
     const t0 = c.currentTime + delay;
     const s = c.createBufferSource(); s.buffer = this.noise; s.loop = true;
     const f = c.createBiquadFilter(); f.type = 'lowpass'; f.frequency.setValueAtTime(f0, t0); f.frequency.exponentialRampToValueAtTime(Math.max(25, f1), t0 + dur);
@@ -147,7 +145,7 @@ export class AudioEngine {
   /** Procedural thunder: noise crack rolling down into a sub-bass swell plus a delayed echo.
    *  @param intensity 0..1 (fades with strike distance) @param delay seconds the sound still needs (dist / 343 m/s) */
   thunder(intensity = 1, delay = 0) {
-    const c = this.ctx; if (!c || this.muted || this.volume <= 0 || intensity <= 0.05) return;
+    const c = this.ctx; if (!c || this.halted || this.muted || this.volume <= 0 || intensity <= 0.05) return;
     const d = Math.max(0, delay), i = Math.min(1, intensity);
     const dur = 2.6 + 2.4 * i;
     // distant strikes rise softly: onset ramps with the travel time ALREADY IN SECONDS (7.6 s for
@@ -159,14 +157,29 @@ export class AudioEngine {
   }
   applause() { this.noiseBurst(1.8, 0.2, 3000, 2500, 'bandpass'); }
   pa() { this.burst(1000, 0.08, 0.15, 'sine'); this.burst(1500, 0.14, 0.15, 'sine', undefined, 0.1); }
+  /** Legacy one-line voice API used by callouts / GPWS / PA: classified by key and routed through the shared bus. */
   speak(text: string, key = text, cooldown = 3, rate = 1.05, pitch = 0.9) {
-    if (this.muted || this.volume <= 0 || !this.voiceOn || typeof speechSynthesis === 'undefined' || !this.speech.canRequest(key, cooldown)) return;
-    const kind: SpeechKind = WARNING_VOICES.has(key) ? 'warning' : /^c\d+$/.test(key) || key === 'ret' || key === 'hl' ? 'callout' : 'announcement';
-    this.speech.request({ text, key, cooldown, rate, pitch, volume: Math.min(1, this.volume + 0.2), kind });
+    if (this.halted || !this.voice.canSay(key, cooldown)) return; // cheap early-out: warnings call this every frame (no allocation)
+    const warning = WARNING_VOICES.has(key), callout = /^c\d+$/.test(key) || key === 'ret' || key === 'hl';
+    const kind: CaptionKind = warning ? 'warning' : callout ? 'auto' : 'pa';
+    const u: Utterance = {
+      key, speech: text, cooldown, rate, pitch, volume: Math.min(1, this.volume + 0.2),
+      persona: kind === 'pa' ? 'pa' : 'machine', priority: warning ? 3 : callout ? 2 : 1,
+      caption: { id: ++this.captionId, kind, who: kind === 'pa' ? 'CABIN' : 'AUTO', label: kind === 'pa' ? 'Cabin PA' : kind === 'warning' ? 'GPWS' : 'Aircraft', text },
+      holdWhenSterile: false, silentOk: kind === 'pa',
+    };
+    this.voice.say(u);
   }
-  setWarningVoice(key: string | null) { this.speech.retainWarning(key); }
-  silence() {
-    this.speech.clear();
+  setWarningVoice(key: string | null) { this.voice.retainWarning(key); }
+  /** Pause: stop every sound immediately and freeze the Web Audio clock so nothing scheduled can leak out later.
+   *  The voice queue is deliberately kept: the bus is suspended by the game and replays the cut line on resume. */
+  halt() {
+    this.halted = true; this.quiet();
+    if (this.ctx && this.ctx.state === 'running') void this.ctx.suspend().catch(() => undefined);
+  }
+  /** Total silence (new flight, menu, crash): forgets all queued speech too. */
+  silence() { this.voice.clear(); this.quiet(); }
+  private quiet() {
     for (const source of this.oneShots) { try { source.stop(); } catch { /* already ended */ } }
     this.oneShots.clear(); this.cur = null; this.warnT = 0;
     if (!this.ctx || !this.eng) return;

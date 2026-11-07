@@ -15,6 +15,8 @@ import { AirportMiniMap } from './AirportMiniMap';
 import { FlightToggle, IconButton, PanelHeader, RunwaySelect } from './FlightWidgets';
 import { CockpitTooltipOverlay, CockpitFocusBar, FreelookReticle } from './MsfsWindows';
 import { COCKPIT_FOCUS } from '../sim/cockpit';
+import { transcriptText } from '../sim/translate';
+import { LiveTranscript, TranscriptEntry, TranscriptLangSwitch, speakerName, speakerTag } from './Transcript';
 import type { CockpitPreset } from '../sim/cockpit';
 
 const COCKPIT_PANEL_VIEWS: [CockpitPreset, string][] = [['pilot', 'Captain'], ['copilot', 'First Officer'], ['instruments', 'Main panel'], ['pfd', 'PFD'], ['nd', 'ND'], ['ecam', 'ECAM'], ['fcu', 'FCU / EFIS'], ['overhead', 'Overhead'], ['pedestal', 'Pedestal'], ['mcdu', 'MCDU'], ['efb', 'EFB tablet']];
@@ -157,41 +159,26 @@ function AutopilotPanel({ game, hud, to }: { game: Game; hud: HudState; to: Airp
   </div>;
 }
 
-const fmtT = (t: number) => `${Math.floor(t / 60).toString().padStart(2, '0')}:${String(Math.floor(t % 60)).padStart(2, '0')}`;
-function RadioLine({ m }: { m: NonNullable<HudState['atc']> }) {
-  const pilot = m.sender === 'PILOT';
-  return <div className="flight-transmission" data-pilot={pilot}>
-    <div><strong>{pilot ? `PILOT · ${m.label ?? ''}` : (m.label ?? m.sender).toUpperCase()}</strong><time>{fmtT(m.time)}</time></div>
-    <p>{m.text}</p>
-  </div>;
-}
-/** Fully automatic radio: the pilot and the controllers talk to each other (voiced + subtitled); nothing to press. */
-function RadioPanel({ game, hud }: { game: Game; hud: HudState }) {
+/** Voice traffic panel: every spoken line (ATC, pilot readbacks, crew callouts, cabin PA) with its transcript. */
+function RadioPanel({ game, hud, settings, setSettings }: { game: Game; hud: HudState; settings: Settings; setSettings: (p: Partial<Settings>) => void }) {
   const endRef = useRef<HTMLDivElement>(null);
   useEffect(() => { endRef.current?.scrollIntoView({ block: 'end' }); }, [hud.atcLog.length]);
+  const live = hud.atcLive, lang = settings.transcriptLang;
   return <>
-    <div className="flight-radio-status"><span className="flight-live-dot" />COM 1<span>{hud.atcLive ? 'ON AIR' : 'AUTOMATIC ATC · STANDING BY'}</span></div>
-    <div className="flight-radio-onair" data-live={!!hud.atcLive}>
-      {hud.atcLive ? <><strong>{hud.atcLive.sender === 'PILOT' ? 'PILOT' : (hud.atcLive.label ?? hud.atcLive.sender).toUpperCase()}</strong><p>{hud.atcLive.text}</p></>
-        : <p>Pilot and ATC exchange calls and readbacks automatically (ICAO / FAA phraseology). Voices follow the sim's voice setting.</p>}
+    <div className="flight-radio-status"><span className="flight-live-dot" />COM 1<span>{live ? 'ON AIR' : 'AUTOMATIC ATC · STANDING BY'}</span></div>
+    <div className="flight-radio-onair" data-live={!!live}>
+      {live ? <><strong>{speakerTag(live)} · {speakerName(live).toUpperCase()}</strong><p>{transcriptText(live, lang)}</p></>
+        : <p>Pilot and ATC exchange calls and readbacks automatically (ICAO / FAA phraseology); the crew calls out take-off, approach and landing events as they happen. Voices follow the sim's voice setting.</p>}
     </div>
+    <div className="flight-radio-footer" style={{ margin: '0 0 8px' }}><span>Transcript language</span><TranscriptLangSwitch settings={settings} setSettings={setSettings} /></div>
     <div className="flight-radio-log flight-radio-history" aria-live="polite" aria-relevant="additions text">
       {!hud.atcLog.length && <div className="flight-empty-state"><FlightIcon name="radio" size={26} /><p>Frequency quiet</p><span>Transmissions appear here as they are spoken.</span></div>}
-      {hud.atcLog.map((m) => <RadioLine key={m.id} m={m} />)}
+      {hud.atcLog.map((m) => <TranscriptEntry key={m.id} m={m} lang={lang} />)}
       <div ref={endRef} />
     </div>
     <div className="flight-radio-footer"><span>{hud.atcLog.length} transmissions · history kept for this flight</span>
       <button onClick={() => game.radio.cancel()} title="Skip pending radio traffic">Skip queue</button></div>
   </>;
-}
-
-/** Live subtitle: whoever is transmitting right now, with the speaker's role. */
-function RadioSubtitle({ hud }: { hud: HudState }) {
-  const l = hud.atcLive; if (!l) return null;
-  const pilot = l.sender === 'PILOT';
-  return <div className="flight-subtitle" data-pilot={pilot} role="status" aria-live="polite" data-flight-ui>
-    <FlightIcon name="radio" size={15} /><strong>{pilot ? `PILOT (${l.label})` : (l.label ?? l.sender).toUpperCase()}</strong><span>{l.text}</span>
-  </div>;
 }
 
 const CAMERA_VIEWS: { id: ViewId; label: string; description: string; icon: FlightIconName }[] = [
@@ -325,7 +312,7 @@ export function Hud({ game, hud, toasts, settings, setSettings, onMap, mapOpen, 
   let toolBody: ReactNode;
   switch (tool) {
     case 'autopilot': toolBody = <AutopilotPanel game={game} hud={hud} to={to} />; break;
-    case 'radio': toolBody = <RadioPanel game={game} hud={hud} />; break;
+    case 'radio': toolBody = <RadioPanel game={game} hud={hud} settings={settings} setSettings={setSettings} />; break;
     case 'camera': toolBody = <CameraPanel game={game} hud={hud} onDone={returnToFlight} />; break;
     case 'display': toolBody = <DisplayPanel settings={settings} setSettings={setSettings} fullInstruments={fullInstruments} setFullInstruments={setFullInstruments} />; break;
   }
@@ -387,7 +374,7 @@ export function Hud({ game, hud, toasts, settings, setSettings, onMap, mapOpen, 
     {hud.freelookActive && <div className="flight-freelook-hint"><FlightIcon name="camera" size={14} />FREE LOOK<span>Release mouse to return to controls</span></div>}
     <div className="flight-bottom-left">
     {mode === 'assisted' && !narrow && !short && !viewport.touch && hud.hint && <div className="flight-instructor" role="status"><FlightIcon name="help" size={17} /><div><strong>FLIGHT ASSISTANT</strong><span>{hud.hint}</span></div></div>}
-      <RadioSubtitle hud={hud} />
+      <LiveTranscript hud={hud} settings={settings} />
       <div className="flight-toasts" role="status" aria-live="polite">{toasts.slice(-2).map((toast) => <div key={toast.id} className="flight-toast" data-level={toast.level}>
         <FlightIcon name={toast.level === 'warn' || toast.level === 'bad' ? 'alert' : 'check'} size={14} /><span>{toast.text}</span>
       </div>)}</div>

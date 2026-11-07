@@ -7,10 +7,10 @@ License: GNU General Public License v2 (see LICENSE.txt in this folder).
 Copyright (c) 2025 Josh Davidson, Jonathan Redpath, merspieler, Matthew Maring, Thorsten Herrmann, Semir Gebran and the
 respective FlightGear A320-family contributors.
 
-Modifications made for In-Flight:
-  * textures re-encoded PNG/JPEG -> WebP (quality 94, resolution unchanged: up to 4096 x 4096),
-  * geometry quantised and compressed with EXT_meshopt_compression (gltf-transform "meshopt"),
-  * no vertices, UVs, node names or coordinates were edited. cockpit-manifest.json is the unmodified upstream manifest
-    (animation axes / part bounding boxes in the original model coordinates).
+Distribution: the binary is NOT part of this repository (see AGENTS.md section 5). The unmodified 50.6 MB file (21 PNG/JPEG textures,
+no mesh compression) is downloaded by the browser at runtime from the pinned URL listed in src/sim/a320/assets.ts and cached with the
+Cache Storage API. cockpit-manifest.json (animation axes / part bounding boxes in the original model coordinates) is loaded from the
+same pinned commit via jsDelivr. Neither file is modified by In-Flight; all vertices, UVs, node names and coordinates are the upstream ones.
 
-The compressed model ships in this folder (cockpit.glb). The unmodified 50.6 MB original is available at runtime from the pinned raw.githubusercontent.com / githack fallbacks listed in src/sim/a320/assets.ts (jsDelivr cannot serve it: >50 MB).
+Runtime-only adjustments made by In-Flight (no change to the source data): texture filtering (trilinear, anisotropic) and an
+anti-aliased alpha cut-out shader for the glTF MASK materials (src/sim/a320/cockpitRender.ts).

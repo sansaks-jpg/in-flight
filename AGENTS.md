@@ -105,9 +105,13 @@ To prevent garbage collection (GC) micro-stutters:
 | `src/sim/precip.ts` | Rain / snow streaks around the camera, advected by the real relative airflow. |
 | `src/sim/clouds.ts` | Live-weather cloud field: three live-data-driven instanced layers (low = METAR ceiling, mid/cirrus = Open-Meteo geopotential bases) in a single draw call, advected by the live wind on the sim clock. |
 | `src/sim/lightning.ts` | Cloud-to-ground lightning for thunderstorm conditions: billboarded bolt ribbons, a dedicated flash light, and an `onStrike` hook wired to procedural thunder in `audio.ts`. |
-| `src/sim/audio.ts` | Web Audio API procedural synthesis for engines, slipstream wind noise, gear rattles, and GPWS callouts. |
-| `src/sim/atc.ts` | Fully automatic ATC <-> pilot radio: per-flight generated callsigns, ICAO/FAA phraseology by airfield country, weather-aware remarks, non-towered "Information/Traffic" fields, background-traffic chatter matched to the flight phase, and the `AtcRadio` channel that transmits only while a flight is actually running (`Game.radioMayTransmit`). |
-| `src/sim/speech.ts` | Speech synthesis queue (`SpeechQueue`) for warnings, callouts and ATC announcements. |
+| `src/sim/audio.ts` | Web Audio API procedural synthesis (engines, slipstream, rolling, warnings tones, one-shots, thunder). `halt()` suspends the AudioContext for a pause and refuses every one-shot; `silence()` additionally forgets queued speech. Speech itself is NOT produced here any more: `speak()` is a thin adapter onto the shared `VoiceBus` (`audio.voice`). |
+| `src/sim/atc.ts` | Fully automatic ATC <-> pilot radio: per-flight generated callsigns, ICAO/FAA phraseology by airfield country, weather-aware remarks, non-towered "Information/Traffic" fields, background-traffic chatter matched to the flight phase. `AtcRadio` only *sequences* exchanges (pilot call -> controller -> readback) and hands each line to the `VoiceBus`; it no longer touches `speechSynthesis`. |
+| `src/sim/speech.ts` | **`VoiceBus`** — the single owner of every spoken line (ATC, pilot readbacks, crew callouts, cabin PA, GPWS) plus the `WebSpeechDriver`: priorities (chatter 0 / ATC+PA+crew 1 / callouts 2 / warnings 3), preemption with replay, flight-clock TTLs, sterile-phase holds, captions + transcript log hooks, timed silent fallback. See section 7. |
+| `src/sim/comms.ts` | **`CommsDirector`**: state-aware flight-deck and cabin voice driven by a per-frame `CommsSnap` — session-start briefing, A320 PM callouts (THRUST SET / 100 / V1 / ROTATE / POSITIVE RATE / GEAR UP), flap and gear call-backs read from the real handle state, 10,000 ft calls, stabilised-approach gates (1,000 / 500 ft), landing-roll calls (spoilers / reverse / decel / 70 kt), cabin PAs, idle nudges. Every cue carries a hand-written Indonesian transcript. |
+| `src/sim/translate.ts` | Rule-based EN -> ID transcript translation for the closed ATC phraseology (`translateId`, `transcriptText`). Only the transcript is translated; speech stays English. |
+| `src/ui/Transcript.tsx` + `transcript.css` | `LiveTranscript` (flight-strip style lower third with speaker code, channel, progress hairline, optional EN original under the ID text), `TranscriptEntry` (history rows), `TranscriptLangSwitch` (OFF / EN / ID). |
+| `src/sim/a320/cockpitRender.ts` | Cockpit render-quality helpers: mip-mapped alpha test scaling (`MIP_ALPHA_BOOST`), analytic anti-aliased edge, `alphaToCoverage` when MSAA is available, trilinear + max-anisotropy filtering, and canvas screen supersampling. |
 | `src/ui/CanvasMap.ts` | High-performance 2D HTML Canvas navigation moving map. |
 | `src/ui/FlightMap.tsx` | React navigation maps: `NavigationMap`, `MiniMap` and `FullMap`. |
 | `src/ui/MapPanel.tsx` | Planner navigation map panel sharing the `NavigationMapView` state. |
@@ -207,3 +211,20 @@ To prevent garbage collection (GC) micro-stutters:
 - EFB tablet integration: spring-damper physical bezel buttons with auto-repeat for BRT/DIM, hover button feedback, and real-time cursor click state refresh.
 - Discrepancies found while verifying this file against the code: the earlier text claimed "no imported 3D meshes" and listed three aircraft; the code ships GLBs and (now) a single A320.
 - Asset provenance and licence: `public/models/a320/NOTICE.txt`. Do not edit the GLB by hand; re-run gltf-transform (webp -> meshopt) on the pinned upstream file if it must be regenerated.
+- Cockpit rendering & camera clipping: near plane set to 0.05m (5 cm) to give 2.5x finer 24-bit depth precision and eliminate decal z-fighting; far plane set to 40m; `tuneCockpitMaterials` applies `MIP_ALPHA_BOOST` (0.30) to prevent stroke thinning under wide FOV; `SCREEN_SUPERSAMPLE` (1.4) keeps dynamic displays sharp.
+
+---
+
+## 7. Voice, audio & transcripts (added)
+
+**One speaker, one queue.** Every spoken line goes through `VoiceBus` (`src/sim/speech.ts`, instance `audio.voice`). Nothing else may call `speechSynthesis.speak/cancel/pause/resume`. Producers: `AtcRadio` (ATC + pilot readbacks + background traffic), `CommsDirector` (crew, PA, nudges), `Game.pa()` / `audio.speak()` (captain PA, GPWS, RA callouts).
+
+**Pause / menu / hidden tab.** `Game.syncVoice()` is the only gate (`voiceMayRun()`): the bus runs while playing (and on the results screen for the closing PA). Leaving that state cancels the active utterance and *replays it from its start* on release — `speechSynthesis.pause()` is never used (unreliable in Chrome with network voices, unsupported on Android). Callouts and warnings are dropped across a pause; TTLs run on a flight clock that stands still while paused. `audio.halt()` additionally suspends the `AudioContext` and refuses one-shots.
+
+**Browser quirks the driver handles** (each verified against published reports — Chromium issues 509488 / 521666, MDN, Web Speech API compatibility notes): utterances are kept referenced until they end (GC bug); `speak()` is delayed >= 90 ms after `cancel()` (Chrome drops same-tick speech); text is split per sentence (~15 s cut-off); a 3.2 s no-`start` watchdog and an `ms*2.4+3.5 s` no-`end` watchdog turn a silent engine into a timed, silent transcript so queues and gameplay triggers never stall; after 3 consecutive failures TTS is skipped for 25 s.
+
+**Priorities.** 3 warnings (GPWS) > 2 callouts (PM, RA) > 1 ATC / PA / crew talk > 0 background chatter. A higher priority cuts a lower one, which is replayed (max twice). `holdWhenSterile` lines (PA, nudges, chatter) wait while `bus.sterile` is true (take-off roll, below 1,500 ft AGL, landing roll — cf. 14 CFR 121.542). ATC is never held.
+
+**Adding a cue.** Add it to `CommsDirector` as a function of `CommsSnap` (fill the field in `Game.fillCommsSnap`, allocation-free), pass EN text, Indonesian text and optionally `speech` (spelled-out form for TTS). Cues read real state (flap handle, spoilers armed, gear, speed) — never a bare timer. Verify phraseology against Airbus SOP material before adding callouts.
+
+**Transcripts.** `hud.atcLive` is the line on air, `hud.atcLog` the history (GPWS words / RA callouts are live-only). Settings: `transcripts` (on) and `transcriptLang` (`en` default / `id`). Indonesian = `AtcMessage.textId` when the line has one, otherwise `translateId(text)`. The audio is never translated (ICAO: English on the frequency).

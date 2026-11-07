@@ -1,4 +1,4 @@
-// Interactive Airbus A320 flight deck. The 3D model is the FlightGear A320-family cockpit (GPL-2.0, see public/models/a320/NOTICE.txt):
+// Interactive Airbus A320 flight deck. The 3D model is the FlightGear A320-family cockpit (GPL-2.0, see public/models/a320/NOTICE.txt; fetched from a pinned CDN URL at runtime):
 // ~1,200 named parts in real-world metres. Static geometry is merged by material for speed; every switch / knob / lever / key stays a
 // separate node that is animated about its original axis (cockpit-manifest.json). Screens are replaced by live canvases.
 // Model frame: -X forward, +Y up, +Z captain's side (left). Body frame: -Z forward, +X right -> group.rotation.y = -90°.
@@ -15,6 +15,7 @@ import { ProceduralCockpit, CockpitInputs, CockpitUi, View } from './a320/proced
 import { simNowMs } from './clock';
 import { describeControl } from './a320/controlInfo';
 import { Efb } from './a320/efb';
+import { tuneCockpitMaterials, sharpenTexture, SCREEN_SUPERSAMPLE } from './a320/cockpitRender';
 
 export type { CockpitInputs, CockpitUi, View, CockpitHost };
 export interface CockpitHover { id: string; label: string; value: string; hint: string; desc: string; }
@@ -180,7 +181,7 @@ class Screen {
   res: number; vis = false; px = 0; lowSince = 0; urgency = 0; idx = 0; sphere = new THREE.Sphere();
   constructor(public key: string, public maxRes: number, public period: number, public aspect: number, public prio: number, public draw: (g: CanvasRenderingContext2D, W: number, H: number) => void) {
     this.res = Math.min(maxRes, 768); this.canvas.width = this.res; this.canvas.height = Math.round(this.res / aspect);
-    this.tex = new THREE.CanvasTexture(this.canvas); this.tex.flipY = false; this.tex.colorSpace = THREE.SRGBColorSpace; this.tex.anisotropy = 8; this.tex.generateMipmaps = true; this.tex.minFilter = THREE.LinearMipmapLinearFilter;
+    this.tex = new THREE.CanvasTexture(this.canvas); this.tex.flipY = false; this.tex.colorSpace = THREE.SRGBColorSpace; sharpenTexture(this.tex);
     this.mat = new THREE.MeshBasicMaterial({ map: this.tex, toneMapped: false });
   }
   /** Resize the backing canvas (the GPU texture is re-allocated on the next upload). */
@@ -190,7 +191,7 @@ class Screen {
 
 export class Cockpit {
   scene = new THREE.Scene(); group = new THREE.Group(); root = new THREE.Group();
-  camera = new THREE.PerspectiveCamera(68, 1, 0.02, 80);
+  camera = new THREE.PerspectiveCamera(68, 1, 0.05, 40); // near 5 cm (nothing is closer to the eye, 2.5x finer 24-bit depth steps than the old 2 cm, so coplanar decals stop z-fighting), far 40 m covers the whole deck + cabin
   views: Record<'cockpit' | 'aisle' | 'window', View>;
   interactive: THREE.Object3D[] = []; readonly cabinHeads: THREE.Object3D[] = [];
   /** Radio management panels (CAPT / F/O): power, selected radio, BFO / AM. Audio control panels: receive keys + the selected transmit key. */
@@ -232,8 +233,8 @@ export class Cockpit {
     model.traverse((o) => { if ((o as THREE.Mesh).isMesh && o.name === 'EFB_cpt') stripEfbGlass(o as THREE.Mesh); });
     this.extractEfbCaps(model);
     this.efbFo.page = 'PLAN'; this.efbFo.readOnly = true; this.efbFo.banner = 'OFFSIDE · F/O EFB (read-only)';
-    const maxA = 16; const nodes = new Map<string, THREE.Mesh>(); const all: THREE.Mesh[] = [];
-    model.traverse((o) => { if ((o as THREE.Mesh).isMesh) { const m = o as THREE.Mesh; all.push(m); nodes.set(m.name, m); const mt = m.material as THREE.MeshStandardMaterial; if (mt.map) { mt.map.anisotropy = maxA; mt.map.needsUpdate = true; } } });
+    const nodes = new Map<string, THREE.Mesh>(); const all: THREE.Mesh[] = [];
+    model.traverse((o) => { if ((o as THREE.Mesh).isMesh) { const m = o as THREE.Mesh; all.push(m); nodes.set(m.name, m); } });
     // ---- classify ----
     const legendRe = /^(\d)([A-Z])(\.\d+)?$/;
     const baseOfLegend = (name: string) => { for (let n = name.length - 2; n > 2; n--) { const b = name.slice(0, n); if (nodes.has(b) && legendRe.test(name.slice(n))) return { base: b, row: +name[n], letter: name[n + 1] }; } return null; };
@@ -301,6 +302,7 @@ export class Cockpit {
     // ---- FCU overlay (digits) ----
     this.buildFcu(nodes); this.buildEfb(); this.buildBatt();
     this.ctx = { d: null as unknown as PanelData, sys: this.sys, host: null as unknown as CockpitHost, t: 0, mcdu: this.mcdu[0], utc: new Date() };
+    tuneCockpitMaterials(this.root); // trilinear + max-anisotropy filtering, mip-safe anti-aliased alpha cut-outs (see a320/cockpitRender.ts)
     this.collectMaskMats();
     const lead = new Set(Object.values(LEADER)); this.animOrder = [...this.groups.values()].sort((a, b) => (lead.has(b.id) ? 1 : 0) - (lead.has(a.id) ? 1 : 0));
     for (const g of this.animOrder) if (LEADER[g.id]) g.still = false; // followers ride on moving levers
@@ -328,7 +330,7 @@ export class Cockpit {
   private battMesh: { mesh: THREE.Mesh; side: 0 | 1; key: string; cv?: HTMLCanvasElement; tex?: THREE.CanvasTexture }[] = [];
   private buildBatt() {
     for (const b of this.battMesh) {
-      const cv = document.createElement('canvas'); cv.width = 192; cv.height = 76; const tex = new THREE.CanvasTexture(cv); tex.flipY = false; tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = 8;
+      const cv = document.createElement('canvas'); cv.width = 192; cv.height = 76; const tex = new THREE.CanvasTexture(cv); tex.flipY = false; tex.colorSpace = THREE.SRGBColorSpace; sharpenTexture(tex);
       b.cv = cv; b.tex = tex; b.mesh.material = new THREE.MeshBasicMaterial({ map: tex, toneMapped: false, side: THREE.DoubleSide });   // one window quad is wound the other way round
     }
   }
@@ -347,7 +349,7 @@ export class Cockpit {
     // strip aligned with the original seven-segment meshes (model coords; panel normal = (0.957, 0.289, 0))
     const zc = -0.0005, w = 0.25, h = 0.017; // plane wider than the 3 windows so no digit is clipped
     this.fcuZ = { c: zc, w }; // (was swallowed by the comment above -> digit positions were mapped against c=0, w=1 and drawn misaligned)
-    const cv = document.createElement('canvas'); cv.width = 2048; cv.height = Math.round(2048 * h / w) + 0; const tex = new THREE.CanvasTexture(cv); tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = 16;
+    const cv = document.createElement('canvas'); cv.width = 2048; cv.height = Math.round(2048 * h / w) + 0; const tex = new THREE.CanvasTexture(cv); tex.colorSpace = THREE.SRGBColorSpace; sharpenTexture(tex);
     const mesh = new THREE.Mesh(new THREE.PlaneGeometry(w, h), new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false, toneMapped: false }));
     const n = new THREE.Vector3(0.957, 0.289, 0).normalize(), up = new THREE.Vector3(-0.289, 0.957, 0), xa = new THREE.Vector3(0, 0, -1);
     const m = new THREE.Matrix4().makeBasis(xa, up, n); mesh.quaternion.setFromRotationMatrix(m); mesh.position.set(-0.3795 + n.x * 0.0012, 0.505 + n.y * 0.0012, zc); mesh.renderOrder = 5;
@@ -355,7 +357,7 @@ export class Cockpit {
     // EFIS BARO windows (blank in the model): centres / sizes measured on the panel, same plane as the FCU strip
     for (let i = 0; i < 2; i++) {
       const z = i === 0 ? 0.251 : -0.2397;
-      const bc = document.createElement('canvas'); bc.width = 256; bc.height = 112; const bt = new THREE.CanvasTexture(bc); bt.colorSpace = THREE.SRGBColorSpace; bt.anisotropy = 8;
+      const bc = document.createElement('canvas'); bc.width = 256; bc.height = 112; const bt = new THREE.CanvasTexture(bc); bt.colorSpace = THREE.SRGBColorSpace; sharpenTexture(bt);
       const bm = new THREE.Mesh(new THREE.PlaneGeometry(0.0306, 0.0136), new THREE.MeshBasicMaterial({ map: bt, transparent: true, depthWrite: false, toneMapped: false }));
       bm.quaternion.setFromRotationMatrix(m); bm.position.set(-0.3722 + n.x * 0.0008, 0.4967 + n.y * 0.0008, z); bm.renderOrder = 5; this.root.add(bm); this.baro.push({ cv: bc, tex: bt, key: '', side: i as 0 | 1 });
     }
@@ -418,7 +420,7 @@ export class Cockpit {
    *  vertices of the screen face, decoded from the GLB, so the page can neither skew nor sit behind the bezel. Model coordinates (m). */
   private buildEfb() {
     const cv = document.createElement('canvas'); cv.width = Efb.W; cv.height = Efb.H;
-    const tex = new THREE.CanvasTexture(cv); tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = 16; tex.generateMipmaps = true; tex.minFilter = THREE.LinearMipmapLinearFilter;
+    const tex = new THREE.CanvasTexture(cv); tex.colorSpace = THREE.SRGBColorSpace; sharpenTexture(tex);
     const mat = new THREE.MeshBasicMaterial({ map: tex, toneMapped: false, polygonOffset: true, polygonOffsetFactor: -3, polygonOffsetUnits: -3 });
     const c = EFB_CORNERS.map((p) => new THREE.Vector3(...p)); // BL, BR, TR, TL as seen by the pilot
     const ctr = c[0].clone().add(c[1]).add(c[2]).add(c[3]).multiplyScalar(0.25), n = new THREE.Vector3().crossVectors(c[1].clone().sub(c[0]), c[3].clone().sub(c[0])).normalize();
@@ -1012,7 +1014,7 @@ export class Cockpit {
           if (this.frustum.intersectsSphere(sc.sphere)) { sc.vis = true; sc.px = Math.max(sc.px, this.projPx(sc.sphere)); }
         }
         if (sc.vis) {
-          const need = sc.px / 1.41 * Math.max(1, this.dpr);               // side of the screen in device pixels
+          const need = sc.px / 1.41 * Math.max(1, this.dpr) * SCREEN_SUPERSAMPLE; // side of the screen in device pixels, super-sampled so small text stays crisp when the view is wide
           const want = RES_TIERS.find((t) => t >= need * 0.95) ?? RES_TIERS[RES_TIERS.length - 1], tgt = Math.min(sc.maxRes, want);
           if (tgt > sc.res) { sc.setRes(tgt); sc.lowSince = 0; }
           else if (tgt < sc.res) { sc.lowSince = sc.lowSince || time; if (time - sc.lowSince > 1.5) { sc.setRes(tgt); sc.lowSince = 0; } } else sc.lowSince = 0;

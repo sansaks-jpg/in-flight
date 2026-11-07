@@ -34,7 +34,7 @@ test('REPO_FACTS strictly match the repository dataset counts and architecture',
   assert.ok(REPO_FACTS.vectorSource.includes('OpenStreetMap'));
 });
 
-test('MENU_BENTO_TILES and AIRCRAFT_VARIANTS provide valid local photographic assets for every menu box and aircraft', () => {
+test('MENU_BENTO_TILES and AIRCRAFT_VARIANTS provide valid CDN-hosted photographic assets for every menu box and aircraft', () => {
   assert.equal(MENU_BENTO_TILES.length, 6);
   const expectedIds = [
     'world_photographer',
@@ -49,14 +49,14 @@ test('MENU_BENTO_TILES and AIRCRAFT_VARIANTS provide valid local photographic as
     expectedIds
   );
   for (const tile of MENU_BENTO_TILES) {
-    assert.ok(tile.imageUrl.startsWith('/src/assets/images/menu_'));
+    assert.match(tile.imageUrl, /^https:\/\/cdn\.jsdelivr\.net\/gh\/sansaks-jpg\/in-flight@[0-9a-f]{40}\/src\/assets\/images\/menu_/, 'heavy photos come from the pinned CDN, not the repo');
     assert.ok(tile.title.length > 0);
     assert.ok(tile.subtitle.length > 0);
   }
 
   for (const variant of AIRCRAFT_VARIANTS) {
     assert.equal(variant.imageUrl, AIRCRAFT_STUDIO_IMAGES[variant.aircraftId]);
-    assert.ok(variant.imageUrl.startsWith('/src/assets/images/aircraft_'));
+    assert.match(variant.imageUrl, /@[0-9a-f]{40}\/src\/assets\/images\/aircraft_/);
   }
 });
 

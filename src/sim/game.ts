@@ -7,22 +7,28 @@ import { FlightModel, G, atmosphere, airState } from './physics';
 import { LiveWx, OFFLINE_WX, fetchLiveWeather, windProfile, windVector, isaDeviation, wxSummary } from './liveWeather';
 import { Precip } from './precip';
 import { chooseSpawn, Spawn } from './departure';
-import { AtcRadio, buildAmbient, buildExchange, makeCallsign, phoneticLetter, AmbientPhase, RadioLine, RadioCtx } from './atc';
+import { AtcRadio, buildAmbient, buildExchange, makeCallsign, phoneticLetter, AmbientPhase, RadioCtx } from './atc';
 import { Projection, haversine, bearing, wrap180, wrap360, D2R, R2D, clamp, M_PER_NM, MS_TO_KT, destination, gcPoint, FlightWaypoint } from './geo';
 import { World, Threshold, TimeOfDay } from './world';
 import { AircraftVisual, loadAircraftVisual } from './aircraftModel';
 import { Cockpit, CockpitPreset, CockpitHost, COCKPIT_FOCUS } from './cockpit';
 import type { EfbInfo } from './a320/efb';
+import { probeRenderCaps } from './a320/cockpitRender';
 import { PanelData } from './instruments';
 import { Autopilot, IlsData, minSpeedKt } from './autopilot';
 import { advanceWaypoint, cruiseLevelM, PATH_TAN, planDistanceM } from './lnav';
 import { AudioEngine, WarnSound } from './audio';
+import { CommsDirector, type CommsSnap, type CommsCtx } from './comms';
+import type { Caption, CaptionKind } from './speech';
 import { Effects } from './effects';
 import { Settings, addScore, QualityPreset } from './storage';
 import { QUALITY, resolveAutoQuality } from './quality';
 import { DEFAULT_CHECKLIST_ITEMS, buildApproachGates, buildTaxiRibbon, computeWorldScreenMarkers } from './navAssists';
 import { computeFlightPhaseState, FlightPhaseContext } from './flightPhase';
 import { simNowMs, sunPhase } from './clock';
+
+/** Lowest adaptive-resolution multiplier while looking at the flight deck (text / icons must not be up-scaled). */
+const INTERIOR_MIN_SCALE = 0.9;
 
 export type Phase = 'idle' | 'loading' | 'playing' | 'paused' | 'crashed' | 'complete';
 export type ViewId = 'cockpit' | 'chase' | 'spotter' | 'aisle' | 'window';
@@ -35,7 +41,13 @@ export interface ScenarioConfig {
   startSpot?: string;
 }
 export type FlightPhase = 'taxi' | 'takeoff' | 'climb' | 'cruise' | 'descent' | 'final' | 'rollout';
-export interface AtcMessage { id: number; sender: string; text: string; time: number; needsAck?: boolean; /** speaking station label (Tower, Ground, callsign…) */ label?: string; }
+export interface AtcMessage {
+  id: number; sender: string; text: string; time: number; needsAck?: boolean; /** speaking station label (Tower, Ground, callsign…) */ label?: string;
+  /** transmission type (ATC, own-ship pilot, flight-deck crew, cabin PA …) — drives the transcript styling */
+  kind?: CaptionKind;
+  /** curated Indonesian transcript; ATC lines without one are translated at display time (see translate.ts) */
+  textId?: string;
+}
 export interface Toast { id: number; text: string; level: 'info' | 'good' | 'warn' | 'bad'; }
 export interface Breakdown { label: string; pts: number; }
 export interface LandingInfo { vsFpm: number; kias: number; offset: number; dist: number; bank: number; pitch: number; onRunway: boolean; airportId: string; rwy: string; }
@@ -282,8 +294,10 @@ export class Game {
    */
   get suspended() { return this._suspended; }
   set suspended(v: boolean) {
-    if (v && !this._suspended) { this.radio.cancel(); this.audio.silence(); }
+    const entering = v && !this._suspended;
     this._suspended = v;
+    if (entering) { this.radio.cancel(); this.audio.silence(); this.audio.halt(); }
+    this.syncVoice();
   }
   cfg!: ScenarioConfig; hooks: Hooks;
   viewIdx = 0; lookYaw = 0; lookPitch = 0; orbitYaw = 0; orbitPitch = 0.1; zoom = 1; chaseQ = new THREE.Quaternion(); chaseInit = false;
@@ -327,11 +341,9 @@ export class Game {
    *  ambient chatter replay identically for a flight, and the background-traffic timer. */
   private callsignFlight = ''; private callsign = { callsign: 'Aero 101', spoken: 'Aero 101' };
   private atcRng: () => number = Math.random; private ambientT = 40; private ambientLast = '';
-  radio = new AtcRadio({
-    onLine: (l) => this.logRadioLine(l),
-    onLive: (l) => { this.atcLive = l ? { id: l.id, sender: l.who, text: l.text, time: this.time, label: l.label } : null; },
-    voiceOn: () => this.audio.voiceOn && !this.audio.muted, volume: () => this.audio.volume, key: () => this.audio.chirp(),
-  });
+  radio = new AtcRadio({ bus: this.audio.voice, key: () => this.audio.chirp() });
+  /** State-aware crew / cabin voice: PM callouts, config call-backs, PAs, nudges (see comms.ts). */
+  comms = new CommsDirector(this.audio.voice, { snap: (o) => this.fillCommsSnap(o), ctx: () => this.commsCtx() });
   private atcReply: { due: number; text: string; sender: string } | null = null;
   private ackedWarnings = new Set<string>();
 
@@ -353,6 +365,7 @@ export class Game {
     this.hooks = hooks;
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, stencil: true, powerPreference: 'high-performance', logarithmicDepthBuffer: false }); // stencil: flight-deck occlusion mask (see render())
     this.renderer.autoClear = false; this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+    probeRenderCaps(this.renderer); // GPU anisotropy limit + real MSAA state, used by the flight-deck texture / alpha cut-out setup
     this.resize();
     window.addEventListener('resize', this.resize);
     window.addEventListener('keydown', this.onKeyDown); window.addEventListener('keyup', this.onKeyUp); window.addEventListener('blur', this.onBlur);
@@ -362,7 +375,10 @@ export class Game {
     this.last = performance.now(); this.raf = requestAnimationFrame(this.loop);
     // A hidden tab stops the RAF loop, so the per-frame radio gate would never run again: pause the
     // frequency the moment the tab is hidden, and re-gate it when the tab comes back.
-    document.addEventListener('visibilitychange', () => { if (typeof document !== 'undefined') this.radio.setPaused(!this.radioMayTransmit()); });
+    document.addEventListener('visibilitychange', () => { if (typeof document !== 'undefined') this.syncVoice(); });
+    // Every voice line (ATC, crew, PA, GPWS) is logged and captioned from one place: the voice bus.
+    this.audio.hooks.onLog = (c) => this.logCaption(c);
+    this.audio.hooks.onLive = (c) => { this.atcLive = c ? this.captionMessage(c) : null; };
     (window as any).sim = this;
   }
   get isMobile() { return matchMedia('(pointer: coarse)').matches || Math.min(screen.width, screen.height) < 700; }
@@ -525,7 +541,7 @@ export class Game {
     this.currentFlightPhase = startMode === 'runway' ? 'taxi' : startMode === 'final' ? 'final' : 'cruise';
     this.speedTrendSmoothed = 0;
     this.prevKias = this.fm ? this.fm.ias / 0.514444 : 0;
-    this.radio.cancel(); this.atcMessages = []; this.atcReply = null; this.atcLastCat = '';
+    this.audio.silence(); this.radio.cancel(); this.comms.reset(); this.atcMessages = []; this.atcReply = null; this.atcLastCat = '';
     this.reseedRadio();
     const rwyInit = this.depRwy || '09';
     if (startMode === 'runway') {
@@ -537,7 +553,6 @@ export class Game {
     }
     this.lastLL = [this.lat(), this.lon()]; this.bestRem = dist; this.chaseInit = false; this.shakeImpulse = 0; this.lookYaw = this.lookPitch = 0; this.zoom = 1;
     this.effects?.update(0);
-    this.audio.silence();
     this.rebuild3dNavAssists();
   }
 
@@ -991,15 +1006,19 @@ export class Game {
     if (this.phase === p) return; this.phase = p;
     // flight over / reloading: nothing on the frequency is relevant any more
     if (p === 'crashed' || p === 'complete' || p === 'loading') this.radio.cancel();
-    this.radio.setPaused(!this.radioMayTransmit());
+    this.syncVoice();
     this.hooks.onPhase(p);
   }
   /** True only while the player is actually flying (not paused, in a menu, loading or in a hidden tab). */
   private radioMayTransmit() { return this.mode === 'play' && this.phase === 'playing' && !this.suspended && !document.hidden && !!this.world; }
-  pause() { if (this.phase !== 'playing') return; this.clearInput(); this.setPhase('paused'); this.audio.silence(); }
+  /** The voice bus also runs on the results screen so the closing cabin announcement is heard; ATC is cancelled there. */
+  private voiceMayRun() { return this.radioMayTransmit() || (this.mode === 'play' && this.phase === 'complete' && !this.suspended && !document.hidden && !!this.world); }
+  /** One gate for all voice: pausing, a menu, loading, a hidden tab or a finished flight suspend it (the bus replays a cut line on release). */
+  private syncVoice() { this.radio.setPaused(!this.voiceMayRun()); }
+  pause() { if (this.phase !== 'playing') return; this.clearInput(); this.setPhase('paused'); this.audio.halt(); }
   /** Hard stop of all voice traffic and sound: back to the menu / planner / a new scenario. */
-  stopRadio() { this.radio.cancel(); this.audio.silence(); this.radio.setPaused(true); }
-  resume() { if (this.phase !== 'paused') return; this.setPhase('playing'); this.last = performance.now(); }
+  stopRadio() { this.radio.cancel(); this.audio.silence(); this.audio.halt(); this.syncVoice(); }
+  resume() { if (this.phase !== 'paused') return; this.audio.start(); this.setPhase('playing'); this.last = performance.now(); }
   restart() {
     if (!this.world) return;
     const sm = this.cfg.settings.startMode;
@@ -1206,21 +1225,31 @@ export class Game {
     const i = ths.findIndex((t) => t.ident === current);
     this.setArrRunway(ths[(i + 1) % ths.length].ident);
   }
+  /** A cabin PA from the captain (button): spoken and captioned through the voice bus, with an Indonesian transcript. */
+  private pa(key: string, en: string, idn: string, cooldown: number) {
+    this.audio.voice.say({
+      key, speech: en, persona: 'pa', priority: 1, cooldown, rate: 1, pitch: 1, volume: Math.min(1, this.audio.volume + 0.2), ttl: 30,
+      caption: { id: this.nextAtcId++, kind: 'pa', who: 'CABIN', label: 'Captain · Cabin PA', text: en, textId: idn },
+    });
+  }
   private announce() {
     const fm = this.fm, a = this.audio, city = this.cfg.to.city || this.cfg.to.name;
     a.pa();
     if (!this.takeoffDone && !this.paEvents.welcome) {
       this.paEvents.welcome = true; this.seatbelt = true;
-      a.speak(`Ladies and gentlemen, welcome aboard. Our flight to ${city}. Please fasten your seat belts for take off.`, 'pa', 1, 1, 1);
+      this.pa('pa', `Ladies and gentlemen, welcome aboard. Our flight to ${city}. Please fasten your seat belts for take off.`, `Para penumpang yang terhormat, selamat datang. Penerbangan kami menuju ${city}. Mohon kenakan sabuk pengaman untuk lepas landas.`, 1);
       this.toast('Cabin: welcome announcement made  +50', 'good'); this.addScore('Welcome announcement', 50);
       this.comfort = Math.min(100, this.comfort + 2);
     } else if (this.takeoffDone && !this.paEvents.landing && this.distToDest() < 60000 && fm.agl > 300) {
       this.paEvents.landing = true; this.seatbelt = true;
-      a.speak('Cabin crew, prepare for landing. Passengers, please return to your seats and fasten your seat belts.', 'pa', 1, 1, 1);
+      this.pa('pa', 'Cabin crew, prepare for landing. Passengers, please return to your seats and fasten your seat belts.', 'Awak kabin, bersiap untuk mendarat. Para penumpang, mohon kembali ke tempat duduk dan kenakan sabuk pengaman.', 1);
       this.toast('Cabin: landing preparation announced  +100', 'good'); this.addScore('Landing announcement', 100);
       this.comfort = Math.min(100, this.comfort + 3);
+    } else if (this.fm.nz > 1.3 || this.turb > 0.3) {
+      this.pa('pa', 'Ladies and gentlemen, we are experiencing some turbulence. Please remain seated.', 'Para penumpang yang terhormat, kita sedang mengalami turbulensi. Mohon tetap duduk.', 4);
+      this.toast('Cabin: announcement made', 'info');
     } else {
-      a.speak(this.fm.nz > 1.3 || this.turb > 0.3 ? 'Ladies and gentlemen, we are experiencing some turbulence. Please remain seated.' : 'Ladies and gentlemen, this is your captain. We are cruising smoothly. Please enjoy the flight.', 'pa', 4, 1, 1);
+      this.pa('pa', 'Ladies and gentlemen, this is your captain. We are cruising smoothly. Please enjoy the flight.', 'Para penumpang yang terhormat, ini kapten Anda. Penerbangan kita berjalan lancar. Selamat menikmati perjalanan.', 4);
       this.toast('Cabin: announcement made', 'info');
     }
   }
@@ -1434,7 +1463,10 @@ export class Game {
       this.emaFrameMs = this.emaFrameMs * 0.90 + frameMs * 0.10;
       this.dprCooldown -= rdt;
       if (this.dprCooldown <= 0) {
-        const floor = QUALITY[this.quality].minPixelScale;
+        // Inside the flight deck every legend and display is only a few pixels tall: up-scaling a 0.65-0.75x back buffer smears it, so the
+        // adaptive resolution may not go below INTERIOR_MIN_SCALE there (the world outside the windows is the part that gets cheaper instead).
+        const floor = this.mode === 'play' && this.isInterior() ? Math.max(QUALITY[this.quality].minPixelScale, INTERIOR_MIN_SCALE) : QUALITY[this.quality].minPixelScale;
+        if (this.dprScale < floor - 0.001) { this.dprScale = floor; this.dprCooldown = 1.0; this.resize(); }
         if (this.emaFrameMs > 17.6 && this.dprScale > floor + 0.001) {
           const step = this.emaFrameMs > 24 ? 0.15 : 0.08;
           this.dprScale = Math.max(floor, +(this.dprScale - step).toFixed(2));
@@ -1461,8 +1493,8 @@ export class Game {
     if (this.mode === 'attract') { this.time += rdt; this.attractCamera(rdt); this.world.update(this.camera, this.fm.pos, 1, this.time); this.visual?.update(this.fm, rdt, this.time, this.lights); this.visual!.root.position.copy(this.fm.pos); this.visual!.root.quaternion.copy(this.fm.quat); this.effects?.update(rdt); this.render(); return; }
     // The radio may only transmit while a real flight is running (not paused, in a menu, loading,
     // in the attract scene or in a hidden tab). Checked per frame — covers every state change for free.
-    this.radio.setPaused(!this.radioMayTransmit());
-    if (this.phase === 'playing') { this.simulate(rdt); this.tickAmbient(rdt); }
+    this.syncVoice();
+    if (this.phase === 'playing') { this.simulate(rdt); this.tickAmbient(rdt); this.comms.update(rdt); }
     else if (this.phase === 'crashed' || this.phase === 'complete') this.postEnd(rdt);
     else if (this.phase === 'paused') { this.audio.update(this.audioState(true), rdt); }
     // While the full-screen chart covers the cockpit the HUD is invisible: 4 Hz is plenty and spares React ~7 re-renders/s.
@@ -2130,13 +2162,32 @@ export class Game {
     if (!ph || (ph === this.ambientLast && this.atcRng() < 0.35)) return;
     const atDest = ph === 'descent' || ph === 'arrival' || (ph === 'ground' && !!this.landing);
     const amb = buildAmbient(ph, this.radioCtx(atDest), () => this.nextAtcId++, fm.pos.y / 0.3048);
-    if (!amb) return; this.ambientLast = ph; this.radio.enqueue(amb.lines);
+    if (!amb) return; this.ambientLast = ph; this.radio.enqueue(amb.lines, true);
   }
-  /** A line goes on the air: it enters the transmission history (and the subtitle) exactly when it is spoken. */
-  private logRadioLine(l: RadioLine) {
-    const msg: AtcMessage = { id: l.id, sender: l.who, text: l.text, time: this.time, label: l.label };
-    this.atcMessages.push(msg);
+  private captionMessage(c: Caption): AtcMessage { return { id: c.id, sender: c.who, text: c.text, textId: c.textId, time: this.time, label: c.label, kind: c.kind }; }
+  /** A transmission goes on the air: it enters the transcript history exactly when it is spoken (GPWS words / RA callouts stay live-only). */
+  private logCaption(c: Caption) {
+    if (c.kind === 'warning' || c.kind === 'auto') return;
+    this.atcMessages.push(this.captionMessage(c));
     if (this.atcMessages.length > 120) this.atcMessages.shift();
+  }
+  private fillCommsSnap(o: CommsSnap) {
+    const fm = this.fm, s = this.spec, c = fm.ctl, KT = 1 / 0.514444;
+    o.kind = s.kind; o.startMode = this.cfg.settings.startMode;
+    o.wow = fm.wow; o.gs = fm.gs * KT; o.ias = fm.ias * KT; o.vsFpm = fm.vs / 0.3048 * 60; o.aglFt = fm.agl / 0.3048; o.altFt = fm.pos.y / 0.3048; o.throttle = c.throttle;
+    o.flapsIdx = c.flapsIdx; o.flapDetents = s.flapDetents; o.gearDown = c.gearDown; o.spoilersArmed = c.spoilersArmed;
+    o.spoilersOut = (c.spoilersArmed && fm.wow && fm.gs > 20 && (c.throttle < 0.12 || c.reverse)) || c.speedbrake > 0.5;
+    o.reverse = c.reverse; o.autobrake = c.autobrake; o.parking = c.parking;
+    let run = 0, start = 0; const n = Math.min(s.engines, fm.eng.length);
+    for (let i = 0; i < n; i++) { const st = fm.eng[i].state; if (st === 2) run++; else if (st === 1) start++; }
+    o.enginesRunning = run; o.enginesStarting = start; o.engineCount = n; o.landingLight = this.lights.land;
+    o.phase = this.currentFlightPhase; o.distNm = this.distToDest() / M_PER_NM; o.eteMin = this.distToDest() / Math.max(60, fm.gs) / 60;
+    o.depStage = this.depStage; o.pushbackActive = this.pushback.active;
+    o.v1 = Math.max(20, Math.round(s.vr - 5)); o.vr = s.vr; o.vapp = s.vapp; o.paWelcome = this.paEvents.welcome; o.paLanding = this.paEvents.landing;
+  }
+  private commsCtx(): CommsCtx {
+    const to = this.cfg.to, from = this.cfg.from, strip = (a: Airport) => (a.city || a.name || a.icao).replace(/\s*(international|intl|airport|airfield|regional|domestic).*$/i, '').trim() || a.icao;
+    return { callsign: this.callsign.callsign, city: to.city || strip(to), fromName: strip(from), spot: this.spawn?.label ?? 'the apron', night: (this.world?.sunElevation ?? 45) < -3, rwy: this.apprKey || this.depRwy || '' };
   }
   private distToOrigin() { return haversine(this.lat(), this.lon(), this.cfg.from.lat, this.cfg.from.lon); }
 

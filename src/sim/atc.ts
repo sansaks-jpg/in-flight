@@ -16,6 +16,7 @@
 //
 // All lines are voiced with the browser's speech synthesis (distinct controller / pilot voices, ICAO number
 // pronunciation, squelch click on every key-up) and shown as subtitles; the history is kept by the game.
+import type { VoiceBus } from './speech';
 export interface RadioLine { id: number; who: string; label: string; text: string; speech: string }
 export interface RadioWx { dir: number; kt: number; gust: number; visKm: number; ceilFt: number | null; rain: number; snow: number; thunder: boolean; night: boolean; ok: boolean }
 export interface RadioCtx {
@@ -345,90 +346,60 @@ export function buildAmbient(ph: AmbientPhase, ctx: RadioCtx, id: () => number, 
 
 // ---------------------------------------------------------------------------------------------------------------
 export interface RadioHooks {
-  onLine: (l: RadioLine) => void;           // line starts: log + subtitle
-  onLive: (l: RadioLine | null) => void;    // currently transmitting
-  voiceOn: () => boolean; volume: () => number; key: () => void;
+  /** The shared voice bus: every line is spoken, captioned and logged through it (see speech.ts). */
+  bus: VoiceBus;
+  /** squelch click on every key-up */
+  key: () => void;
 }
-/** Timer host helper: AtcRadio's pump/say run on plain timeouts independent of the RAF loop, and
+/** Timer host helper: AtcRadio's gaps run on plain timeouts independent of the RAF loop, and
  *  must also work headless (node tests) where `window` does not exist. */
 const schedule = (fn: () => void, ms: number): number => (typeof window !== 'undefined' ? window.setTimeout(fn, ms) : (setTimeout(fn, ms) as unknown as number));
 const unschedule = (t: number) => clearTimeout(t);
 
 /**
- * Serial radio channel. It transmits only while the owner says the flight is actually running (setPaused(false));
- * pausing, the main menu, loading, the attract scene and a hidden tab all stop speech immediately, and a line that
- * was cut off is resumed where it stopped when the radio is released. `cancel()` also forgets everything queued.
+ * Serial radio channel: sequences exchanges (pilot call -> controller -> readback) and hands every line to the shared
+ * VoiceBus, which owns speaking, captions, pausing and priorities. A pause, the main menu, loading, the attract scene and
+ * a hidden tab suspend the bus; the line that was cut off is replayed from its start when the radio is released.
+ * `cancel()` also forgets everything queued.
  */
 export class AtcRadio {
-  private queue: RadioLine[][] = []; private busy = false; private gen = 0; private timer = 0; private paused = false;
-  live: RadioLine | null = null;
+  private queue: { lines: RadioLine[]; ambient: boolean }[] = []; private busy = false; private gen = 0; private timer = 0;
   constructor(private h: RadioHooks) {}
   get pending() { return this.queue.length + (this.busy ? 1 : 0); }
-  get isPaused() { return this.paused; }
-  enqueue(lines: RadioLine[]) {
+  get isPaused() { return !this.h.bus.isRunning; }
+  /** `ambient`: background traffic between other aircraft — lowest priority, held during sterile phases. */
+  enqueue(lines: RadioLine[], ambient = false) {
     // an overloaded frequency (>=5 queued exchanges) drops the OLDEST queued exchange outright —
     // clearances included: the queue carries no category, so this is a blunt, honest overflow rule
     if (this.queue.length >= 5) this.queue.shift();
-    this.queue.push(lines); this.pump();
+    this.queue.push({ lines, ambient }); this.pump();
   }
+  /** Forget every queued / speaking radio line (other voice traffic — GPWS, crew callouts — is untouched). */
   cancel() {
-    this.gen++; this.queue.length = 0; this.busy = false; unschedule(this.timer); this.live = null; this.h.onLive(null);
-    // A cancel is a "radio off for good" moment (new flight / menu): also clear a stuck paused
-    // state, otherwise flights started straight out of a pause stayed mute forever and the
-    // global speechSynthesis stayed frozen for the AudioEngine's GPWS/PA voices too.
-    this.paused = false;
-    try { if (typeof speechSynthesis !== 'undefined') { speechSynthesis.cancel(); speechSynthesis.resume(); } } catch { /* ignore */ }
+    this.gen++; this.queue.length = 0; this.busy = false; unschedule(this.timer);
+    this.h.bus.cancelWhere((u) => u.key.startsWith('atc:'));
   }
-  setPaused(p: boolean) {
-    if (p === this.paused) return; // per-frame gating calls this every frame — a no-op must stay a no-op
-    this.paused = p;
-    try { if (typeof speechSynthesis !== 'undefined') { if (p) speechSynthesis.pause(); else speechSynthesis.resume(); } } catch { /* ignore */ }
-    if (!p) this.pump();
-  }
+  /** Radio released (false) / held (true). The bus owns the actual silence; see VoiceBus.setRunning. */
+  setPaused(p: boolean) { this.h.bus.setRunning(!p); if (!p) this.pump(); }
   private pump() {
-    if (this.busy || this.paused || !this.queue.length) return;
-    this.busy = true; const lines = this.queue.shift()!, gen = this.gen; let i = 0;
+    if (this.busy || !this.queue.length) return;
+    this.busy = true; const { lines, ambient } = this.queue.shift()!, gen = this.gen; let i = 0;
     const next = () => {
       if (gen !== this.gen) return;
-      // Pausing mid-exchange parks the REMAINING lines back at the head of the queue and stops the
-      // chain: otherwise the timers kept advancing (subtitles flipping, speak() calls stacking up
-      // to burst out of speechSynthesis the moment it resumed) even though the voice was frozen.
-      // The line already speaking stays frozen by speechSynthesis.pause() and finishes on resume.
-      if (this.paused) {
-        if (i < lines.length) this.queue.unshift(lines.slice(i));
-        this.busy = false;
-        return;
-      }
-      if (i >= lines.length) { this.live = null; this.h.onLive(null); this.busy = false; this.timer = schedule(() => this.pump(), 900); return; }
-      const l = lines[i++]; this.say(l, gen, () => { this.timer = schedule(next, l.who === 'PILOT' ? 550 : 380); });
+      if (i >= lines.length) { this.busy = false; this.timer = schedule(() => this.pump(), 900); return; }
+      const l = lines[i++]; this.say(l, gen, ambient, () => { this.timer = schedule(next, l.who === 'PILOT' ? 550 : 380); });
     };
     next();
   }
-  private voices(): SpeechSynthesisVoice[] {
-    try { return (speechSynthesis.getVoices() || []).filter((v) => /^en/i.test(v.lang)); } catch { return []; }
-  }
-  private pick(who: string) {
-    const vs = this.voices(); if (!vs.length) return undefined;
-    const male = vs.filter((v) => /male|daniel|david|george|alex|fred|mark|guy|ryan|james|google uk english male/i.test(v.name) && !/female/i.test(v.name));
-    const fem = vs.filter((v) => /female|samantha|zira|susan|karen|moira|hazel|google uk english female|google us english/i.test(v.name));
-    if (who === 'PILOT') return (male[1] ?? male[0] ?? vs[1] ?? vs[0]);
-    if (who === 'ATIS') return fem[0] ?? vs[0];
-    return (fem.length && ['TOWER', 'ENROUTE'].includes(who) ? fem[0] : male[0]) ?? vs[0];
-  }
-  private say(l: RadioLine, gen: number, done: () => void) {
-    this.live = l; this.h.onLine(l); this.h.onLive(l); this.h.key();
-    const words = l.speech.split(/\s+/).length, est = Math.max(1.6, words / 2.7) * 1000 + 300;
-    let finished = false;
-    const fin = () => { if (finished || gen !== this.gen) return; finished = true; unschedule(guard); this.h.key(); done(); };
-    const guard = schedule(fin, est * 2.2 + 2500);
-    const speakable = typeof speechSynthesis !== 'undefined' && this.h.voiceOn() && this.h.volume() > 0;
-    if (!speakable) { schedule(fin, est); return; }
-    try {
-      const u = new SpeechSynthesisUtterance(l.speech), v = this.pick(l.who);
-      if (v) { u.voice = v; u.lang = v.lang; } else u.lang = 'en-GB';
-      const pilot = l.who === 'PILOT', atis = l.who === 'ATIS';
-      u.rate = atis ? 0.95 : pilot ? 1.08 : 1.14; u.pitch = pilot ? 1.12 : atis ? 0.9 : 0.82; u.volume = Math.min(1, this.h.volume() + 0.15);
-      u.onend = fin; u.onerror = fin; speechSynthesis.speak(u);
-    } catch { schedule(fin, est); }
+  private say(l: RadioLine, gen: number, ambient: boolean, done: () => void) {
+    const pilot = l.who === 'PILOT', atis = l.who === 'ATIS';
+    this.h.bus.say({
+      key: `atc:${l.id}`, speech: l.speech, priority: ambient ? 0 : 1, ttl: ambient ? 25 : 60, replay: !ambient, holdWhenSterile: ambient,
+      persona: pilot ? 'pilot' : atis ? 'atis' : ['TOWER', 'ENROUTE'].includes(l.who) ? 'controllerF' : 'controller',
+      rate: atis ? 0.95 : pilot ? 1.08 : 1.14, pitch: pilot ? 1.12 : atis ? 0.9 : 0.82, volume: 1,
+      caption: { id: l.id, kind: pilot ? 'pilot' : 'atc', who: l.who, label: l.label, text: l.text },
+      onStart: (first) => { if (gen === this.gen) this.h.key(); void first; },
+      onEnd: () => { if (gen !== this.gen) return; this.h.key(); done(); },
+    });
   }
 }

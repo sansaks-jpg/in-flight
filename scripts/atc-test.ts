@@ -4,6 +4,7 @@
 // Runs headless in node: speechSynthesis is absent, so lines advance on the timer estimate.
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { VoiceBus, type Caption } from '../src/sim/speech';
 import { AtcRadio, buildAmbient, buildExchange, makeCallsign, otherCallsign, toRadioSpeech, AmbientPhase, RadioCtx, RadioLine } from '../src/sim/atc';
 
 const ctx: RadioCtx = { callsign: 'Aero 101', fromIcao: 'WAHI', toIcao: 'WARR', fromName: 'Yogyakarta', toName: 'Surabaya', letter: 'B', spot: 'Hangar 2', atDest: false, lastCat: '', rwyFallback: '09' };
@@ -107,14 +108,12 @@ test('contextual variation: different airports and consecutive exchanges are not
 });
 
 const radioHarness = () => {
-  const lines: RadioLine[] = [];
-  let live: RadioLine | null = null;
-  const radio = new AtcRadio({
-    onLine: (l) => lines.push(l),
-    onLive: (l) => { live = l; },
-    voiceOn: () => false, volume: () => 1, key: () => {},
-  });
-  const short = (who: string): RadioLine => ({ id: lines.length + 1, who, label: who, text: 'roger', speech: 'roger' });
+  const lines: Caption[] = [];
+  let live: Caption | null = null;
+  const bus = new VoiceBus(null, { audible: () => false, onLog: (c) => lines.push(c), onLive: (c) => { live = c; } });
+  const radio = new AtcRadio({ bus, key: () => {} });
+  radio.setPaused(false); // the game releases the bus while a flight is running
+  const short = (who: string): RadioLine => ({ id: lines.length + 1 + Math.floor(Math.random() * 1e6), who, label: who, text: 'roger', speech: 'roger' });
   return {
     radio, lines, live: () => live, short,
     wait: (ms: number) => new Promise((r) => setTimeout(r, ms)),
@@ -135,39 +134,37 @@ test('cancel() is total silence: the active line stops and the queue never speak
   const at = h.lines.length;
   await h.wait(300);
   assert.equal(h.lines.length, at, 'no further lines after cancel (menu stays silent)');
-  assert.equal(h.radio.live, null);
 });
 
-test('setPaused(true) freezes the exchange mid-flow; setPaused(false) plays the parked lines', async () => {
+test('setPaused(true) cuts the line and freezes the exchange; setPaused(false) replays it and finishes the exchange', async () => {
   const h = radioHarness();
   h.radio.enqueue([h.short('TOWER'), h.short('PILOT'), h.short('TOWER')]);
   await h.wait(20);
   assert.equal(h.lines.length, 1);
-  // let the first line's headless timer finish (~1.9 s) and the chain advance to line two
-  await h.wait(2500);
+  await h.wait(2500); // headless line timer (~1.9 s) finishes, the chain advances to line two
   assert.equal(h.lines.length, 2, 'second line on the air before the pause');
   h.radio.setPaused(true);
+  assert.equal(h.live(), null, 'the caption disappears the moment the radio is held');
   await h.wait(2500);
-  assert.equal(h.lines.length, 2, 'paused radio speaks nothing further — the chain is halted mid-exchange');
+  assert.equal(h.lines.length, 2, 'a held radio speaks nothing further');
   h.radio.setPaused(false);
-  await h.wait(200);
-  assert.ok(h.lines.length >= 3, 'resuming plays the parked remaining lines');
-  // let the last line's headless timer run out: the exchange completes and the radio goes idle
+  assert.ok(h.live(), 'the interrupted line is replayed from its start');
+  await h.wait(2800);
+  assert.equal(h.lines.length, 3, 'the exchange continues with its third line (the replay is not logged twice)');
   await h.wait(2200);
   assert.equal(h.radio.pending, 0, 'exchange completes after resume');
   assert.equal(h.live(), null);
 });
 
-test('cancel() clears a stuck paused state (flight after pause-out is not mute)', async () => {
+test('lines queued while the radio is held play when it is released', async () => {
   const h = radioHarness();
   h.radio.setPaused(true);
   h.radio.enqueue([h.short('TOWER')]);
   await h.wait(60);
-  assert.equal(h.lines.length, 0, 'frozen radio says nothing');
-  h.radio.cancel(); // leaving paused -> new flight: the radio must come back up
-  h.radio.enqueue([h.short('TOWER')]);
+  assert.equal(h.lines.length, 0, 'held radio says nothing');
+  h.radio.setPaused(false);
   await h.wait(60);
-  assert.equal(h.lines.length, 1, 'a fresh flight gets its ATC audio');
+  assert.equal(h.lines.length, 1, 'released radio plays the queued line');
 });
 
 test('callsigns: piston registrations are phonetic, jet/turboprop use the livery telephony', () => {

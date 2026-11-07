@@ -89,9 +89,32 @@ export function SettingsPanel({ s, set }: { s: Settings; set: (p: Partial<Settin
         <Row label="Mute all audio">
           <Toggle label="Mute all audio" v={s.muted} on={(v) => set({ muted: v })} />
         </Row>
-        <Row label="Voice callouts & GPWS warnings (speech)">
+        <Row label="Voice: ATC, pilots, crew callouts, cabin PA & GPWS">
           <Toggle label="Voice callouts" v={s.voice} on={(v) => set({ voice: v })} />
         </Row>
+        <Row label="Transcripts (on-screen text of every spoken line)">
+          <Toggle label="Show transcripts" v={s.transcripts} on={(v) => set({ transcripts: v })} />
+        </Row>
+        <Row label="Transcript language">
+          <div role="radiogroup" aria-label="Transcript language" className="flex border border-white/20 text-xs font-semibold">
+            {([['en', 'English'], ['id', 'Indonesia']] as const).map(([code, name]) => (
+              <button
+                key={code}
+                type="button"
+                role="radio"
+                aria-checked={s.transcriptLang === code}
+                disabled={!s.transcripts}
+                onClick={() => set({ transcriptLang: code })}
+                className={`px-3 py-1.5 transition disabled:opacity-40 ${s.transcriptLang === code ? 'bg-[#2572eb] text-white' : 'bg-[#0d131c] text-slate-300 hover:bg-white/10'}`}
+              >
+                {name}
+              </button>
+            ))}
+          </div>
+        </Row>
+        <p className="pt-2 text-[11px] leading-snug text-slate-400">
+          Spoken audio is always English, as on a real frequency. Indonesian only translates the on-screen transcript.
+        </p>
       </div>
 
       <div>

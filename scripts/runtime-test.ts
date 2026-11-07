@@ -2,100 +2,10 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { FlightModel } from '../src/sim/physics';
 import { AIRCRAFT } from '../src/sim/specs';
-import { SpeechQueue, type SpeechRequest } from '../src/sim/speech';
 import { A320Systems, THR_DETENTS, snapThrottle, thrDetentName, type CockpitHost } from '../src/sim/a320/systems';
 import { Efb, CHECKLISTS, checklistForPhase, type EfbInfo } from '../src/sim/a320/efb';
 import { DEFAULT_CHECKLIST_ITEMS } from '../src/sim/navAssists';
 import { AIRPORT_BY_ID } from '../src/data/airports';
-
-const request = (key: string, kind: SpeechRequest['kind'] = 'announcement'): SpeechRequest =>
-  ({ key, text: key, cooldown: 3, rate: 1, pitch: 1, volume: 1, kind });
-function speechHarness() {
-  let now = 0, cancellations = 0;
-  const spoken: { request: SpeechRequest; finish: () => void }[] = [];
-  const queue = new SpeechQueue({ speak: (request, finish) => spoken.push({ request, finish }), cancel: () => { cancellations++; } }, () => now);
-  return { queue, spoken, setTime: (time: number) => { now = time; }, cancellations: () => cancellations };
-}
-
-test('voice cannot enqueue the currently speaking or already pending message, including timestamp zero', () => {
-  const h = speechHarness();
-  assert.equal(h.queue.request(request('radio')), true);
-  for (let i = 0; i < 100; i++) assert.equal(h.queue.request(request('radio')), false);
-  h.queue.request(request('next'));
-  assert.equal(h.queue.request(request('next')), false);
-  assert.equal(h.spoken.length, 1);
-  h.setTime(5); h.spoken[0].finish();
-  assert.equal(h.spoken[1].request.key, 'next');
-  assert.equal(h.queue.request(request('radio')), false, 'cooldown starts after playback finishes, not when it was queued');
-  h.setTime(8); h.spoken[1].finish();
-  assert.equal(h.queue.request(request('radio')), true);
-  h.queue.clear();
-});
-
-test('voice queue is bounded, expires obsolete announcements, and keeps only the latest pending altitude callout', () => {
-  const h = speechHarness(); h.queue.request(request('active'));
-  for (let i = 0; i < 100; i++) h.queue.request(request(`message-${i}`));
-  h.spoken[0].finish();
-  assert.equal(h.spoken[1].request.key, 'message-96', 'only four pending messages survive a burst');
-  h.setTime(30); h.spoken[1].finish();
-  assert.equal(h.spoken.length, 2, 'expired messages are not read out later');
-  h.queue.request(request('active-2'));
-  h.queue.request(request('c500', 'callout')); h.queue.request(request('c100', 'callout')); h.queue.request(request('c50', 'callout'));
-  h.spoken[2].finish();
-  assert.equal(h.spoken[3].request.key, 'c50');
-  h.queue.clear();
-});
-
-test('obsolete safety speech is canceled when the physical warning clears; an active warning can still repeat safely after its cooldown', () => {
-  const h = speechHarness();
-  h.queue.retainWarning('stall'); h.queue.request(request('stall', 'warning'));
-  h.setTime(10);
-  assert.equal(h.queue.request(request('stall', 'warning')), false, 'a long utterance never queues itself');
-  h.spoken[0].finish();
-  h.setTime(13); assert.equal(h.queue.request(request('stall', 'warning')), true);
-  h.queue.retainWarning(null);
-  assert.equal(h.cancellations(), 1);
-  const count = h.spoken.length; h.spoken[1].finish();
-  assert.equal(h.spoken.length, count, 'late browser completion events cannot resurrect a warning');
-});
-
-test('silencing/reset discards all pending speech and stale completion events cannot restart old flight audio', () => {
-  const h = speechHarness();
-  h.queue.request(request('old-flight')); h.queue.request(request('old-response'));
-  h.queue.clear(); h.queue.request(request('new-flight'));
-  h.spoken[0].finish();
-  assert.deepEqual(h.spoken.map((item) => item.request.key), ['old-flight', 'new-flight']);
-  h.spoken[1].finish(); assert.equal(h.spoken.length, 2);
-});
-
-test('safety speech preempts a cabin announcement instead of sitting in a browser speech backlog', () => {
-  const h = speechHarness(); h.queue.request(request('cabin'));
-  h.queue.retainWarning('pu'); h.queue.request(request('pu', 'warning'));
-  assert.equal(h.cancellations(), 1); assert.equal(h.spoken[1].request.key, 'pu');
-  h.queue.clear();
-});
-
-test('audio mute, voice-off, pause/reset and zero volume cancel owned speech without replay', async (t) => {
-  const spoken: { onend: (() => void) | null }[] = []; let canceled = 0;
-  const synth = Object.getOwnPropertyDescriptor(globalThis, 'speechSynthesis');
-  const utterance = Object.getOwnPropertyDescriptor(globalThis, 'SpeechSynthesisUtterance');
-  Object.defineProperty(globalThis, 'speechSynthesis', { configurable: true, value: { speak: (u: typeof spoken[number]) => spoken.push(u), cancel: () => canceled++ } });
-  Object.defineProperty(globalThis, 'SpeechSynthesisUtterance', { configurable: true, value: class { onend = null; constructor(public text: string) {} } });
-  t.after(() => {
-    if (synth) Object.defineProperty(globalThis, 'speechSynthesis', synth); else Reflect.deleteProperty(globalThis, 'speechSynthesis');
-    if (utterance) Object.defineProperty(globalThis, 'SpeechSynthesisUtterance', utterance); else Reflect.deleteProperty(globalThis, 'SpeechSynthesisUtterance');
-  });
-  const { AudioEngine } = await import('../src/sim/audio'); const audio = new AudioEngine();
-  audio.speak('Radio', 'radio', 0); audio.speak('Radio', 'radio', 0);
-  assert.equal(spoken.length, 1);
-  audio.setMuted(true); audio.speak('Muted', 'muted'); assert.equal(spoken.length, 1);
-  audio.setMuted(false); audio.speak('Second', 'second'); assert.equal(spoken.length, 2);
-  audio.voiceOn = false; audio.speak('Voice off', 'off'); assert.equal(spoken.length, 2);
-  audio.voiceOn = true; audio.speak('Third', 'third'); audio.silence();
-  spoken[0].onend?.(); assert.equal(spoken.length, 3);
-  audio.setVolume(0); audio.speak('Silent volume', 'zero'); assert.equal(spoken.length, 3);
-  assert.ok(canceled >= 4);
-});
 
 test('failed map/terrain images are shared and use bounded backoff instead of a request/redraw loop', async (t) => {
   let now = 0; t.mock.method(Date, 'now', () => now);

@@ -9,7 +9,7 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "lint": "tsc --noEmit",
-    "test": "tsx --test scripts/autopilot-test.ts scripts/globe-tiles-test.ts scripts/navigation-test.ts scripts/runtime-test.ts scripts/dispatch-test.ts scripts/clock-test.ts scripts/runway-data-test.ts scripts/weather-test.ts scripts/scale-terrain-test.ts scripts/atc-test.ts",
+    "test": "tsx --test scripts/autopilot-test.ts scripts/globe-tiles-test.ts scripts/navigation-test.ts scripts/runtime-test.ts scripts/dispatch-test.ts scripts/clock-test.ts scripts/runway-data-test.ts scripts/weather-test.ts scripts/scale-terrain-test.ts scripts/atc-test.ts scripts/voice-test.ts",
     "test:ui": "tsx scripts/ui-collision-test.ts",
     "test:live": "tsx scripts/live-navigation-test.ts"
   },
