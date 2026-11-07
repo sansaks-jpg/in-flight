@@ -128,6 +128,45 @@ export class A320Systems {
     if (this.lampTest > 0) this.lampTest -= dt;
     // auto ECAM page selection by flight phase
     this.pageAuto = this.autoPage(h, d);
+    this.applyConsequences(dt, h, d);
+  }
+
+  // ---------------- consequences of the overhead / pedestal switches on the flight model ----------------
+  /** Hydraulics are considered "armed" after the first time any system has been pressurised (cold & dark never locks controls). */
+  private hydArmed = false; private flapHold = -1; private gearHold = true; private starve = [0, 0]; private lastLockToast = 0;
+  /** Seconds each engine has been without a fuel feed (all feeding pumps OFF above the gravity-feed ceiling). */
+  get fuelStarveS() { return this.starve; }
+  private applyConsequences(dt: number, h: CockpitHost, d: PanelData) {
+    const fm = h.fm, c = fm.ctl, hy = this.hyd;
+    if (hy.green > 2000 || hy.yellow > 2000 || hy.blue > 2000) this.hydArmed = true;
+    // Brakes: normal braking is Yellow; the accumulator gives a few applications; parking brake keeps its own accumulator hold
+    c.brakePress = hy.yellow > 1500 ? 1 : this.accumPsi > 1200 ? 0.55 : 0;
+    if (this.hydArmed) {
+      const warn = (m: string) => { const t = performance.now(); if (t - this.lastLockToast > 3500) { this.lastLockToast = t; h.toast(m, 'warn'); } };
+      // Flaps / slats: Blue + Green hydraulic motors – with both lost the surfaces stay where they are
+      if (hy.green < 1500 && hy.blue < 1500) { if (this.flapHold < 0) this.flapHold = c.flapsIdx; if (c.flapsIdx !== this.flapHold) { c.flapsIdx = this.flapHold; warn('FLAPS / SLATS INOP – GREEN + BLUE HYD LOST'); } } else this.flapHold = -1;
+      // Landing gear: retraction needs Green; extension falls back to gravity (GRVTY GEAR EXTN)
+      if (hy.green < 1500) { if (!c.gearDown && this.gearHold) { c.gearDown = true; warn('GEAR RETRACTION INOP – GREEN HYD LOST'); } } else this.gearHold = c.gearDown;
+      if (hy.green >= 1500) this.gearHold = c.gearDown; else this.gearHold = true;
+      // Spoilers / speedbrakes: each of G / B / Y drives two surfaces per wing
+      const sources = (hy.green > 1500 ? 1 : 0) + (hy.blue > 1500 ? 1 : 0) + (hy.yellow > 1500 ? 1 : 0);
+      c.speedbrake = Math.min(c.speedbrake, sources / 3 + 0.001);
+      if (sources === 0) c.spoilersArmed = false;
+    } else { this.flapHold = -1; this.gearHold = c.gearDown; }
+    // Fuel feed: each engine is fed by its wing-tank pumps (or the centre-tank pumps while the centre tank holds fuel, or X-FEED).
+    // With every feeding pump OFF the engine gravity-feeds up to ~25 000 ft, above that it flames out after a few seconds.
+    const pumpsL = this.pumps[0] || this.pumps[1], pumpsR = this.pumps[4] || this.pumps[5], ctrP = (this.pumps[2] || this.pumps[3]) && this.tank.c > 50;
+    const feed = [pumpsL || ctrP || (this.xfeed && pumpsR), pumpsR || ctrP || (this.xfeed && pumpsL)];
+    for (let i = 0; i < 2; i++) {
+      const running = fm.eng[i].state === 2;
+      if (running && !feed[i] && d.altFt > 25000) {
+        this.starve[i] += dt;
+        if (this.starve[i] > 4) { fm.stopEngine(i); this.master[i] = false; this.starve[i] = 0; h.toast(`ENG ${i + 1} FLAME OUT – FUEL FEED LOST (pumps OFF above FL250)`, 'warn'); }
+      } else this.starve[i] = Math.max(0, this.starve[i] - dt);
+    }
+    // FADEC thrust limit penalties (CFM56-5B): engine anti-ice ≈ -2.5 %, wing anti-ice ≈ -1.2 %, pack bleed ≈ -0.8 %
+    const bleedLoad = (this.packs[0] || this.packs[1]) && (this.engBleed[0] || this.engBleed[1]) ? 0.008 : 0;
+    c.thrLimit = 1 - (this.engAI[0] || this.engAI[1] ? 0.025 : 0) - (this.wingAI ? 0.012 : 0) - bleedLoad;
   }
 
   private autoPage(h: CockpitHost, d: PanelData): EcamPage {
@@ -148,4 +187,15 @@ export class A320Systems {
     const r = fm.startEngine(i); if (r) { this.msg(h, r, 'warn'); this.master[i] = false; } else this.msg(h, `ENG ${i + 1} START`, 'good');
   }
   private msg(h: CockpitHost, m: string, k: 'info' | 'warn' | 'good') { this.startMsg = m; h.toast(m, k); setTimeout(() => { if (this.startMsg === m) this.startMsg = ''; }, 4000); }
+}
+
+/** Airbus FADEC thrust-lever detents. Lever position 0..1 ↔ TLA 0..45°: IDLE 0°, CL 25°, FLX/MCT 35°, TOGA 45° (A320 FCOM 1.70). */
+export const THR_DETENTS = [{ name: 'IDLE', v: 0 }, { name: 'CL', v: 25 / 45 }, { name: 'FLX/MCT', v: 35 / 45 }, { name: 'TOGA', v: 1 }] as const;
+/** Snap a lever position to the nearest detent when within `capture` (≈ 1.8° of TLA) – gives the guarded "gate" feel. */
+export function snapThrottle(v: number, capture = 0.04): number { for (const d of THR_DETENTS) if (Math.abs(v - d.v) < capture) return d.v; return Math.min(1, Math.max(0, v)); }
+export function thrDetentName(v: number, reverse = false): string {
+  if (reverse) return 'REV';
+  for (const d of THR_DETENTS) if (Math.abs(v - d.v) < 0.045) return d.name;
+  const tla = Math.round(v * 45);
+  return v < 25 / 45 ? `IDLE–CL · TLA ${tla}°` : v < 35 / 45 ? `CL–FLX/MCT · TLA ${tla}°` : `FLX/MCT–TOGA · TLA ${tla}°`;
 }

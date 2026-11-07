@@ -27,7 +27,8 @@ test('REPO_FACTS strictly match the repository dataset counts and architecture',
   // the world runway rebuild widened the airport set (every large/medium airport + scheduled service); never fewer than the original 7,134
   assert.ok(REPO_FACTS.totalAirports >= 7134);
   assert.equal(REPO_FACTS.indonesiaAirports, 676);
-  assert.equal(REPO_FACTS.aircraftCount, 3);
+  // The product is A320-only (AIRCRAFT in specs.ts is filtered to 'sky'); code wins over older docs.
+  assert.equal(REPO_FACTS.aircraftCount, 1);
   assert.ok(REPO_FACTS.terrainSource.includes('AWS'));
   assert.ok(REPO_FACTS.imagerySource.includes('Esri'));
   assert.ok(REPO_FACTS.vectorSource.includes('OpenStreetMap'));
@@ -136,35 +137,37 @@ test('filterAircraftVariants filters by category, search query, and favourites',
   assert.equal(all.length, AIRCRAFT_VARIANTS.length);
 
   const jets = filterAircraftVariants('jet', '');
-  assert.equal(jets.length, 3);
+  assert.equal(jets.length, AIRCRAFT_VARIANTS.length);
+  assert.ok(jets.length >= 1);
   assert.ok(jets.every((v) => v.aircraftId === 'sky'));
 
-  const bushSearch = filterAircraftVariants('all', 'Papua');
-  assert.equal(bushSearch.length, 1);
-  assert.equal(bushSearch[0].aircraftId, 'trek');
+  // Turboprop / piston variants are no longer shipped (A320-only fleet)
+  assert.equal(filterAircraftVariants('all', 'Papua').length, 0);
 
-  const favs = filterAircraftVariants('all', '', true, ['sky-cfm-std']);
+  const favId = AIRCRAFT_VARIANTS[0].variantId;
+  const favs = filterAircraftVariants('all', '', true, [favId]);
   assert.equal(favs.length, 1);
-  assert.equal(favs[0].variantId, 'sky-cfm-std');
+  assert.equal(favs[0].variantId, favId);
 });
 
 test('getAircraftStatsComparison computes cruise, ceiling, range, and deltas', () => {
-  const stats = getAircraftStatsComparison('sky', 'swift');
+  // specById() only resolves the A320 now, so a self-comparison must yield zero deltas.
+  const stats = getAircraftStatsComparison('sky', 'sky');
   assert.equal(stats.cruiseKt, 447);
-  assert.ok(stats.cruiseDeltaKt > 250);
-  assert.ok(stats.ceilingDeltaFt > 20000);
-  assert.ok(stats.rangeDeltaKm > 3000);
+  assert.equal(stats.cruiseDeltaKt, 0);
+  assert.equal(stats.ceilingDeltaFt, 0);
+  assert.equal(stats.rangeDeltaKm, 0);
   assert.equal(stats.pax, 150);
 });
 
 test('computeRouteDispatch calculates geodesic distance, ETE, fuel, and range eligibility', () => {
   const wiii = AIRPORT_BY_ID.get('WIII')!;
   const wahi = AIRPORT_BY_ID.get('WAHI')!;
-  const swift = specById('swift');
+  const swift = specById('sky');
   const summary = computeRouteDispatch(wiii, wahi, swift);
   assert.ok(summary.distanceKm > 400 && summary.distanceKm < 500);
   assert.ok(summary.distanceNm > 200 && summary.distanceNm < 300);
-  assert.ok(summary.eteMinutes > 60);
+  assert.ok(summary.eteMinutes > 25 && summary.eteMinutes < 90); // A320 cruise 447 kt over ~250 nm
   assert.equal(summary.inRange, true);
   assert.equal(summary.sameAirport, false);
   assert.equal(summary.canFly, true);

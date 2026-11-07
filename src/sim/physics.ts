@@ -30,8 +30,10 @@ export interface Controls {
   battery: boolean; mixture: number;
   /** A320 extras: right-engine lever offset (right − left), autobrake 0 off / 1 LO / 2 MED / 3 MAX, ground-spoiler arming. */
   thrOffset: number; autobrake: number; spoilersArmed: boolean;
+  /** Hydraulic brake authority 0..1 (Yellow system / accumulator, set by A320Systems) and FADEC thrust limit factor (engine / wing anti-ice and bleed penalties). */
+  brakePress: number; thrLimit: number;
 }
-export const defaultControls = (): Controls => ({ pitch: 0, roll: 0, yaw: 0, throttle: 0, brake: 0, parking: true, reverse: false, speedbrake: 0, flapsIdx: 0, gearDown: true, trim: 0, assist: true, apHold: false, brakeL: 0, brakeR: 0, battery: true, mixture: 1, thrOffset: 0, autobrake: 0, spoilersArmed: false });
+export const defaultControls = (): Controls => ({ pitch: 0, roll: 0, yaw: 0, throttle: 0, brake: 0, parking: true, reverse: false, speedbrake: 0, flapsIdx: 0, gearDown: true, trim: 0, assist: true, apHold: false, brakeL: 0, brakeR: 0, battery: true, mixture: 1, thrOffset: 0, autobrake: 0, brakePress: 1, thrLimit: 1, spoilersArmed: false });
 
 /** A320 slat/flap detents (0, 1, 2, 3, FULL) -> fraction of full-flap lift / drag. CONF 1 is slats only (little CL0, lots of CLmax). */
 const FLAP_LIFT = [0, 0.12, 0.40, 0.62, 1], FLAP_DRAG = [0, 0.08, 0.30, 0.58, 1];
@@ -252,7 +254,7 @@ export class FlightModel {
       const e = this.eng[i];
       if (this.fuel <= 0 && e.state !== 0) { e.state = 0; anyOut = true; }
       if (s.kind === 'piston' && e.state === 2 && c.mixture < 0.15) e.state = 0; // idle cut-off
-      const thr = i === 1 ? clamp(thrBase + c.thrOffset, 0, 1) : thrBase;
+      const thr = (i === 1 ? clamp(thrBase + c.thrOffset, 0, 1) : thrBase) * (s.kind === 'jet' ? c.thrLimit : 1);
       let tgt: number, tau: number;
       if (e.state === 1) {
         e.t += dt;
@@ -368,7 +370,7 @@ export class FlightModel {
       this.autoBrk = clamp(this.autoBrk + (tgt - (-this.nx * G)) * 0.22 * dt, 0, 1);
       abBrake = this.autoBrk;
     } else { this.autoBrk = 0; if (c.brake >= 0.3) c.autobrake = 0; }
-    const brakeIn = c.parking ? 1 : Math.max(c.brake, abBrake);
+    const brakeIn = c.parking ? 1 : Math.max(c.brake, abBrake) * c.brakePress; // no Yellow pressure / accumulator -> no wheel braking (parking brake still holds)
     const gearActive = this.gearPos > 0.9;
     s.gear.forEach((g, i) => {
       const st = this.gear[i];

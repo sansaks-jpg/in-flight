@@ -4,6 +4,7 @@
 import type { PanelData } from '../instruments';
 import type { A320Systems, CockpitHost, EcamPage } from './systems';
 import { atmosphere } from '../physics';
+import { thrDetentName } from './systems';
 
 type G = CanvasRenderingContext2D;
 export interface Ctx { d: PanelData; sys: A320Systems; host: CockpitHost; t: number; mcdu: Mcdu; utc: Date }
@@ -53,7 +54,7 @@ export function drawPFD(g: G, W: number, H: number, c: Ctx) {
   g.strokeStyle = '#888'; g.lineWidth = 2; for (let i = 1; i < 5; i++) line(g, i * 200, 8, i * 200, 108, '#666', 2); line(g, 0, 110, 1000, 110, '#666', 2);
   const altErr = d.apAlt - d.altFt, vMode = !d.apOn ? '' : d.apAppr && d.ils?.valid ? 'G/S' : Math.abs(altErr) < 120 ? 'ALT' : sys.vsMode ? 'V/S' : altErr > 0 ? 'OP CLB' : 'OP DES';
   const lMode = !d.apOn ? '' : d.apAppr && d.ils?.valid ? 'LOC' : d.apNav ? 'NAV' : 'HDG';
-  const thrMode = fm.wow && d.throttle > 0.9 ? 'MAN TOGA' : d.apOn ? `SPEED ${Math.round(d.apSpd)}` : d.throttle > 0.85 ? 'MAN THR' : '';
+  const detent = thrDetentName(d.throttle), thrMode = fm.wow && detent === 'TOGA' ? 'MAN TOGA' : fm.wow && detent === 'FLX/MCT' ? 'MAN FLX' : d.apOn ? `SPEED ${Math.round(d.apSpd)}` : detent === 'CL' ? 'THR CLB' : d.throttle > 0.85 ? 'MAN THR' : '';
   T(g, thrMode, 100, 34, 30, C.green); T(g, vMode, 300, 34, 34, C.green); T(g, lMode, 500, 34, 34, C.green);
   T(g, d.apAppr ? (d.ils?.valid ? 'LOC' : 'APPR') : '', 700, 34, 28, C.white);
   T(g, d.apOn ? 'AP1' : '', 900, 30, 30, C.white); T(g, `${sys.fd[0] ? '1' : '-'} FD ${sys.fd[1] ? '2' : '-'}`, 900, 62, 26, C.white); T(g, d.apOn ? 'A/THR' : (sys.athrArmed ? 'A/THR' : ''), 900, 92, 26, d.apOn ? C.white : C.cyan);

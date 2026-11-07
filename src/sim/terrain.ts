@@ -421,6 +421,8 @@ export class Terrain {
     });
   }
 
+  /** Flight-deck view: the windshield only shows a forward cone, so the 360° always-keep core shrinks and the frustum skirt tightens (less overdraw). */
+  interior = false;
   update(camX: number, camZ: number, time = 0, sunDir?: THREE.Vector3, frustum?: THREE.Frustum) {
     this.timeU.value = time;
     if (sunDir) this.sunU.value.copy(sunDir);
@@ -443,13 +445,13 @@ export class Terrain {
         const distCam = Math.hypot(posX - camX, posZ - camZ);
 
         // Core 360-degree zone or innermost ring is never culled
-        const coreR = QUALITY[this.quality].terrainCore;
+        const coreR = QUALITY[this.quality].terrainCore * (this.interior ? 0.4 : 1), pad = this.interior ? 250 : 1000;
         let inView = false;
         if (l === 0 || distCam - halfSize <= coreR || !frustum) {
           inView = true;
         } else {
-          _boxMin.set(posX - halfSize - 1000, -500, posZ - halfSize - 1000);
-          _boxMax.set(posX + halfSize + 1000, 4500, posZ + halfSize + 1000);
+          _boxMin.set(posX - halfSize - pad, -500, posZ - halfSize - pad);
+          _boxMax.set(posX + halfSize + pad, 4500, posZ + halfSize + pad);
           _tileBox.set(_boxMin, _boxMax);
           inView = frustum.intersectsBox(_tileBox);
         }
@@ -468,7 +470,7 @@ export class Terrain {
           if (t) {
             if (t.mesh) t.mesh.visible = false;
             // Graceful retention: keep in memory for up to 8s in case pilot pans camera back
-            if (time - (t.lastSeen || 0) <= 8.0) {
+            if (time - (t.lastSeen || 0) <= (this.interior ? 25.0 : 8.0)) {
               wanted.add(key);
             }
           }

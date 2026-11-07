@@ -781,3 +781,21 @@
 .flight-shell[data-narrow="true"] .flight-mini-map.flight-airport-map { --mini-size: 200px; }
 .flight-shell[data-touch="true"][data-compact-nav="true"] .flight-mini-map.flight-airport-map { --mini-size: 150px; }
 .flight-shell[data-short="true"] .flight-mini-map.flight-airport-map { --mini-size: min(170px, calc(100vw - 320px), calc(100vh - 184px)); }
+
+/* ===== Cockpit hover badge: minimal dark glass, one line  NAME · STATE · function ===== */
+.cp-tip { position: fixed; left: 0; top: 0; z-index: 60; pointer-events: none; max-width: min(560px, calc(100vw - 24px)); padding: 5px 10px 6px; border-radius: 8px; border: 1px solid rgba(255,255,255,.10);
+  background: rgba(9,13,19,.74); backdrop-filter: blur(10px) saturate(1.2); -webkit-backdrop-filter: blur(10px) saturate(1.2); box-shadow: 0 4px 16px rgba(0,0,0,.35);
+  font: 500 11.5px/1.35 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color: #c4d0dc; will-change: transform; }
+.cp-tip b { font-weight: 700; letter-spacing: .045em; text-transform: uppercase; color: #f3f7fb; font-size: 11px; }
+.cp-tip i { font-style: normal; color: #5d6e80; margin: 0 6px; }
+.cp-tip-state { font-weight: 700; color: #7dd3fc; font-variant-numeric: tabular-nums; }
+.cp-tip-fn { color: #9fb0c0; }
+/* ===== Cockpit camera focus hot-bar ===== */
+.cp-focusbar { position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%); z-index: 25; display: flex; align-items: center; gap: 2px; padding: 3px; border-radius: 10px; pointer-events: auto;
+  background: rgba(9,13,19,.62); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); border: 1px solid rgba(255,255,255,.10); opacity: .55; transition: opacity .18s; }
+.cp-focusbar:hover, .cp-focusbar:focus-within { opacity: 1; }
+.cp-focusbar-title { font: 700 9px/1 system-ui, sans-serif; letter-spacing: .14em; color: #6f8094; padding: 0 8px 0 7px; }
+.cp-focusbar button { display: inline-flex; align-items: center; gap: 5px; padding: 5px 8px; border: 0; border-radius: 7px; background: transparent; color: #d5e0ea; font: 600 11px/1 system-ui, sans-serif; cursor: pointer; }
+.cp-focusbar button:hover { background: rgba(125,211,252,.16); color: #fff; }
+.cp-focusbar kbd { font: 600 9px/1 ui-monospace, Consolas, monospace; color: #7e90a3; border: 1px solid rgba(255,255,255,.14); border-radius: 4px; padding: 1px 4px; }
+@media (max-width: 760px), (pointer: coarse) { .cp-focusbar kbd, .cp-focusbar-title { display: none; } .cp-focusbar { bottom: 64px; flex-wrap: wrap; justify-content: center; max-width: 94vw; } }

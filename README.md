@@ -272,6 +272,19 @@ Third-party 3D model assets are licensed under their respective authors (see `sr
 - **Aircraft**: Airbus A320-200 only. Interactive 3D flight deck (FlightGear A320-family model, GPL-2.0) with about 570 operable controls wired to the electrical, APU, bleed/pack, hydraulic, fuel, engine-start, autoflight and flight-control simulation.
 - **Live displays**: PFD, ND, E/WD, SD (all pages), MCDU x2, ISIS, FCU digits and clock, driven by real-time telemetry.
 - **EFB tablet** (captain's window mount): flight plan, checklists, airport/runway data, radio frequencies, live METAR weather with runway wind components, and basic procedures. Click the tabs, tick checklist items, scroll with the wheel.
-- **Camera (MSFS-style)**: drag to look, Shift/middle-drag to lean, wheel to zoom, double-click a control to fly to it, double-click empty space to return; the camera panel offers PFD / ND / ECAM / FCU / overhead / pedestal / MCDU / EFB views.
+- **Camera (MSFS-style)**: drag empty space to look (with momentum), Shift/middle-drag to lean, wheel to zoom (critically-damped, 1–8×), keypad 0–9 or the FOCUS hot-bar flies to a panel, Alt-click frames a control without operating it (there is no double-click gesture, so zooming can never flip a switch); the camera panel offers PFD / ND / ECAM / FCU / overhead / pedestal / MCDU / EFB views.
 - **Tooltips**: hover any control for its real-world name, function and current state.
 - Model asset: `public/models/a320/cockpit.glb` (compressed, ships with the project) with pinned runtime fallbacks; see `public/models/a320/NOTICE.txt`.
+
+
+## A320 flight-deck performance & interaction notes
+
+- **Screens**: every display canvas is culled by the camera frustum, sized to the pixels it really covers (384–2048 px, hysteresis) and time-sliced by a 3 ms/frame
+  budget (PFD 30 Hz · ND/ISIS 20 Hz · E/WD, SD 15 Hz · MCDU 8 Hz · clock 2 Hz · EFB 2 Hz idle / 20 Hz on interaction).
+- **World pass**: the opaque flight deck is written to the stencil buffer first and the world (terrain, city, sky, clouds) is drawn only where the stencil is 0 – i.e.
+  through the windows. In the cockpit the 360° terrain / building core shrinks to 40 % and the frustum skirt tightens, and the world near plane is 0.25 m.
+- **EFB**: FlyPad-style tablet (Checklist: Before Start / After Takeoff / Approach / Landing · Flight Plan · Weather (origin + destination METAR) · Radio) drawn exactly on the
+  model's tablet face (corners decoded from the GLB).
+- **Hover badge**: `NAME · STATE · function`, dark glass, next to the cursor, removed on the next pointer event.
+- **System consequences**: Yellow hydraulics + accumulator → wheel brakes; Green/Blue → flaps; Green → gear retraction; G/B/Y → spoilers; wing / centre pumps + X-FEED → engine feed
+  (flame-out above FL250 with all pumps off); engine / wing anti-ice and pack bleed → FADEC thrust limit; thrust levers snap to IDLE / CL / FLX-MCT / TOGA gates (TLA 0/25/35/45°).

@@ -11,7 +11,7 @@ import { AtcRadio, buildAmbient, buildExchange, makeCallsign, phoneticLetter, Am
 import { Projection, haversine, bearing, wrap180, wrap360, D2R, R2D, clamp, M_PER_NM, MS_TO_KT, destination, greatCircle, FlightWaypoint } from './geo';
 import { World, Threshold, TimeOfDay } from './world';
 import { AircraftVisual, loadAircraftVisual } from './aircraftModel';
-import { Cockpit, CockpitPreset, CockpitHost } from './cockpit';
+import { Cockpit, CockpitPreset, CockpitHost, COCKPIT_FOCUS } from './cockpit';
 import type { EfbInfo } from './a320/efb';
 import { PanelData } from './instruments';
 import { Autopilot, IlsData } from './autopilot';
@@ -362,7 +362,7 @@ export class Game {
 
   constructor(public canvas: HTMLCanvasElement, hooks: Hooks) {
     this.hooks = hooks;
-    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance', logarithmicDepthBuffer: false });
+    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, stencil: true, powerPreference: 'high-performance', logarithmicDepthBuffer: false }); // stencil: flight-deck occlusion mask (see render())
     this.renderer.autoClear = false; this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.resize();
     window.addEventListener('resize', this.resize);
@@ -394,6 +394,7 @@ export class Game {
     const pr = Math.max(0.5, this.basePixelRatio() * this.dprScale);
     this.renderer.setPixelRatio(pr); this.renderer.setSize(w, h, false);
     this.camera.aspect = w / h; this.camera.updateProjectionMatrix();
+    if (this.cockpit) { this.cockpit.vpH = h; this.cockpit.dpr = pr; }
     if (this.cockpit) { for (const cam of [this.cockpit.camera, this.cockpit.activeCamera]) { cam.aspect = w / h; cam.updateProjectionMatrix(); } }
   };
   private fovFor(base: number) { return this.camera.aspect < 1 ? base + 22 : base; }
@@ -1051,6 +1052,9 @@ export class Game {
     if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement || (e.target instanceof HTMLElement && e.target.isContentEditable)) return;
     // Native keyboard navigation belongs to the focused UI, not to the flight controls.
     if (e.target instanceof HTMLElement && e.target.closest('[data-flight-ui]') && [' ', 'Enter', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown'].includes(e.key)) return;
+    if (/^Numpad[0-9]$/.test(e.code) && this.phase === 'playing' && this.mode === 'play' && this.cockpit && this.isInterior()) {
+      const f = COCKPIT_FOCUS.find((x) => x.key === e.code.slice(6)); if (f) { e.preventDefault(); this.setCockpitSubview(f.id); return; } // keypad 0-9 = camera focus shortcuts
+    }
     const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
     if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', ' ', 'PageUp', 'PageDown', 'F1', 'F2', 'F3', 'F4', 'F5'].includes(k)) e.preventDefault();
     if (e.repeat) return;
@@ -1226,7 +1230,7 @@ export class Game {
   }
 
   // ---- pointer ----
-  private lastClickT = 0; private lastHoverT = 0; private lastDX = 0; private lastDY = 0;
+  private lastHoverT = 0; private lastDX = 0; private lastDY = 0;
   private ndc(e: PointerEvent) { const r = this.canvas.getBoundingClientRect(); return new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1); }
   private onPointerDown = (e: PointerEvent) => {
     if (e.button !== 0 && e.button !== 2 && e.button !== 1) return;
@@ -1237,9 +1241,11 @@ export class Game {
     this.canvas.setPointerCapture?.(e.pointerId);
     this.panning = e.button === 1 || (e.shiftKey && e.button === 0 && this.isInterior());
     if (!this.panning && (e.button === 0 || e.button === 2) && this.mode === 'play' && this.isInterior() && this.cockpit) {
-      const now = performance.now(), dbl = now - this.lastClickT < 320; this.lastClickT = now;
+      // Camera and controls are strictly separated: a click ALWAYS operates the control under the cursor (no double-click gesture any more),
+      // dragging empty space looks around, and Alt + click only frames the control's panel without touching it. Dedicated focus buttons / keypad keys
+      // (COCKPIT_FOCUS) fly to the panels.
       const cam = this.cockpit.activeCamera; cam.updateMatrixWorld(); this.raycaster.setFromCamera(this.ndc(e), cam);
-      if (dbl && e.button === 0) { if (this.cockpit.focusAt(this.raycaster)) { this.audio.click(); return; } if (!this.cockpit.hover(this.raycaster)) { this.cockpit.setPreset('pilot'); this.cockpit.resetZoom(); return; } }
+      if (e.altKey && e.button === 0) { if (this.cockpit.focusAt(this.raycaster)) { this.audio.click(); return; } }
       const hit = this.cockpit.press(this.raycaster, e.button, e.shiftKey);
       if (hit) {
         const c = this.fm.ctl;
@@ -1262,7 +1268,7 @@ export class Game {
     if (!d) {
       if (this.mode === 'play' && this.isInterior() && this.cockpit && this.phase === 'playing') {
         const nowH = performance.now();
-        if (nowH - this.lastHoverT > 60) {
+        if (nowH - this.lastHoverT > 30) {
           this.lastHoverT = nowH;
           const cam = this.cockpit.activeCamera; cam.updateMatrixWorld(); this.raycaster.setFromCamera(this.ndc(e), cam);
           const hv = this.cockpit.hover(this.raycaster);
@@ -1273,6 +1279,7 @@ export class Game {
       }
       return;
     }
+    this.cockpitTooltip = null; // no hover badge while a drag / look gesture is in progress
     const c = this.fm?.ctl; const dx = e.clientX - d.sx, dy = e.clientY - d.sy;
     switch (d.id) {
       case 'cockpit': { const p = this.pointers.get(e.pointerId); const mx = p ? e.clientX - p.x : dx - (this.lastDX ?? 0), my = p ? e.clientY - p.y : dy - (this.lastDY ?? 0); if (p) { p.x = e.clientX; p.y = e.clientY; } this.cockpit?.drag(mx, my); break; }
@@ -1290,6 +1297,7 @@ export class Game {
     }
   };
   private onPointerUp = (e: PointerEvent) => {
+    if (this.drag?.id === 'look' && this.isInterior()) this.cockpit?.endLook();
     this.cockpit?.release();
     this.pointers.delete(e.pointerId);
     this.drag = null;
@@ -1300,7 +1308,7 @@ export class Game {
     if (this.mode === 'play' && this.isInterior() && this.cockpit) {
       const cam = this.cockpit.activeCamera; cam.updateMatrixWorld(); const r = this.canvas.getBoundingClientRect();
       this.raycaster.setFromCamera(new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1), cam);
-      if (!this.cockpit.wheel(this.raycaster, e.deltaY, e.shiftKey)) this.cockpit.zoomBy(e.deltaY); // knob under the cursor, otherwise smooth zoom
+      if (e.ctrlKey || !this.cockpit.wheel(this.raycaster, e.deltaY, e.shiftKey)) this.cockpit.zoomBy(e.deltaY); // knob under the cursor turns it (not mid-zoom, not with Ctrl), otherwise smooth zoom
       return;
     }
     this.zoom = clamp(this.zoom * (1 + e.deltaY * 0.0012), 0.4, 3);
@@ -1470,8 +1478,16 @@ export class Game {
     const r = this.renderer;
     r.clear();
     if (!this.world) return;
-    r.render(this.world.scene, this.camera);
-    if (this.mode === 'play' && this.isInterior() && this.cockpit && this.phase !== 'loading') { r.clearDepth(); r.render(this.cockpit.activeScene, this.cockpit.activeCamera); }
+    const deck = this.mode === 'play' && this.isInterior() && this.cockpit && this.phase !== 'loading' ? this.cockpit : null;
+    if (deck && deck.canMask && this.emaFrameMs > 9.5) {
+      // Flight-deck occlusion: stamp the opaque deck into the stencil buffer, then draw the world only where the stencil is still 0 (through the windows).
+      // The stencil state is LOCKED so every world material – streamed tiles included – obeys it without touching any material.
+      deck.renderMask(r);
+      const st = r.state.buffers.stencil, gl = r.getContext();
+      r.clearDepth(); st.setTest(true); st.setMask(0); st.setFunc(gl.NOTEQUAL, 1, 0xff); st.setOp(gl.KEEP, gl.KEEP, gl.KEEP); st.setLocked(true);
+      try { r.render(this.world.scene, this.camera); } finally { st.setLocked(false); st.setTest(false); st.setMask(0xff); }
+    } else r.render(this.world.scene, this.camera);
+    if (deck) { r.clearDepth(); r.render(deck.activeScene, deck.activeCamera); }
   }
 
   private attractCamera(dt: number) {
@@ -1885,7 +1901,8 @@ export class Game {
     // sim → cockpit instruments
     const interior = this.isInterior() && this.mode === 'play';
     if (this.cockpit) this.cockpit.daylight = clamp((w.sunElevation + 8) / 20, 0.12, 1);
-    if (interior && this.cockpit) this.cockpit.update(dt, this.time, this.panelData(), { pitch: fm.ctl.pitch, roll: fm.ctl.roll, yaw: fm.ctl.yaw, throttle: fm.ctl.throttle, flapsIdx: fm.ctl.flapsIdx, gearDown: fm.ctl.gearDown, speedbrake: fm.ctl.speedbrake }, { battery: fm.ctl.battery, lights: this.lights, seatbelt: this.seatbelt, parking: fm.ctl.parking, reverse: fm.ctl.reverse, apOn: this.ap.on, apNav: this.ap.nav, apAppr: this.ap.appr, apHdg: this.magHdg(this.ap.hdg), apAlt: this.ap.altFt, apSpd: this.ap.spd, mood: this.comfort / 100, shake: clamp(this.turb * 1.6 + this.shakeImpulse, 0, 1.6) }, true);
+    if (interior && this.cockpit) this.cockpit.perfLoad = this.emaFrameMs > 22 ? 1.8 : this.emaFrameMs > 18 ? 1.35 : 1;
+    if (interior && this.cockpit) this.cockpit.update(dt, this.time, this.panelDataCached(), { pitch: fm.ctl.pitch, roll: fm.ctl.roll, yaw: fm.ctl.yaw, throttle: fm.ctl.throttle, flapsIdx: fm.ctl.flapsIdx, gearDown: fm.ctl.gearDown, speedbrake: fm.ctl.speedbrake }, { battery: fm.ctl.battery, lights: this.lights, seatbelt: this.seatbelt, parking: fm.ctl.parking, reverse: fm.ctl.reverse, apOn: this.ap.on, apNav: this.ap.nav, apAppr: this.ap.appr, apHdg: this.magHdg(this.ap.hdg), apAlt: this.ap.altFt, apSpd: this.ap.spd, mood: this.comfort / 100, shake: clamp(this.turb * 1.6 + this.shakeImpulse, 0, 1.6) }, true);
     v.setInterior(interior);
     if (this.phase === 'playing') {
       this.updateChecklist();
@@ -1915,8 +1932,9 @@ export class Game {
     if (this.phase === 'crashed') amp += Math.max(0, 1 - this.crashTimer / 3) * 0.02;
     const sx = amp * (Math.sin(t * 23.1) + Math.sin(t * 41.7 + 1.3)), sy = amp * (Math.sin(t * 19.3 + 2) + Math.sin(t * 37.9)), sr = amp * 0.6 * Math.sin(t * 29.1);
     const gOff = flying ? clamp(-(fm.nz - 1) * 0.025, -0.06, 0.06) : 0;
+    this.world?.setInterior(this.isInterior() && this.mode === 'play');
     if (this.isInterior() && this.mode === 'play') {
-      cam.near = 0.02;
+      cam.near = 0.25; // world camera: nothing exists inside 25 cm of the eye point – a 12x larger near plane gives the 24-bit depth buffer far more range (less z-fighting, cheaper rasterisation)
       const vw = this.cockpit!.smooth(dt);
       const lk = 1 / this.cockpit!.zoom; // camera shake is scaled with the zoom so magnified details stay steady
       tmpE.set(vw.pitch + sx * lk, vw.yaw + sy * lk, sr, 'YXZ');
@@ -1959,6 +1977,9 @@ export class Game {
   }
   private spotAnchor: THREE.Vector3 | null = null;
 
+  /** Telemetry snapshot for the displays, rebuilt at ≈ 40 Hz (it allocates and runs the ILS solver – no need to do that every rendered frame). */
+  private pdCache: PanelData | null = null; private pdT = 0;
+  private panelDataCached(): PanelData { const now = performance.now(); if (!this.pdCache || now - this.pdT > 25) { this.pdCache = this.panelData(); this.pdT = now; } return this.pdCache; }
   private panelData(): PanelData {
     const fm = this.fm, s = this.spec, ils = this.computeIls(), rem = this.distToDest();
     const brg = bearing(this.lat(), this.lon(), this.cfg.to.lat, this.cfg.to.lon);

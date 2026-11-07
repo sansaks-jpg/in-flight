@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { FlightModel } from '../src/sim/physics';
+import { AIRCRAFT } from '../src/sim/specs';
 import { SpeechQueue, type SpeechRequest } from '../src/sim/speech';
+import { A320Systems, THR_DETENTS, snapThrottle, thrDetentName, type CockpitHost } from '../src/sim/a320/systems';
+import { Efb, CHECKLISTS, checklistForPhase, type EfbInfo } from '../src/sim/a320/efb';
+import { DEFAULT_CHECKLIST_ITEMS } from '../src/sim/navAssists';
+import { AIRPORT_BY_ID } from '../src/data/airports';
 
 const request = (key: string, kind: SpeechRequest['kind'] = 'announcement'): SpeechRequest =>
   ({ key, text: key, cooldown: 3, rate: 1, pitch: 1, volume: 1, kind });
@@ -174,4 +180,71 @@ test('flight-phase hysteresis prevents repeated radio clearances during go-aroun
   state.landing = {}; state.currentFlightPhase = 'rollout'; state.fm.ias = 24 * .514444;
   assert.equal(phase.call(state), 'rollout');
   state.fm.ias = 19 * .514444; assert.equal(phase.call(state), 'taxi');
+});
+
+
+// ---------------------------------------------------------------- A320 flight deck: FADEC detents, system consequences, EFB
+test('thrust-lever detents follow the A320 TLA gates (IDLE 0°, CL 25°, FLX/MCT 35°, TOGA 45°) and snap magnetically', () => {
+  assert.deepEqual(THR_DETENTS.map((d) => d.name), ['IDLE', 'CL', 'FLX/MCT', 'TOGA']);
+  assert.ok(Math.abs(THR_DETENTS[1].v - 25 / 45) < 1e-9 && Math.abs(THR_DETENTS[2].v - 35 / 45) < 1e-9);
+  assert.equal(snapThrottle(25 / 45 + 0.02), 25 / 45);
+  assert.equal(snapThrottle(0.97), 1);
+  assert.equal(snapThrottle(0.4), 0.4);
+  assert.equal(thrDetentName(35 / 45), 'FLX/MCT');
+  assert.equal(thrDetentName(0.9, true), 'REV');
+  assert.match(thrDetentName(0.4), /IDLE–CL/);
+});
+
+function deckHarness() {
+  const fm = new FlightModel(AIRCRAFT[0], () => 0); fm.placeAirborne(0, 9000, 0, 90, 200, 0, false);
+  const toasts: string[] = [];
+  const host = { fm, ap: { on: false, nav: false, appr: false, hdg: 0, altFt: 0, spd: 250 }, lights: { nav: false, strobe: false, land: false, beacon: false }, seatbelt: false, action() {}, setApTarget() {}, toast: (m: string) => { toasts.push(m); }, route: () => [], position: () => ({ lat: 0, lon: 0 }), magVar: () => 0 } as unknown as CockpitHost;
+  const d = { altFt: 9000, warn: [] as string[] } as never;
+  return { fm, host, d, toasts, sys: new A320Systems() };
+}
+
+test('hydraulics gate brakes, flaps, gear and spoilers; fuel pumps and anti-ice change engine behaviour', () => {
+  const h = deckHarness(), { sys, fm } = h;
+  sys.update(0.01, h.host, h.d);
+  assert.equal(fm.ctl.brakePress, 0, 'no Yellow pressure and an empty accumulator -> no wheel braking');
+  sys.hyd.yellow = 3000; sys.update(0.01, h.host, h.d);
+  assert.equal(fm.ctl.brakePress, 1);
+  // pressurised once -> the locks are armed; now lose Green + Blue
+  sys.hyd.green = 3000; sys.hyd.blue = 3000; sys.update(0.01, h.host, h.d);
+  fm.ctl.flapsIdx = 2; sys.update(0.01, h.host, h.d);
+  sys.hyd.green = 0; sys.hyd.blue = 0; sys.hyd.yellow = 0; sys.accumPsi = 0; sys.update(0.01, h.host, h.d);
+  fm.ctl.flapsIdx = 4; sys.update(0.01, h.host, h.d);
+  assert.equal(fm.ctl.flapsIdx, 2, 'flaps cannot move with Green + Blue lost');
+  fm.ctl.gearDown = true; sys.update(0.01, h.host, h.d); fm.ctl.gearDown = false; sys.update(0.01, h.host, h.d);
+  assert.equal(fm.ctl.gearDown, true, 'gear retraction needs Green hydraulics');
+  fm.ctl.speedbrake = 1; sys.update(0.01, h.host, h.d);
+  assert.ok(fm.ctl.speedbrake < 0.01, 'no hydraulics -> no speedbrakes');
+  // fuel feed
+  fm.eng[0].state = 2; sys.master[0] = true; sys.pumps = [false, false, false, false, true, true];
+  const hi = { altFt: 30000, warn: [] as string[] } as never;
+  for (let i = 0; i < 6; i++) sys.update(1, h.host, hi);
+  assert.equal(fm.eng[0].state, 0, 'all feeding pumps OFF above FL250 -> flame-out');
+  assert.equal(fm.eng[1].state === 2 || fm.eng[1].state === 0, true);
+  // anti-ice thrust penalty
+  const g = deckHarness(); g.sys.engAI = [true, true]; g.sys.update(0.01, g.host, g.d);
+  assert.ok(g.fm.ctl.thrLimit < 0.99 && g.fm.ctl.thrLimit > 0.9, `thrLimit ${g.fm.ctl.thrLimit}`);
+});
+
+test('EFB: four airline checklists, flight-plan / radio pages and hit-testing without a DOM', () => {
+  const noop = () => undefined;
+  const ctx = new Proxy({}, { get: (_t, k) => (k === 'measureText' ? (s: string) => ({ width: String(s).length * 8 }) : noop), set: () => true }) as unknown as CanvasRenderingContext2D;
+  assert.deepEqual(CHECKLISTS.map((c) => c.label), ['Before Start', 'After Takeoff', 'Approach', 'Landing']);
+  assert.equal(checklistForPhase('taxi'), 0); assert.equal(checklistForPhase('cruise'), 1); assert.equal(checklistForPhase('descent'), 2); assert.equal(checklistForPhase('rollout'), 3);
+  const toggled: string[] = [];
+  const info: EfbInfo = { dep: AIRPORT_BY_ID.get('WIII')!, arr: AIRPORT_BY_ID.get('WADD')!, depRwy: '25R', arrRwy: '09', callsign: 'TST123', phase: 'taxi', wx: null, windFrom: 250, windKt: 8, qnh: 1010, oatC: 30,
+    route: [{ name: 'WIII', type: 'airport', distNm: 480 }, { name: 'ABASA', type: 'fix', distNm: 300 }], activeWp: 1, checklist: DEFAULT_CHECKLIST_ITEMS.map((x) => ({ ...x })), toggle: (id) => toggled.push(id), fuelKg: 9000, distNm: 480, eteMin: 75, utcMs: Date.UTC(2026, 0, 1, 12, 30) };
+  const efb = new Efb(); efb.draw(ctx, info, 1, 1.5);
+  assert.equal(efb.page, 'CHECK');
+  assert.ok(efb.click((196 + 300) / Efb.W, (150 + 30) / Efb.H), 'first checklist row is clickable');
+  assert.deepEqual(toggled, ['battery_on']);
+  assert.match(efb.hover(100 / Efb.W, 104 / Efb.H) ?? '', /Open Checklist/);
+  efb.click(60 / Efb.W, (74 + 78 + 30) / Efb.H); efb.draw(ctx, info, 1); assert.equal(efb.page, 'PLAN');
+  efb.click(60 / Efb.W, (74 + 3 * 78 + 30) / Efb.H); efb.draw(ctx, info, 1); assert.equal(efb.page, 'RADIO');
+  efb.wheel(100); efb.draw(ctx, info, 0.2);
+  assert.equal(efb.dirty, false);
 });

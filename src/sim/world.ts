@@ -1001,6 +1001,8 @@ export class World {
     this.rebuildAirports(lat, lon);
   }
 
+  /** True while the camera is inside the flight deck: tightens terrain / city culling (see Terrain.interior). */
+  setInterior(v: boolean) { this.terrain.interior = v; this.structures.interior = v; }
   update(cameraOrPos: THREE.Camera | THREE.Vector3, acPos: THREE.Vector3, agl: number, time: number) {
     this.lastAcLat = this.proj.lat(acPos.z);
     this.lastAcLon = this.proj.lon(acPos.x);

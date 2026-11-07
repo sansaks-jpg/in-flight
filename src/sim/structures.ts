@@ -1049,6 +1049,8 @@ export class Structures {
     return false;
   }
 
+  /** Flight-deck view: smaller always-keep core and tighter frustum skirt (see Terrain.interior). */
+  interior = false;
   update(x: number, z: number, agl: number, airports: Airport[], frustum?: THREE.Frustum) {
     if (this.activeAirports !== airports) {
       this.activeAirports = airports;
@@ -1146,13 +1148,13 @@ export class Structures {
         const distCam = Math.hypot(tileCenterX - x, tileCenterZ - z);
 
         // Core zone or center tile is never culled
-        const coreR = profile.structureCore;
+        const coreR = profile.structureCore * (this.interior ? 0.4 : 1), skirt = this.interior ? 150 : 600;
         let inView = false;
         if ((dx === 0 && dy === 0) || distCam <= coreR || !frustum) {
           inView = true;
         } else {
-          _sMin.set(minX - 600, -200, minZ - 600);
-          _sMax.set(maxX + 600, 3000, maxZ + 600);
+          _sMin.set(minX - skirt, -200, minZ - skirt);
+          _sMax.set(maxX + skirt, 3000, maxZ + skirt);
           _structBox.set(_sMin, _sMax);
           inView = frustum.intersectsBox(_structBox);
         }
@@ -1171,7 +1173,7 @@ export class Structures {
           if (t) {
             t.fadeTgt = 0;
             // Graceful retention: keep in memory for up to 6s
-            if (now - (t.lastSeen || 0) < 6000) {
+            if (now - (t.lastSeen || 0) < (this.interior ? 25000 : 6000)) { // longer grace in the flight deck: glancing back must not rebuild tiles
               wanted.add(key);
             }
           }

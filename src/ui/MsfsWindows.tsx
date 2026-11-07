@@ -118,38 +118,48 @@ export function MsfsFloatingWindow({
 /* =========================================================================
    1. COCKPIT INTERACTIVE TOOLTIP OVERLAY
    ========================================================================= */
-export function CockpitTooltipOverlay({ tooltip }: { tooltip: CockpitTooltip | null }) {
-  if (!tooltip) return null;
-
-  const clampX = clamp(tooltip.x, 140, window.innerWidth - 140);
-  const clampY = clamp(tooltip.y, 90, window.innerHeight - 60);
-
+export function CockpitTooltipOverlay({ tooltip, game }: { tooltip: CockpitTooltip | null; game?: Game }) {
+  // Minimalist dark-glass badge that sticks next to the cursor:  NAME · STATE · function.
+  // It is driven straight from the pointer + the game's hover state (no React render per mouse move) so it vanishes the moment the cursor leaves a control.
+  const el = useRef<HTMLDivElement>(null);
+  const [live, setLive] = useState<CockpitTooltip | null>(tooltip);
+  React.useEffect(() => {
+    let raf = 0, key = '', px = -999, py = -999;
+    const place = () => {
+      const n = el.current; if (!n) return;
+      const w = n.offsetWidth, h = n.offsetHeight, x = px + 16 + w > window.innerWidth - 8 ? px - 12 - w : px + 16, y = py + 22 + h > window.innerHeight - 8 ? py - 14 - h : py + 22;
+      n.style.transform = `translate3d(${Math.max(6, x)}px, ${Math.max(6, y)}px, 0)`;
+    };
+    const move = (e: PointerEvent) => { px = e.clientX; py = e.clientY; place(); };
+    const tick = () => {
+      const t = game ? game.cockpitTooltip : tooltip, k = t ? `${t.id}|${t.value}` : '';
+      if (k !== key) { key = k; setLive(t ? { ...t } : null); }
+      raf = requestAnimationFrame(tick);
+    };
+    window.addEventListener('pointermove', move, { passive: true }); raf = requestAnimationFrame(tick);
+    return () => { window.removeEventListener('pointermove', move); cancelAnimationFrame(raf); };
+  }, [game, tooltip]);
+  React.useLayoutEffect(() => { const n = el.current; if (n && live) { const x = (live.x ?? 0), y = (live.y ?? 0); if (!n.style.transform) n.style.transform = `translate3d(${x + 16}px, ${y + 22}px, 0)`; } }, [live]);
+  if (!live) return null;
   return (
-    <div
-      style={{ left: `${clampX}px`, top: `${clampY}px` }}
-      className="fixed z-50 pointer-events-none -translate-x-1/2 -translate-y-full mb-3 flex flex-col items-center animate-[fadein_.1s_ease-out]"
-    >
-      <div className="rounded-xl border border-cyan-400/50 bg-slate-950/90 backdrop-blur-md px-3 py-2 shadow-[0_8px_30px_rgba(6,182,212,0.3)] text-center min-w-[200px] max-w-[320px]">
-        <div className="flex items-center justify-center gap-1.5 text-[10px] font-black uppercase tracking-wider text-cyan-300">
-          <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-ping" />
-          {tooltip.label}
-        </div>
-        <div className="mt-1 text-xs font-bold text-white font-mono bg-white/5 py-0.5 px-2 rounded border border-white/10">
-          {tooltip.value}
-        </div>
-        {tooltip.description && (
-          <div className="mt-1.5 text-[10px] leading-snug text-slate-100 text-left">
-            {tooltip.description}
-          </div>
-        )}
-        {tooltip.actionHint && (
-          <div className="mt-1 text-[9px] font-semibold text-cyan-200/80">
-            {tooltip.actionHint}
-          </div>
-        )}
-      </div>
-      {/* Downward Pointer Triangle */}
-      <div className="w-0 h-0 border-l-[6px] border-l-transparent border-r-[6px] border-r-transparent border-t-[6px] border-t-cyan-400/60 -mt-[1px]" />
+    <div ref={el} className="cp-tip" role="status" aria-live="off">
+      <b>{live.label}</b>
+      {live.value && <><i>·</i><span className="cp-tip-state">{live.value}</span></>}
+      {live.description && <><i>·</i><span className="cp-tip-fn">{live.description}</span></>}
+    </div>
+  );
+}
+
+/** Camera focus hot-bar: one click (or keypad 0-9) flies the camera to a panel – nothing on the panel is operated. */
+export function CockpitFocusBar({ game, items }: { game: Game; items: { id: string; label: string; key: string }[] }) {
+  return (
+    <div className="cp-focusbar" data-flight-ui role="toolbar" aria-label="Cockpit camera focus">
+      <span className="cp-focusbar-title">FOCUS</span>
+      {items.map((it) => (
+        <button key={it.id} type="button" title={`Fly camera to ${it.label} (keypad ${it.key})`} onClick={() => { game.setCockpitSubview(it.id as never); requestAnimationFrame(() => game.canvas.focus({ preventScroll: true })); }}>
+          {it.label}<kbd>{it.key}</kbd>
+        </button>
+      ))}
     </div>
   );
 }
@@ -399,7 +409,7 @@ export function CameraWindow({
               </button>
             ))}
           </div>
-          <p className="mt-1.5 text-[9px] text-slate-400">Mouse wheel zooms smoothly (up to 14×) · double-click any switch or screen to fly the camera to it · wheel over a knob turns it.</p>
+          <p className="mt-1.5 text-[9px] text-slate-400">Wheel zooms smoothly (up to 8×) · keypad 0–9 or the FOCUS bar flies to a panel · Alt-click frames a control without operating it · wheel over a knob turns it (Ctrl-wheel always zooms).</p>
         </div>
 
         {/* External & Cinematic Showcase */}
