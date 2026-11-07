@@ -69,8 +69,8 @@ To prevent garbage collection (GC) micro-stutters:
 |---|---|
 | `src/sim/game.ts` | Simulation orchestrator: manages the game loop, input handling, camera systems, ATC, and high-level flight states. |
 | `src/sim/physics.ts` | Rigid-body flight dynamics, aerodynamic force vectors, lift/drag polars, ground effect, and landing gear physics. |
-| `src/sim/autopilot.ts` | Autopilot PID controllers for HDG, ALT, VS, LNAV waypoint sequencing, and ILS glideslope / localizer tracking. |
-| `src/sim/lnav.ts` | LNAV maths: leg guidance, speed-scaled intercept, fly-by turn anticipation and geometric waypoint sequencing (never targets a fix behind the aircraft). |
+| `src/sim/autopilot.ts` | Autopilot: auto-takeoff, LNAV leg tracking, VNAV (climb to the plan's cruise level, **3° geometric path descent to the threshold**, FAR 91.117 / Mach-based managed speed), `approachStage()` configuration schedule (CONF 1 at the IAF, gear + CONF 3 at ~5.7 NM, FULL at ~3.5 NM, Vapp+3 at the threshold, never past the placard speeds), automatic speedbrakes, ILS localizer / glideslope capture (descends to meet the beam from above), flare and rollout. Minimum speed is configuration-aware (`minSpeedKt()` = 1.23 × Vs of the current flap setting). |
+| `src/sim/lnav.ts` | LNAV/VNAV maths: leg guidance, speed-scaled intercept, fly-by turn anticipation, geometric waypoint sequencing (never targets a fix behind the aircraft), `planDistanceM()` (distance along the route), `PATH_TAN` and `cruiseLevelM()` (cruise level that fits the route + semicircular rule). |
 | `src/sim/world.ts` | World composer: assembles terrain, structures, airfield scenery, ground clutter and the clock into the runtime scene (`World`, `Threshold`). |
 | `src/sim/mvt.ts` | Zero-dependency Mapbox Vector Tile (.pbf / Protobuf) decoder for streamed building/road vector data. |
 | `src/sim/navAssists.ts` | Navigation assists: default checklists, approach gates, taxi ribbon and world screen markers. |

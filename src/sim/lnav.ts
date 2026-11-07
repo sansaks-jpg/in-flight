@@ -108,3 +108,35 @@ export function planCruiseAltM(plan: FlightWaypoint[]): number | null {
   for (const w of plan) if ((w.type === 'cruise' || w.type === 'tod') && (best === null || w.altM > best)) best = w.altM;
   return best;
 }
+
+/**
+ * Distance (m) still to fly along the route from the aircraft to plan[toIdx]: straight to the active fix, then the leg lengths.
+ * Returns 0 when toIdx lies behind the active fix.
+ */
+export function planDistanceM(plan: FlightWaypoint[], idx: number, lat: number, lon: number, toIdx: number): number {
+  if (!plan.length || toIdx < idx) return 0;
+  const i = clamp(idx, 0, plan.length - 1), j = clamp(toIdx, 0, plan.length - 1);
+  let d = haversine(lat, lon, plan[i].lat, plan[i].lon);
+  for (let k = i; k < j; k++) d += haversine(plan[k].lat, plan[k].lon, plan[k + 1].lat, plan[k + 1].lon);
+  return d;
+}
+
+/** 3° geometric descent path used by VNAV and the FMS (tan 3° = 0.0524 -> 19.1 m of track per metre of height). */
+export const PATH_TAN = Math.tan(3 * D2R);
+
+/**
+ * Cruise level for a route (m). A real FMS never plans a cruise it cannot reach and leave again: the level is limited so that
+ * a ~3° descent plus a climb at ~1500 ft/min (≈ 20 m of track per metre of height each) fit into the route, and it follows the
+ * ICAO semicircular rule (eastbound odd / westbound even thousands of feet).
+ */
+export function cruiseLevelM(routeM: number, courseDeg: number, maxM: number, fieldElevM: number, floorM: number): number {
+  const FT = 0.3048;
+  const usable = Math.max(0, routeM - 30000); // leave ~16 NM for departure turn-out, intercept and final
+  const reach = fieldElevM + usable / 40;
+  const minFt = Math.ceil(floorM / FT / 1000);
+  let ft = Math.max(minFt, Math.floor(Math.min(maxM, reach) / FT / 1000)); // whole thousands, never below the safe floor
+  const east = wrap360Local(courseDeg) < 180;
+  if ((ft % 2 === 1) !== east) ft += ft <= minFt ? 1 : -1;
+  return ft * 1000 * FT;
+}
+const wrap360Local = (a: number) => ((a % 360) + 360) % 360;

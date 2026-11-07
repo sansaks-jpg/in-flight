@@ -53,6 +53,17 @@ export function greatCircle(lat1: number, lon1: number, lat2: number, lon2: numb
   }
   return out;
 }
+/** Point a fraction f (0..1) of the way along the great circle from point 1 to point 2. */
+export function gcPoint(lat1: number, lon1: number, lat2: number, lon2: number, f: number): [number, number] {
+  const d = haversine(lat1, lon1, lat2, lon2) / R_EARTH;
+  if (d < 1e-9) return [lat1, lon1];
+  const p1 = lat1 * D2R, l1 = lon1 * D2R, p2 = lat2 * D2R, l2 = lon2 * D2R;
+  const A = Math.sin((1 - f) * d) / Math.sin(d), B = Math.sin(f * d) / Math.sin(d);
+  const x = A * Math.cos(p1) * Math.cos(l1) + B * Math.cos(p2) * Math.cos(l2);
+  const y = A * Math.cos(p1) * Math.sin(l1) + B * Math.cos(p2) * Math.sin(l2);
+  const z = A * Math.sin(p1) + B * Math.sin(p2);
+  return [Math.atan2(z, Math.hypot(x, y)) * R2D, Math.atan2(y, x) * R2D];
+}
 export function destination(lat: number, lon: number, hdg: number, dist: number): [number, number] {
   const p1 = lat * D2R, l1 = lon * D2R, th = hdg * D2R, dl = dist / R_EARTH;
   const p2 = Math.asin(Math.sin(p1) * Math.cos(dl) + Math.cos(p1) * Math.sin(dl) * Math.cos(th));

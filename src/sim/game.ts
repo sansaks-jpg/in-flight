@@ -8,14 +8,14 @@ import { LiveWx, OFFLINE_WX, fetchLiveWeather, windProfile, windVector, isaDevia
 import { Precip } from './precip';
 import { chooseSpawn, Spawn } from './departure';
 import { AtcRadio, buildAmbient, buildExchange, makeCallsign, phoneticLetter, AmbientPhase, RadioLine, RadioCtx } from './atc';
-import { Projection, haversine, bearing, wrap180, wrap360, D2R, R2D, clamp, M_PER_NM, MS_TO_KT, destination, greatCircle, FlightWaypoint } from './geo';
+import { Projection, haversine, bearing, wrap180, wrap360, D2R, R2D, clamp, M_PER_NM, MS_TO_KT, destination, gcPoint, FlightWaypoint } from './geo';
 import { World, Threshold, TimeOfDay } from './world';
 import { AircraftVisual, loadAircraftVisual } from './aircraftModel';
 import { Cockpit, CockpitPreset, CockpitHost, COCKPIT_FOCUS } from './cockpit';
 import type { EfbInfo } from './a320/efb';
 import { PanelData } from './instruments';
-import { Autopilot, IlsData } from './autopilot';
-import { advanceWaypoint } from './lnav';
+import { Autopilot, IlsData, minSpeedKt } from './autopilot';
+import { advanceWaypoint, cruiseLevelM, PATH_TAN, planDistanceM } from './lnav';
 import { AudioEngine, WarnSound } from './audio';
 import { Effects } from './effects';
 import { Settings, addScore, QualityPreset } from './storage';
@@ -187,36 +187,25 @@ export function buildFlightPlan(
     [iafLat, iafLon] = destination(to.lat, to.lon, oppBrg, 18500);
   }
 
-  // 3. Cruise Leg & Top of Descent (TOD)
+  // 3. Cruise level, CRUISE fix and Top of Descent (TOD).
+  // The level is limited to what fits in the route (see cruiseLevelM); the TOD sits exactly where the 3° path to the threshold
+  // crosses that level, measured back from the IAF along the same great circle - so CRZ, TOD and IAF are always in route order.
   const lastDep = wps[wps.length - 1];
+  const iafDistM = precision ? 18500 : 10000;
   const enrouteDist = haversine(lastDep.lat, lastDep.lon, iafLat, iafLon);
-  const descentDistM = Math.max(12000, (cruiseAltM - (to.elev + 900)) / Math.tan(3 * D2R));
-
-  if (enrouteDist > descentDistM + 12000) {
-    const gcPoints = greatCircle(lastDep.lat, lastDep.lon, iafLat, iafLon, 8);
-    const midPoint = gcPoints[Math.floor(gcPoints.length / 2)];
-    wps.push({
-      id: 'CRZ',
-      name: 'CRUISE',
-      type: 'cruise',
-      lat: midPoint[0],
-      lon: midPoint[1],
-      altM: cruiseAltM,
-      speedKt: cruiseSpeedKt,
-    });
-
-    const todRatio = 1 - (descentDistM / enrouteDist);
-    const todIdx = Math.min(gcPoints.length - 1, Math.max(0, Math.round(todRatio * (gcPoints.length - 1))));
-    const todPt = gcPoints[todIdx];
-    wps.push({
-      id: 'TOD',
-      name: 'TOP OF DESCENT',
-      type: 'tod',
-      lat: todPt[0],
-      lon: todPt[1],
-      altM: cruiseAltM,
-      speedKt: Math.round(cruiseSpeedKt * 0.88),
-    });
+  const routeCourse = bearing(lastDep.lat, lastDep.lon, iafLat, iafLon);
+  const floorM = Math.max(from.elev, to.elev) + 1500;
+  const levelM = cruiseLevelM(enrouteDist + 5500 + iafDistM, routeCourse, Math.max(cruiseAltM, floorM), Math.max(from.elev, to.elev), floorM);
+  const todBeforeIafM = (levelM - (to.elev + 15)) / PATH_TAN - iafDistM;
+  const hasTod = todBeforeIafM > 3000 && enrouteDist - todBeforeIafM > 12000;
+  const levelEndFrac = hasTod ? 1 - todBeforeIafM / enrouteDist : 1;
+  if (enrouteDist > 15000) {
+    const [cLat, cLon] = gcPoint(lastDep.lat, lastDep.lon, iafLat, iafLon, levelEndFrac * 0.5);
+    wps.push({ id: 'CRZ', name: 'CRUISE', type: 'cruise', lat: cLat, lon: cLon, altM: levelM, speedKt: cruiseSpeedKt });
+    if (hasTod) {
+      const [tLat, tLon] = gcPoint(lastDep.lat, lastDep.lon, iafLat, iafLon, levelEndFrac);
+      wps.push({ id: 'TOD', name: 'TOP OF DESCENT', type: 'tod', lat: tLat, lon: tLon, altM: levelM, speedKt: Math.round(cruiseSpeedKt * 0.88) });
+    }
   }
 
   // 4. IAF (Initial Approach Fix)
@@ -227,7 +216,7 @@ export function buildFlightPlan(
     lat: iafLat,
     lon: iafLon,
     altM: to.elev + (precision ? 900 : 560),
-    speedKt: 160,
+    speedKt: Math.round(vappKt * 1.4),
     rwyIdent: arrTh?.ident,
     hdg: arrHdg,
   });
@@ -240,7 +229,7 @@ export function buildFlightPlan(
     lat: fafLat,
     lon: fafLon,
     altM: to.elev + (precision ? 450 : 255),
-    speedKt: 140,
+    speedKt: Math.round(vappKt * 1.15),
     rwyIdent: arrTh?.ident,
     hdg: arrHdg,
   });
@@ -558,7 +547,7 @@ export class Game {
     const previousIdx = this.activeWpIdx;
     const from = this.cfg.from, to = this.cfg.to;
     const arr = this.approachTh();
-    const cruiseAltM = Math.max(this.spec.cruiseAlt * (haversine(from.lat, from.lon, to.lat, to.lon) < 120000 ? 0.55 : 1), from.elev + 1500, to.elev + 1500, 1500);
+    const cruiseAltM = Math.max(this.spec.cruiseAlt, from.elev + 1500, to.elev + 1500, 1500); // ceiling only: buildFlightPlan picks the level that fits the route
     this.flightPlan = buildFlightPlan(from, this.depTh, to, arr, cruiseAltM, this.spec.cruiseKt, this.spec.vapp, arr ? this.ilsCapable(arr) : true);
     if (activeId) {
       const idx = this.flightPlan.findIndex((wp) => wp.id === activeId);
@@ -805,6 +794,7 @@ export class Game {
       get fm() { return g.fm; }, get ap() { return g.ap; }, get lights() { return g.lights; }, get seatbelt() { return g.seatbelt; },
       action: (id: string) => g.action(id), setApTarget: (t, v) => g.setApTarget(t, v), toast: (m, k) => g.toast(m, k as ('info' | 'warn' | 'good') ?? 'info'),
       route: () => g.flightPlan.slice(Math.max(0, g.activeWpIdx)).map((w) => ({ name: w.name, lat: w.lat, lon: w.lon })),
+      legFrom: () => { const w = g.flightPlan[g.activeWpIdx - 1]; return w && g.activeWpIdx > 0 ? { lat: w.lat, lon: w.lon } : null; },
       position: () => ({ lat: g.lat(), lon: g.lon() }), magVar: (h: number) => g.magHdg(h) - h,
       efbInfo: () => g.efbInfo(),
       terrainFt: (lat: number, lon: number) => (g.world ? g.world.terrain.heightAt(g.world.proj.x(lon), g.world.proj.z(lat)) / 0.3048 : 0),
@@ -818,7 +808,7 @@ export class Game {
     return {
       dep: this.cfg.from, arr: this.cfg.to, depRwy: this.depRwy, arrRwy: h.apprRwy, callsign: this.callsign?.callsign ?? 'FLIGHT', phase: this.currentFlightPhase,
       wx: this.liveWx, windFrom: this.windFrom, windKt: this.windKt, qnh: this.liveWx?.qnh ?? 1013, oatC: this.oat(),
-      route: this.flightPlan.map((w) => ({ name: w.name, type: w.type, distNm: haversine(la, lo, w.lat, w.lon) / M_PER_NM })), activeWp: this.activeWpIdx,
+      route: this.flightPlan.map((w, i) => ({ name: w.name, type: w.type, distNm: (i >= this.activeWpIdx ? planDistanceM(this.flightPlan, this.activeWpIdx, la, lo, i) : haversine(la, lo, w.lat, w.lon)) / M_PER_NM })), activeWp: this.activeWpIdx, // remaining distance ALONG the route
       checklist: this.checklistItems, toggle: (id) => this.toggleChecklistItem(id), fuelKg: this.fm.fuel, distNm: h.distNm, eteMin: h.distNm / Math.max(h.gsKt, 250) * 60, utcMs: simNowMs(),
     };
   }
@@ -1136,7 +1126,7 @@ export class Game {
       case 'alt+': this.ap.altFt = Math.min(45000, this.ap.altFt + 100); a.click(); break;
       case 'alt-big': this.ap.altFt = Math.max(0, this.ap.altFt - 1000); a.click(); break;
       case 'alt+big': this.ap.altFt = Math.min(45000, this.ap.altFt + 1000); a.click(); break;
-      case 'spd-': this.ap.spd = Math.max(Math.round(s.vs1 * 1.2), this.ap.spd - 5); a.click(); break;
+      case 'spd-': this.ap.spd = Math.max(Math.ceil(minSpeedKt(this.fm) / 5) * 5, this.ap.spd - 5); a.click(); break;
       case 'spd+': this.ap.spd = Math.min(Math.round(s.vne * 0.85), this.ap.spd + 5); a.click(); break;
       case 'warp': this.cycleWarp(); break;
       case 'rwy': this.cycleRunway(); break;
@@ -1165,7 +1155,7 @@ export class Game {
       this.ap.hdg = wrap360(Math.round(value) + this.magv); this.ap.setLateralMode('heading');
     } else if (!(this.ap.on && (this.ap.nav || this.ap.appr)) || (target === 'alt' ? this.ap.altSelected : this.ap.spdSelected)) {
       if (target === 'alt') this.ap.altFt = clamp(Math.round(value / 100) * 100, 0, 45000);
-      else this.ap.spd = clamp(Math.round(value), Math.round(this.spec.vs1 * 1.2), Math.round(this.spec.vne * .85));
+      else this.ap.spd = clamp(Math.round(value), Math.ceil(minSpeedKt(this.fm)), Math.round(this.spec.vne * .85));
     }
     this.audio.click();
   }

@@ -8,9 +8,9 @@
 //  * VNAV climbs to the plan's cruise level at the speed schedule, holds it, and starts a 3° path descent at the TOD fix.
 //  * Jet/turboprop speed schedule: <= 250 KIAS below 10,000 ft MSL (FAR 91.117).
 //  * A minimum safe altitude is enforced outside the approach so a bad target can never drive the aircraft into terrain.
-import { FlightModel } from './physics';
+import { FlightModel, atmosphere } from './physics';
 import { clamp, wrap180, wrap360, D2R, destination, crossTrack, bearing, haversine, FlightWaypoint } from './geo';
-import { legGuidance, interceptAngleDeg, planCruiseAltM } from './lnav';
+import { legGuidance, interceptAngleDeg, planCruiseAltM, planDistanceM } from './lnav';
 
 export interface IlsData {
   valid: boolean;
@@ -55,6 +55,31 @@ const MIN_SAFE_AGL_M = 150;
 /** LNAV is not engaged below this height after take-off (≈ 400 ft AGL). */
 const LNAV_ENGAGE_AGL_M = 120;
 
+/** Stall-speed reference for the present flap configuration (same switch-over as the stall model in physics.ts). */
+export function stallRefKt(fm: FlightModel): number { return fm.flapsPos > 0.3 ? fm.spec.vs0 : fm.spec.vs1; }
+/** Lowest speed the autopilot will ever select: VLS ≈ 1.23 Vs of the CURRENT configuration (clean ≈ green dot, flaps FULL ≈ Vref). */
+export function minSpeedKt(fm: FlightModel): number { return stallRefKt(fm) * 1.23; }
+/** KIAS that corresponds to the cruise Mach (jets) at an altitude, capped at the 300 kt climb / descent speed. */
+function managedJetKias(machCruise: number, alt: number): number {
+  const a = atmosphere(alt);
+  return Math.min(300, (machCruise * a.a * Math.sqrt(a.sigma)) / KT);
+}
+interface ApproachStage { kt: number; flaps: number; gear: boolean }
+/**
+ * Configuration / speed schedule on final, by track distance D to the threshold (airline practice: CONF 1 at the IAF,
+ * CONF 2, gear + CONF 3 about 5 NM out, CONF FULL stabilised at ~3 NM, Vapp + 3 over the threshold). Speeds are
+ * Vapp-relative so they stay valid for every aircraft; every stage stays below the flap placard (checked in step()).
+ */
+function approachStage(s: { vapp: number; flapDetents: number }, D: number): ApproachStage {
+  const k = s.vapp / 135, full = s.flapDetents;
+  const knots: [number, number][] = [[1500, 3], [5000, 12], [9000, 30], [13000, 45], [18500, 60], [30000, 115]];
+  let add = knots[knots.length - 1][1];
+  if (D <= knots[0][0]) add = knots[0][1];
+  else for (let i = 1; i < knots.length; i++) if (D <= knots[i][0]) { const f = (D - knots[i - 1][0]) / (knots[i][0] - knots[i - 1][0]); add = knots[i - 1][1] + f * (knots[i][1] - knots[i - 1][1]); break; }
+  const step = D < 6500 ? full : D < 10500 ? Math.max(1, full - 1) : D < 14500 ? Math.min(2, full) : D < 20000 ? 1 : 0;
+  return { kt: s.vapp + add * k, flaps: Math.min(step, full), gear: D < 10500 };
+}
+
 export class Autopilot {
   on = false;
   phase: ApPhase = 'idle';
@@ -76,6 +101,7 @@ export class Autopilot {
   activeWpName = '';
   /** Instrument telemetry only: the attitude reference implied by the existing FPA controller. */
   pitchTargetRad: number | null = null;
+  private sbCmd = 0;
   private prevKias = 0;
   private accKt = 0;
 
@@ -105,7 +131,7 @@ export class Autopilot {
     this.appr = false;
     this.prevKias = fm.ias / KT; this.accKt = 0;
     this.altFt = Math.round(fm.pos.y / FT / 100) * 100;
-    this.spd = Math.round(clamp(fm.ias / KT, fm.spec.vs1 * 1.3, fm.spec.vne * 0.8) / 5) * 5;
+    this.spd = Math.round(clamp(fm.ias / KT, minSpeedKt(fm), fm.spec.vne * 0.8) / 5) * 5;
   }
 
   /** Changing lateral guidance must also release a captured automatic approach. */
@@ -115,7 +141,7 @@ export class Autopilot {
   }
 
   disengage() {
-    this.on = false; this.pitchTargetRad = null; this.vsHoldFpm = null; this.expedite = false;
+    this.on = false; this.sbCmd = 0; this.pitchTargetRad = null; this.vsHoldFpm = null; this.expedite = false;
     this.phase = 'idle';
     this.appr = false;
     this.nav = false;
@@ -206,11 +232,15 @@ export class Autopilot {
     }
 
     // -------------------------------------------------------------
-    // 2. LNAV (leg guidance) + VNAV (altitude / speed profile)
+    // 2. LNAV (leg guidance) + VNAV (altitude path / speed profile)
     // -------------------------------------------------------------
     const landingLeg = !!wp && (wp.type === 'faf' || wp.type === 'touchdown' || wp.type === 'rollout');
+    const tdIdx = plan.findIndex((w) => w.type === 'touchdown');
+    const arrWp: FlightWaypoint | undefined = tdIdx >= 0 ? plan[tdIdx] : undefined;
     let distToArr = Infinity; // signed: > 0 while the threshold is still ahead
-    let arrWp: FlightWaypoint | undefined;
+    let pathOn = false;       // VNAV is flying the 3° path to the threshold
+    let pathAltM = 0;
+    let stage: ApproachStage | null = null;
     if (this.phase === 'takeoff') {
       hdgCmd = this.takeoffHdg;
       this.hdg = Math.round(this.takeoffHdg);
@@ -220,68 +250,67 @@ export class Autopilot {
       const g = legGuidance(plan, idx, curLat!, curLon!);
       const icpt = g.direct ? 0 : interceptAngleDeg(g.xtkM, gsMs);
       hdgCmd = wrap360(g.course + (isFinite(icpt) ? icpt : 0));
-      this.hdg = Math.round(hdgCmd);
+      this.hdg = Math.round(wrap360(g.course)); // FCU read-out shows the leg course, not the momentary intercept heading
 
-      // --- vertical + speed profile from the plan ---
+      // --- vertical + speed profile ---
       if (this.phase !== 'flare' && this.phase !== 'rollout') {
-        const cruiseAlt = planCruiseAltM(plan);
-        switch (wp.type) {
-          case 'takeoff':
-          case 'climb':
-            // Climb straight to the cruise level; the departure fix only shapes the lateral path.
-            altTarget = cruiseAlt !== null ? cruiseAlt : wp.altM;
-            break;
-          default:
-            altTarget = wp.altM;
-        }
-        spdT = wp.speedKt > 0 ? wp.speedKt : (landingLeg ? s.vapp : spdT);
-        if (this.altSelected) altTarget = this.altFt * FT; else this.altFt = Math.round(altTarget / FT);
-        if (this.spdSelected) spdT = this.spd; else this.spd = Math.round(spdT);
-
-        // Visual / LNAV final: no ILS needed. Fly the 3° path to the threshold, configure, flare.
-        if (landingLeg) {
-          arrWp = plan.find((w) => w.type === 'touchdown');
-          if (arrWp) {
-            const d = haversine(curLat!, curLon!, arrWp.lat, arrWp.lon);
-            const ahead = arrWp.hdg === undefined || Math.abs(wrap180(bearing(curLat!, curLon!, arrWp.lat, arrWp.lon) - arrWp.hdg)) < 90;
-            distToArr = ahead ? d : -d;
+        const cruiseAlt = planCruiseAltM(plan) ?? Math.max(alt, wp.altM);
+        let managedAlt = cruiseAlt;
+        let clearedAlt = cruiseAlt; // what the FCU altitude window shows (never the moving path)
+        if (arrWp && idx <= tdIdx) {
+          const dPath = planDistanceM(plan, idx, curLat!, curLon!, tdIdx);
+          const pathAlt = arrWp.altM + dPath * TAN_3; pathAltM = pathAlt;
+          if (pathAlt < cruiseAlt) {
+            // VNAV path descent: the target is the 3° path itself. Below it (still climbing, or engaged low) the aircraft climbs to
+            // meet it - the path law below only takes over once the path is reached, so it never flies parallel underneath it.
+            const iaf = plan.find((w) => w.type === 'iaf');
+            clearedAlt = iaf ? iaf.altM : arrWp.altM;
+            managedAlt = pathAlt;
+            pathOn = alt >= pathAlt - 40;
           }
+          const ahead = arrWp.hdg === undefined || Math.abs(wrap180(bearing(curLat!, curLon!, arrWp.lat, arrWp.lon) - arrWp.hdg)) < 90;
+          const dDirect = haversine(curLat!, curLon!, arrWp.lat, arrWp.lon);
+          distToArr = ahead ? dDirect : -dDirect;
+          if (landingLeg || dPath < 30000) stage = approachStage(s, Math.max(0, ahead ? dPath : 0));
         }
+        altTarget = managedAlt;
+        // Jets: managed speed is Mach-based (cruiseKt is a TAS at the cruise level) -> the KIAS that corresponds to it, <= 300.
+        const managedSpd = s.kind === 'jet' ? managedJetKias(s.cruiseKt * KT / atmosphere(s.cruiseAlt).a, alt) : (wp.speedKt > 0 ? wp.speedKt : spdT);
+        spdT = stage ? Math.min(managedSpd, stage.kt) : managedSpd;
+        if (this.altSelected) altTarget = this.altFt * FT; else this.altFt = Math.round(clearedAlt / FT);
+        if (this.spdSelected) spdT = this.spd; else this.spd = Math.round(spdT);
+        if (pathOn && !this.altSelected && vsCmd === null && this.vsHoldFpm === null) {
+          // Follow the geometric path: ground-speed-scaled sink rate plus a gentle correction for the vertical deviation.
+          vsCmd = clamp(-fm.gs * TAN_3 + clamp(pathAltM - alt, -150, 150) * 0.05, -fm.gs * TAN_6, 2.5);
+        }
+        if (stage && (landingLeg || (distToArr > 0 && distToArr < 22000))) {
+          // Configure for landing - never beyond the flap / gear placard speeds.
+          const vfe = s.vfe[Math.min(s.vfe.length - 1, Math.max(0, Math.min(stage.flaps, s.flapDetents)))];
+          if (stage.flaps > fm.ctl.flapsIdx && kias <= vfe - 3) flapsCmd = stage.flaps;
+          if (stage.gear && kias <= s.vle) gearCmd = true;
+        }
+        if (landingLeg && agl < 16 && distToArr < 3200 && distToArr > -3000) this.phase = 'flare';
       }
     } else if (this.nav && navBearing !== null) {
       hdgCmd = navBearing;
       this.hdg = Math.round(wrap360(navBearing));
     }
 
-    // Visual final path (only when the ILS is not driving the approach).
-    const useIls = (this.appr || this.phase === 'approach') && ils && ils.valid;
-    if (!useIls && arrWp && isFinite(distToArr) && this.phase !== 'flare' && this.phase !== 'rollout' && distToArr < 20000) {
-      const pathAlt = arrWp.altM + Math.max(0, distToArr) * TAN_3;
-      vsCmd = clamp(-fm.gs * TAN_3 + clamp(pathAlt - alt, -150, 150) * 0.08, -fm.gs * TAN_6, 2.5);
-      if (distToArr < 22000) gearCmd = true;
-      if (distToArr < 18000) flapsCmd = Math.min(2, s.flapDetents);
-      if (distToArr < 10000) flapsCmd = s.flapDetents;
-      spdT = Math.min(spdT, s.vapp + 4 + Math.max(0, distToArr - 3500) / 1600);
-      this.spd = Math.round(spdT);
-      if (agl < 16 && distToArr < 3200 && distToArr > -3000) this.phase = 'flare';
-    }
-
     // -------------------------------------------------------------
     // 3. AUTO-ILS & APPROACH
     // -------------------------------------------------------------
+    const useIls = (this.appr || this.phase === 'approach') && ils && ils.valid;
     if (useIls && ils) {
       this.phase = 'approach';
       this.hdg = Math.round(wrap360(ils.course));
       const interceptAngle = clamp(ils.cross * 0.045, -35, 35) * clamp(ils.dist / 6000, 0.35, 1);
       hdgCmd = ils.course - interceptAngle;
 
-      // Automatically configure aircraft for landing
-      if (ils.dist < 22000) gearCmd = true;
-      if (ils.dist < 18000) flapsCmd = Math.min(2, s.flapDetents);
-      if (ils.dist < 10000) flapsCmd = s.flapDetents;
-
-      // Approach speed reduction
-      spdT = Math.min(spdT, s.vapp + 4 + Math.max(0, ils.dist - 3500) / 1600);
+      stage = approachStage(s, Math.max(0, ils.dist));
+      const vfe = s.vfe[Math.min(s.vfe.length - 1, Math.max(0, Math.min(stage.flaps, s.flapDetents)))];
+      if (ils.dist < 22000 && stage.flaps > fm.ctl.flapsIdx && kias <= vfe - 3) flapsCmd = stage.flaps;
+      if (ils.dist < 22000 && stage.gear && kias <= s.vle) gearCmd = true;
+      spdT = Math.min(spdT, stage.kt);
       this.spd = Math.round(spdT);
 
       if (!this.gsCaptured && Math.abs(ils.gsDots) < 1.4 && ils.dist < 42000 && ils.dist > 250) {
@@ -295,6 +324,11 @@ export class Autopilot {
       } else {
         altTarget = Math.min(altTarget, alt + 5);
         if (ils.dist < 40000) altTarget = alt;
+        // Too high to meet the beam (it only comes down towards a level aircraft from below): descend at up to 5.5° to intercept it from above.
+        const beamAlt = ils.elev + 15 + Math.max(0, ils.dist) * TAN_3;
+        if (ils.dist > 2500 && ils.dist < 42000 && alt > beamAlt + 60) {
+          vsCmd = clamp(-2 - (alt - beamAlt) * 0.04, -fm.gs * Math.tan(5.5 * D2R), -2);
+        }
       }
 
       // Auto-flare trigger
@@ -351,14 +385,19 @@ export class Autopilot {
     // -------------------------------------------------------------
     // 6. SPEED SCHEDULE + MINIMUM SAFE ALTITUDE
     // -------------------------------------------------------------
-    const approaching = !!useIls || landingLeg || this.phase === 'flare' || this.phase === 'rollout';
+    const approaching = !!useIls || landingLeg || pathOn && distToArr < 25000 || this.phase === 'flare' || this.phase === 'rollout';
     if (!approaching && this.phase !== 'takeoff' && !fm.wow && agl > 5) {
       // Never command a level below the terrain + 500 ft (e.g. a stale/low target must not fly the aircraft into the ground).
       const groundMsl = alt - agl;
       altTarget = Math.max(altTarget, groundMsl + MIN_SAFE_AGL_M);
     }
-    if (s.kind !== 'piston' && alt < SPEED_LIMIT_ALT_M && !approaching) spdT = Math.min(spdT, SPEED_LIMIT_KT);
-    spdT = clamp(spdT, s.vs1 * 1.3, s.vne * 0.85);
+    if (s.kind !== 'piston' && !approaching && !stage) {
+      // FAR 91.117: 250 KIAS below 10,000 ft - decelerating over the 1,500 ft above it so the speed is stable when the limit applies.
+      const lim = SPEED_LIMIT_KT + clamp((alt - SPEED_LIMIT_ALT_M) / (1500 * FT), 0, 1) * 50;
+      spdT = Math.min(spdT, lim);
+    }
+    spdT = clamp(spdT, minSpeedKt(fm), s.vne * 0.85);
+    if (this.nav && !this.spdSelected && !useIls && this.phase !== 'takeoff') this.spd = Math.round(spdT);
 
     // -------------------------------------------------------------
     // 7. LATERAL CONTROL (turn rate -> bank)
@@ -396,10 +435,11 @@ export class Autopilot {
     }
     // Speed & Stall Protection: NEVER pitch up into a stall!
     if (vsCmd > 0) {
-      if (kias < s.vs1 * 1.12) {
+      const vsRef = stallRefKt(fm);
+      if (kias < vsRef * 1.12) {
         // Airspeed near stall: lower nose immediately
         vsCmd = Math.min(0.2, vsCmd * 0.15);
-      } else if (kias < s.vs1 * 1.25) {
+      } else if (kias < vsRef * 1.2) {
         vsCmd *= 0.5;
       }
     }
@@ -412,8 +452,14 @@ export class Autopilot {
     const pitchIn = clamp(((gCmd - gamma) * 0.88) / s.maxPitchRate, -0.9, 0.9);
 
     // -------------------------------------------------------------
-    // 9. AUTOTHROTTLE
+    // 9. AUTOTHROTTLE (+ speedbrakes when idle thrust cannot slow the aircraft on the path)
     // -------------------------------------------------------------
+    if (s.hasSpeedbrake && this.phase !== 'takeoff' && this.phase !== 'flare' && this.phase !== 'rollout' && this.phase !== 'stopped') {
+      // Smoothly extended at most 60 %, only with idle thrust, and never with CONF 3 / FULL (Airbus FCOM limitation).
+      const want = fm.ctl.throttle < 0.06 && fm.ctl.flapsIdx < 3 && kias > spdT + 8 ? clamp((kias - spdT - 8) / 30, 0, 0.6) : 0;
+      this.sbCmd += clamp(want - this.sbCmd, -dt * 0.25, dt * 0.25);
+      speedbrakeCmd = this.sbCmd;
+    }
     if (this.phase !== 'takeoff' && this.phase !== 'flare' && this.phase !== 'rollout' && this.phase !== 'stopped') {
       // Damped speed hold: integral on speed error, minus acceleration feedback (stops the throttle hunting 0 <-> 1).
       const acc = dt > 1e-4 ? (kias - this.prevKias) / dt : 0;
@@ -425,7 +471,7 @@ export class Autopilot {
     // Mode annunciation follows what the aircraft is actually doing.
     if (this.phase === 'climb' || this.phase === 'cruise' || this.phase === 'descent') {
       const e = altTarget - alt;
-      this.phase = e > 90 ? 'climb' : e < -90 ? 'descent' : 'cruise';
+      this.phase = pathOn || e < -90 ? 'descent' : e > 90 ? 'climb' : 'cruise';
     }
 
     return {

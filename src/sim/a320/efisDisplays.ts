@@ -6,6 +6,8 @@
 import type { Ctx } from './displays';
 import { ND_RANGES } from './systems';
 import { atmosphere } from '../physics';
+import { bearing as gcBearing, haversine as gcDist, wrap180 as w180 } from '../geo';
+import { turnLeadM } from '../lnav';
 import { NAVAIDS, airportsNear } from '../../data/airports';
 
 type G = CanvasRenderingContext2D;
@@ -224,10 +226,24 @@ export function drawND(g: G, W: number, H: number, c: Ctx, side: 0 | 1 = 0) {
     }
     g.globalAlpha = 1;
   }
-  // --- flight plan ---
+  // --- flight plan: the active LEG (previous fix -> TO fix) then the rest, with fly-by turns drawn exactly where LNAV anticipates them ---
   if (showMap && rt.length) {
-    g.strokeStyle = COL.green; g.lineWidth = 5; g.beginPath(); g.moveTo(own.x, own.y); for (const w of rt) { const p = proj(w.lat, w.lon); g.lineTo(p.x, p.y); } g.stroke();
-    rt.forEach((w, i) => { const p = proj(w.lat, w.lon); if (!vis(p) && !plan) return; const col = i === 0 ? COL.white : COL.green; g.fillStyle = col; star(g, p.x, p.y, 13); g.fill(); T(g, w.name, p.x + 18, p.y - 18, 28, col, 'left'); });
+    const lf = h.legFrom?.() ?? null;
+    const fixes = lf ? [{ name: '', lat: lf.lat, lon: lf.lon }, ...rt] : rt;
+    const px = fixes.map((w) => proj(w.lat, w.lon));
+    const gsMs = Math.max(60, d.gsKt) * 0.514444;
+    g.strokeStyle = COL.green; g.lineWidth = 5; g.lineJoin = 'round'; g.beginPath(); g.moveTo(px[0].x, px[0].y);
+    for (let i = 1; i < px.length; i++) {
+      if (i < px.length - 1) {
+        const inC = gcBearing(fixes[i - 1].lat, fixes[i - 1].lon, fixes[i].lat, fixes[i].lon), outC = gcBearing(fixes[i].lat, fixes[i].lon, fixes[i + 1].lat, fixes[i + 1].lon);
+        const lead = turnLeadM(inC, outC, gsMs), dth = Math.abs(w180(outC - inC)) * D2R;
+        const legIn = gcDist(fixes[i - 1].lat, fixes[i - 1].lon, fixes[i].lat, fixes[i].lon), legOut = gcDist(fixes[i].lat, fixes[i].lon, fixes[i + 1].lat, fixes[i + 1].lon);
+        if (lead > 50 && dth > 0.05 && dth < 2.7 && lead < Math.min(legIn, legOut) * 0.9) { g.arcTo(px[i].x, px[i].y, px[i + 1].x, px[i + 1].y, (lead / 1852) * nmPx / Math.tan(dth / 2)); continue; }
+      }
+      g.lineTo(px[i].x, px[i].y);
+    }
+    g.stroke();
+    px.forEach((p, i) => { const fromFix = !!lf && i === 0; if (fromFix || (!vis(p) && !plan)) return; const toFix = i === (lf ? 1 : 0), col = toFix ? COL.white : COL.green; g.fillStyle = col; star(g, p.x, p.y, 13); g.fill(); T(g, fixes[i].name, p.x + 18, p.y - 18, 28, col, 'left'); });
   }
   // --- bearing pointers (ADF / VOR switches; 1 = single line, 2 = double line) ---
   const navInfo: ({ kind: 'VOR' | 'ADF'; ident: string; dNm: number } | null)[] = [null, null];
@@ -290,10 +306,10 @@ export function drawND(g: G, W: number, H: number, c: Ctx, side: 0 | 1 = 0) {
   } else T(g, '---/--', 34, 92, 36, COL.white, 'left');
   // --- header: TO waypoint (NAV / ARC / PLAN), ILS data (rose LS) ---
   if (showMap && rt.length) {
-    const dx = (rt[0].lon - pos.lon) * Math.cos(pos.lat * D2R), dy = rt[0].lat - pos.lat, dd = Math.hypot(dx, dy) * 60, brg = ((Math.atan2(dx, dy) * R2D + mv) % 360 + 360) % 360;
+    const dd = gcDist(pos.lat, pos.lon, rt[0].lat, rt[0].lon) / 1852, brg = ((gcBearing(pos.lat, pos.lon, rt[0].lat, rt[0].lon) + mv) % 360 + 360) % 360; // great-circle distance / bearing, magnetic
     const eta = new Date(c.utc.getTime() + dd / Math.max(60, d.gsKt) * 3600000);
     T(g, rt[0].name, 966, 40, 36, COL.white, 'right'); T(g, `${pad(brg, 3)}°`, 966, 84, 34, COL.green, 'right');
-    T(g, 'NM', 966, 128, 28, COL.cyan, 'right'); T(g, dd.toFixed(1), 924, 128, 34, COL.green, 'right'); T(g, `${pad(eta.getUTCHours(), 2)}:${pad(eta.getUTCMinutes(), 2)}`, 966, 172, 34, COL.green, 'right');
+    T(g, 'NM', 966, 128, 28, COL.cyan, 'right'); T(g, dd.toFixed(1), 896, 128, 34, COL.green, 'right'); T(g, `${pad(eta.getUTCHours(), 2)}:${pad(eta.getUTCMinutes(), 2)}`, 966, 172, 34, COL.green, 'right');
   } else if (lsMode && d.ils) { T(g, d.ils.ident, 966, 40, 30, COL.mag, 'right'); T(g, `${d.ils.distNm.toFixed(1)} NM`, 966, 84, 30, COL.white, 'right'); T(g, `CRS ${pad(((d.ils.courseTrue ?? hdgT) + mv + 360) % 360, 3)}`, 966, 128, 30, COL.mag, 'right'); }
   else if (lsMode) T(g, 'NO ILS', 966, 40, 30, COL.amber, 'right');
   // --- bottom corners: selected ADF / VOR data ---

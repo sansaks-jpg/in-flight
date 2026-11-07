@@ -136,7 +136,8 @@ export function AirportMiniMap({ game, hud }: { game: Game; hud: HudState }) {
         proj, at: performance.now(),
         geos: [...set.values()].map((a) => buildGeo(a, proj)),
         appr: ms.appr ? { x: proj.x(ms.appr.lon), z: proj.z(ms.appr.lat), hdg: ms.appr.hdg, ident: ms.appr.ident, ils: !!ms.appr.ils } : null,
-        route: ms.navPath.map(([la, lo]) => [proj.x(lo), proj.z(la)] as XZ),
+        // The legacy two-leg final path only exists when there is no flight plan; otherwise the plan (IAF -> FAF -> threshold) is the one route shown.
+        route: ms.flightPlan.length ? [] : ms.navPath.map(([la, lo]) => [proj.x(lo), proj.z(la)] as XZ),
         wps: ms.flightPlan.map((wp, i) => ({ p: [proj.x(wp.lon), proj.z(wp.lat)] as XZ, name: wp.name, type: wp.type, active: i === ms.activeWpIdx })),
         plan, trail, toP: [proj.x(game.cfg.to.lon), proj.z(game.cfg.to.lat)] as XZ,
         ctxAp, navaids, ctxRw,
@@ -356,16 +357,21 @@ export function AirportMiniMap({ game, hud }: { game: Game; hud: HudState }) {
             g.fillStyle = wp.active ? '#e7a0eb' : '#d7e1ea'; g.fillText(wp.name, x + 8, y - 5);
           }
         }
-        // active leg: aircraft → active fix, solid magenta, annotated with bearing/distance like an FMS
-        const aw = cache.wps[Math.min(cache.awIdx, cache.wps.length - 1)];
+        // active leg: previous fix -> active fix (the leg LNAV actually flies), solid magenta; a thin dashed line shows the direct course
+        // from the aircraft, annotated with bearing/distance like an FMS
+        const aw = cache.wps[Math.min(cache.awIdx, cache.wps.length - 1)], pw = cache.wps[Math.max(0, Math.min(cache.awIdx, cache.wps.length - 1) - 1)];
         if (aw) {
+          if (pw && pw !== aw) {
+            g.lineCap = 'round';
+            g.strokeStyle = '#0a0f14'; g.lineWidth = 4.4; line2(pw.p[0], pw.p[1], aw.p[0], aw.p[1]); g.stroke();
+            g.strokeStyle = '#e7a0eb'; g.lineWidth = 2.4; line2(pw.p[0], pw.p[1], aw.p[0], aw.p[1]); g.stroke();
+          }
           const dx = aw.p[0] - px, dz = aw.p[1] - pz, dm = Math.hypot(dx, dz);
           if (dm * k > 14) {
-            g.lineCap = 'round';
-            g.strokeStyle = '#0a0f14'; g.lineWidth = 4; line2(px, pz, aw.p[0], aw.p[1]); g.stroke();
-            g.strokeStyle = '#e7a0eb'; g.lineWidth = 2.2; line2(px, pz, aw.p[0], aw.p[1]); g.stroke();
+            g.lineCap = 'round'; g.setLineDash(DASH_PLAN);
+            g.strokeStyle = 'rgba(255,215,248,.75)'; g.lineWidth = 1.2; line2(px, pz, aw.p[0], aw.p[1]); g.stroke(); g.setLineDash(NO_DASH);
             if (dm * k > 90) {
-              const brg = (Math.atan2(dx, -dz) * R2D + 360) % 360, txt = `${Math.round(brg)}° ${(dm / M_PER_NM).toFixed(1)} NM`;
+              const brg = game.magHdg(Math.atan2(dx, -dz) * R2D), txt = `${String(Math.round(brg) % 360 || 360).padStart(3, '0')}°M ${(dm / M_PER_NM).toFixed(1)} NM`;
               const mx = sx(px + dx * 0.45, pz + dz * 0.45), my = sy(px + dx * 0.45, pz + dz * 0.45);
               g.font = '700 9px ui-sans-serif, system-ui'; g.textAlign = 'center'; g.textBaseline = 'middle';
               g.lineWidth = 3; g.strokeStyle = 'rgba(6,14,22,.85)'; g.strokeText(txt, mx, my - 7);
@@ -409,7 +415,7 @@ export function AirportMiniMap({ game, hud }: { game: Game; hud: HudState }) {
         g.restore();
         // AP heading bug (magnetic, like the HDG window it is set from) riding the same rose
         if (game.ap.on) {
-          const ab = wrap360(game.ap.hdg + game.magv) * D2R - up;
+          const ab = wrap360(game.ap.hdg) * D2R - up; // ap.hdg is stored TRUE (HDG window = magnetic); the rose is already placed at true angles
           g.save(); g.translate(cx + Math.sin(ab) * (R - 1), cy - Math.cos(ab) * (R - 1)); g.rotate(ab);
           g.fillStyle = '#4cc3ff';
           g.beginPath(); g.moveTo(0, -7); g.lineTo(-5.5, 2); g.lineTo(5.5, 2); g.closePath(); g.fill();

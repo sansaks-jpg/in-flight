@@ -269,8 +269,17 @@ export function MapPanel({
         const fp = gs?.flightPlan;
         if (gs && fp && fp.length > 0) {
           const pts = fp.map((wp) => map.project(wp.lat, wp.lon));
+          // Legs are great circles (the same path LNAV flies): sample the long ones so they curve correctly on the Mercator chart.
+          const linePts: [number, number][] = [];
+          fp.forEach((wp, i) => {
+            if (i > 0) {
+              const a = fp[i - 1], d = haversine(a.lat, a.lon, wp.lat, wp.lon);
+              if (d > 80000) { const gc = greatCircle(a.lat, a.lon, wp.lat, wp.lon, Math.min(48, Math.ceil(d / 60000))); for (let j = 1; j < gc.length - 1; j++) linePts.push(map.project(gc[j][0], gc[j][1]) as [number, number]); }
+            }
+            linePts.push(pts[i] as [number, number]);
+          });
           g.save(); g.lineJoin = 'round'; g.lineCap = 'round';
-          g.beginPath(); pts.forEach(([x, y], i) => (i ? g.lineTo(x, y) : g.moveTo(x, y)));
+          g.beginPath(); linePts.forEach(([x, y], i) => (i ? g.lineTo(x, y) : g.moveTo(x, y)));
           g.strokeStyle = 'rgba(0,0,0,0.55)'; g.lineWidth = compactMap ? 5 : 7; g.stroke();
           g.setLineDash(compactMap ? [] : [10, 8]); g.strokeStyle = p.navigation ? 'rgba(186,170,205,.5)' : COL.route; g.lineWidth = compactMap ? 2 : 3.5; g.stroke();
           g.restore();
@@ -278,9 +287,10 @@ export function MapPanel({
           if (p.navigation) {
             const active = fp[Math.min(gs.activeWpIdx, fp.length - 1)];
             const previous = fp[Math.max(0, gs.activeWpIdx - 1)];
-            const [ax, ay] = map.project(previous.lat, previous.lon);
-            const [bx, by] = map.project(active.lat, active.lon);
-            g.beginPath(); g.moveTo(ax, ay); g.lineTo(bx, by);
+            const legD = haversine(previous.lat, previous.lon, active.lat, active.lon);
+            g.beginPath();
+            if (legD > 80000) { const gc = greatCircle(previous.lat, previous.lon, active.lat, active.lon, Math.min(48, Math.ceil(legD / 60000))); gc.forEach(([la, lo], i) => { const [x, y] = map.project(la, lo); if (i) g.lineTo(x, y); else g.moveTo(x, y); }); }
+            else { const [ax, ay] = map.project(previous.lat, previous.lon), [bx, by] = map.project(active.lat, active.lon); g.moveTo(ax, ay); g.lineTo(bx, by); }
             g.strokeStyle = '#e7a0eb'; g.lineWidth = 3; g.stroke();
           }
 

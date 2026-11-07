@@ -14,6 +14,8 @@ export interface CockpitHost {
   setApTarget(t: 'hdg' | 'alt' | 'spd', v: number): void;
   toast(msg: string, kind?: 'info' | 'warn' | 'good'): void;
   route(): { name: string; lat: number; lon: number }[];
+  /** Fix the active leg starts from (null on the first leg): lets the ND draw the LEG the autopilot flies, not just a line to the TO fix. */
+  legFrom?(): { lat: number; lon: number } | null;
   position(): { lat: number; lon: number };
   magVar(hdg: number): number;
   /** Live flight data for the captain's EFB tablet. */
