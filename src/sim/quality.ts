@@ -28,9 +28,12 @@ export interface QualityProfile {
   maxAirports: number;
   /** 3D city is switched off above this AGL (m). */
   structureMaxAgl: number;
-  /** Extra roof-only ring around the 3x3 core while high enough. */
+  /** Extra roof-only ring around the 3x3 core while high enough (currently DISABLED on every
+   *  preset — the structures.ts branch is dormant until a tier opts in). */
   outerRing: boolean;
   clouds: number;
+  /** Rain / snow particle budget around the camera (arrays are allocated once for the largest preset). */
+  precipMax: number;
   buildingBudget: { full: number; roof: number; settlement: number };
   treeBudget: {
     count: number;
@@ -66,6 +69,7 @@ export const QUALITY: Record<QualityPreset, QualityProfile> = {
     structureMaxAgl: 0,
     outerRing: false,
     clouds: 14,
+    precipMax: 700,
     buildingBudget: { full: 0, roof: 0, settlement: 0 },
     treeBudget: { count: 0, maxDist: 0, step: 0, fullCount: 0, fullDist: 0 },
     terrainCore: 1500,
@@ -89,6 +93,7 @@ export const QUALITY: Record<QualityPreset, QualityProfile> = {
     structureMaxAgl: 9000,
     outerRing: false,
     clouds: 24,
+    precipMax: 1500,
     buildingBudget: { full: 0, roof: 0, settlement: 0 },
     treeBudget: { count: 850, maxDist: 3000, step: 16, fullCount: 850, fullDist: 3000 },
     terrainCore: 1800,
@@ -112,6 +117,7 @@ export const QUALITY: Record<QualityPreset, QualityProfile> = {
     structureMaxAgl: 13000,
     outerRing: false,
     clouds: 36,
+    precipMax: 2600,
     buildingBudget: { full: 600, roof: 850, settlement: 0 },
     treeBudget: { count: 850, maxDist: 3000, step: 16, fullCount: 850, fullDist: 3000 },
     terrainCore: 2500,
@@ -135,6 +141,7 @@ export const QUALITY: Record<QualityPreset, QualityProfile> = {
     structureMaxAgl: 16000,
     outerRing: false,
     clouds: 48,
+    precipMax: 4200,
     buildingBudget: { full: 900, roof: 1200, settlement: 350 },
     treeBudget: { count: 1500, maxDist: 3800, step: 14, fullCount: 1500, fullDist: 3800 },
     terrainCore: 3000,

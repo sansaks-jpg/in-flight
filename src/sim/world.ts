@@ -8,10 +8,14 @@ import { synthGround, SynthGround, Rect } from './airportGround';
 import { QualityPreset } from './storage';
 import { QUALITY } from './quality';
 import { sunPosition, simNowMs, nightLights } from './clock';
+import { CloudField, makeCloudTexture } from './clouds';
+import { LightningSystem } from './lightning';
+import { precipVisibility } from './liveWeather';
 
 /** The simulator always runs on real-world UTC time (see clock.ts); there is no manual time-of-day override. */
 export type TimeOfDay = 'live';
-export type Weather = 'clear' | 'scattered' | 'overcast';
+/** PAPI glide-slope thresholds per lamp (degrees) — module constant so the per-frame loop allocates nothing. */
+const PAPI_ANGLES = [2.5, 2.83, 3.17, 3.5];
 
 export interface RunwayGeom {
   ap: Airport;
@@ -135,32 +139,9 @@ const hashN = (a: number, b: number, s = 0) => {
   return v - Math.floor(v);
 };
 
-// Procedural multi-lobed puffy cumulus cloud texture with self-shadowed base
-function cloudTexture() {
-  const c = document.createElement('canvas');
-  c.width = c.height = 256;
-  const g = c.getContext('2d')!;
-
-  for (let i = 0; i < 28; i++) {
-    const x = 128 + (hashN(i, 1) - 0.5) * 110;
-    const y = 140 + (hashN(i, 2) - 0.5) * 55;
-    const r = 30 + hashN(i, 3) * 36;
-    const gr = g.createRadialGradient(x, y - r * 0.25, r * 0.1, x, y, r);
-    const isBase = y > 145;
-    const alpha = isBase ? 0.36 : 0.62;
-    gr.addColorStop(0, `rgba(255,255,255,${alpha})`);
-    gr.addColorStop(0.5, isBase ? 'rgba(215,220,230,0.26)' : 'rgba(245,248,255,0.32)');
-    gr.addColorStop(1, 'rgba(255,255,255,0)');
-    g.fillStyle = gr;
-    g.beginPath();
-    g.arc(x, y, r, 0, Math.PI * 2);
-    g.fill();
-  }
-
-  const t = new THREE.CanvasTexture(c);
-  t.colorSpace = THREE.SRGBColorSpace;
-  return t;
-}
+// Scratch colours for setSun (runs on the 15 s solar clock, but stays allocation-free anyway).
+const tmpCloudTint = new THREE.Color();
+const CLOUD_WHITE = new THREE.Color(1, 1, 1);
 
 function runwayTexture(rw: Runway, len: number, wid: number) {
   if (!isPaved(rw.surface)) return unpavedRunwayTexture(rw, len, wid);
@@ -418,11 +399,13 @@ export class World {
   hemi: THREE.HemisphereLight;
   sky: THREE.Mesh;
   skyMat: THREE.ShaderMaterial;
-  clouds: THREE.Sprite[] = [];
-  cloudCover = 0.4;
-  cloudTex: THREE.Texture;
-  private cloudTarget = 40;
+  /** Live-weather cloud field (one instanced draw call; see clouds.ts). */
+  clouds: CloudField;
+  /** Cloud-to-ground lightning with a distance hook for procedural thunder (see lightning.ts). */
+  lightning: LightningSystem;
   airports = new Map<string, AirportScene>();
+  /** Reused buffer for structures.update (no per-frame array allocation). */
+  private airportList: Airport[] = [];
   runways: RunwayGeom[] = [];
   tod: TimeOfDay = 'live';
   /** Lighting direction (never below ~4 degrees: at night it acts as faint moonlight). */
@@ -432,9 +415,13 @@ export class World {
   sunAzimuth = 180;
   nightAmount = 0;
   private cloudColor = new THREE.Color(0xffffff);
+  /** Shadowed flank tint for the cloud impostors (derived from cloudColor in setSun). */
+  cloudShadow = new THREE.Color(0.5, 0.53, 0.6);
+  /** Live wind (m/s, world axes) at the cloud decks, refreshed by the game at ~1 Hz (setCloudWind). */
+  private windDriftX = 0;
+  private windDriftZ = 0;
   /** Live (real-world) weather state driving clouds, light, fog and rain. */
-  wx = { cover: [0.1, 0, 0.1] as [number, number, number], baseMsl: 1800, rain: 0, snow: 0, visM: 30000, thunder: false };
-  private flash = 0; private nextFlash = 5;
+  wx = { cover: [0.1, 0, 0.1] as [number, number, number], baseMsl: 1800, rain: 0, snow: 0, visM: 30000, visEffM: 30000, thunder: false };
   private _grey = new THREE.Color();
   private lastSunClockMs = 0;
   private sunFog = new THREE.FogExp2(0xffffff, 0.00003);
@@ -446,10 +433,12 @@ export class World {
   private projScreenMatrix = new THREE.Matrix4();
   private lastAcLat = 0;
   private lastAcLon = 0;
+  /** Preallocated terrain callback for the lightning strikes (no closure churn in the frame loop). */
+  private heightAtFn = (x: number, z: number): number => this.terrain.heightAt(x, z);
 
   constructor(
     public proj: Projection,
-    public opts: { quality: QualityPreset; style: string; tod: TimeOfDay; weather: Weather; maxAniso: number }
+    public opts: { quality: QualityPreset; style: string; tod: TimeOfDay; maxAniso: number }
   ) {
     this.terrain = new Terrain(proj, opts.quality, this.scene, opts.maxAniso);
     this.terrain.styleId = opts.style;
@@ -506,32 +495,9 @@ export class World {
     this.sky.renderOrder = -10;
     this.scene.add(this.sky);
 
-    this.cloudTex = cloudTexture();
-    this.setWeather(opts.weather);
+    this.clouds = new CloudField(this.scene, QUALITY[opts.quality]?.clouds ?? 40, makeCloudTexture());
+    this.lightning = new LightningSystem(this.scene);
     this.updateSunFromClock(true);
-    this.syncCloudBudget(QUALITY[opts.quality]?.clouds ?? 40);
-  }
-
-  private makeCloud(): THREE.Sprite {
-    const sp = new THREE.Sprite(
-      new THREE.SpriteMaterial({
-        map: this.cloudTex,
-        transparent: true,
-        depthWrite: false,
-        opacity: 0.92,
-        fog: true,
-      })
-    );
-    sp.visible = false;
-    this.scene.add(sp);
-    this.clouds.push(sp);
-    return sp;
-  }
-
-  private syncCloudBudget(target: number) {
-    this.cloudTarget = target;
-    while (this.clouds.length < target) this.makeCloud();
-    for (let i = target; i < this.clouds.length; i++) this.clouds[i].visible = false;
   }
 
   setQuality(q: QualityPreset) {
@@ -540,7 +506,7 @@ export class World {
     this.terrain.setQuality(q);
     this.structures.setQuality(q);
     this.structures.setNight(this.nightAmount);
-    this.syncCloudBudget(QUALITY[q].clouds);
+    this.clouds.setBudget(QUALITY[q].clouds);
     // Terminal detail / airport count is preset-specific. Rebuild the (small) airport set
     // around aircraft current position immediately so a quality change doesn't leave heavy meshes.
     const lat = this.lastAcLat || this.proj.lat(0);
@@ -548,19 +514,21 @@ export class World {
     this.rebuildAirports(lat, lon, true);
   }
 
-  setWeather(w: Weather) {
-    this.cloudCover = w === 'clear' ? 0.12 : w === 'scattered' ? 0.42 : 0.8;
-  }
-
   /** Overall sky obscuration 0..1 (drives overcast lighting and the grey sky). */
   overcast() { return Math.min(1, Math.max(this.wx.cover[0], this.wx.cover[1] * 0.85, this.wx.cover[2] * 0.4)); }
 
   /** Apply real weather: cloud layers (low / mid / high), ceiling, precipitation, visibility. */
-  setLiveWeather(cover: [number, number, number], baseAglM: number | null, groundM: number, rain: number, snow: number, visM: number, thunder: boolean) {
+  setLiveWeather(cover: [number, number, number], baseAglM: number | null, groundM: number, rain: number, snow: number, visM: number, thunder: boolean, midBaseMsl = 3100, highBaseMsl = 9160) {
     this.wx.cover = cover; this.wx.baseMsl = groundM + (baseAglM ?? 1800); this.wx.rain = rain; this.wx.snow = snow; this.wx.visM = visM; this.wx.thunder = thunder;
-    this.cloudCover = Math.max(cover[0], cover[1], cover[2]);
+    // precipitation haze: showers cut horizontal visibility beyond the station METAR value
+    this.wx.visEffM = precipVisibility(visM, rain, snow);
+    this.clouds.setLiveWeather(cover, this.wx.baseMsl, midBaseMsl, highBaseMsl);
+    this.lightning.setActive(thunder);
     this.updateSunFromClock(true);
   }
+
+  /** Live wind (m/s, world axes) at the cloud decks; the game refreshes this at ~1 Hz from the wind profile. */
+  setCloudWind(x: number, z: number) { this.windDriftX = x; this.windDriftZ = z; }
 
   /**
    * Recomputes the sun from the real-world UTC clock at the aircraft's current position
@@ -604,18 +572,23 @@ export class World {
     this.hemi.intensity = c.hemi * (1 + 0.18 * ov) * (1 - 0.25 * wet);
     // Exponential fog (see rationale in the original two-state version): same colour as the sky horizon haze.
     this.sunFog.color.copy(c.haze);
-    // real visibility (Koschmieder: extinction = 3.912 / V); unlimited visibility leaves the scene's own aerial perspective alone
-    const visD = this.wx.visM < 20000 ? 3.912 / Math.max(150, this.wx.visM) : 0;
+    // real visibility (Koschmieder: extinction = 3.912 / V), capped further by precipitation haze;
+    // unlimited visibility leaves the scene's own aerial perspective alone
+    const visM = this.wx.visEffM;
+    const visD = visM < 20000 ? 3.912 / Math.max(150, visM) : 0;
     this.sunFog.density = Math.max(c.fog, visD * 0.9);
     this.scene.fog = this.sunFog;
     this.terrain.setEnvironment(c.haze, this.sunDir);
     this.detail.setEnvironment(c.haze, this.sunDir);
     this.nightAmount = nightLights(elDeg);
     this.structures.setNight(this.nightAmount);
-    // Cloud tint: white by day, warm at sunset, dark grey-blue at night.
-    const dayL = Math.max(0, Math.min(1, (elDeg + 6) / 14));
-    this.cloudColor.setRGB(0.16, 0.19, 0.28).lerp(c.hor.clone().lerp(c.sun, 0.25).lerp(new THREE.Color(1, 1, 1), Math.min(1, Math.max(0, (elDeg - 2) / 20))), dayL);
+    // Cloud tint: white by day, warm at sunset, dark grey-blue at night (scratch colours — no allocation).
+    const dayL = clamp((elDeg + 6) / 14, 0, 1);
+    tmpCloudTint.copy(c.hor).lerp(c.sun, 0.25).lerp(CLOUD_WHITE, clamp((elDeg - 2) / 20, 0, 1));
+    this.cloudColor.setRGB(0.16, 0.19, 0.28).lerp(tmpCloudTint, dayL);
     this.cloudColor.multiplyScalar(1 - 0.38 * Math.min(1, ov * (0.4 + wet)));
+    // shadow flank for the impostor shading: darker, pulled slightly toward the ground tone
+    this.cloudShadow.copy(this.cloudColor).multiplyScalar(0.52).lerp(c.ground, 0.15);
   }
 
   setStyle(id: string) {
@@ -1048,7 +1021,11 @@ export class World {
     this.updateSunFromClock();
     this.terrain.update(acPos.x, acPos.z, time, this.sunDir, frustum);
     this.detail.update(acPos.x, acPos.z, agl, time, this.sunDir);
-    this.structures.update(acPos.x, acPos.z, agl, [...this.airports.values()].map((s) => s.ap), frustum);
+    // reuse the airport buffer instead of allocating a fresh array every frame
+    let n = 0;
+    for (const sc of this.airports.values()) this.airportList[n++] = sc.ap;
+    if (this.airportList.length !== n) this.airportList.length = n;
+    this.structures.update(acPos.x, acPos.z, agl, this.airportList, frustum);
     this.sky.position.copy(camPos);
     this.sunLight.position.copy(camPos).addScaledVector(this.sunDir, 1000);
     this.sunLight.target.position.copy(camPos);
@@ -1060,9 +1037,9 @@ export class World {
         const d = dx * p.dirx + dz * p.dirz;
         if (d < 200 || d > 18000) continue;
         const ang = Math.atan2(acPos.y - p.elev, d) * R2D;
-        [2.5, 2.83, 3.17, 3.5].forEach((thr, i) => {
-          p.boxes[i].material = ang > thr ? this.papiOn : this.papiOff;
-        });
+        for (let i = 0; i < PAPI_ANGLES.length && i < p.boxes.length; i++) {
+          p.boxes[i].material = ang > PAPI_ANGLES[i] ? this.papiOn : this.papiOff;
+        }
       }
 
       // Animate windsock flutter
@@ -1080,45 +1057,10 @@ export class World {
       }
     }
 
-    this.updateClouds(camPos, time);
-  }
-
-  private updateClouds(cam: THREE.Vector3, time: number) {
-    // three real layers: low (base = METAR ceiling / dew-point estimate), mid (~4.5 km), high cirrus (~9 km)
-    const cell = 6500;
-    const target = this.cloudTarget;
-    const R = Math.ceil(Math.sqrt(target) / 2) + 1;
-    const cx = Math.floor(cam.x / cell), cz = Math.floor(cam.z / cell);
-    let k = 0;
-    const cov = this.wx.cover, lowBase = this.wx.baseMsl;
-    for (let i = -R; i <= R && k < target; i++) {
-      for (let j = -R; j <= R && k < target; j++) {
-        const gx = cx + i, gz = cz + j;
-        for (let layer = 0; layer < 3 && k < target; layer++) {
-          const c = cov[layer];
-          if (c <= 0.04 || hashN(gx, gz, 1 + layer * 11) > Math.min(1, c * 1.05)) continue;
-          const sp = this.clouds[k++];
-          const base = layer === 0 ? lowBase + hashN(gx, gz, 4) * 220 : layer === 1 ? 4300 + hashN(gx, gz, 3) * 900 : 8800 + hashN(gx, gz, 8) * 900;
-          // fuller layers merge into a continuous deck: bigger, flatter sprites
-          const merge = 0.75 + c * 0.9;
-          const sz = (layer === 0 ? 3800 : layer === 1 ? 5600 : 7600) * (0.7 + hashN(gx, gz, 5) * 0.8) * merge;
-          sp.position.set((gx + hashN(gx, gz, 6)) * cell + time * 3, base, (gz + hashN(gx, gz, 7)) * cell);
-          sp.scale.set(sz, sz * (layer === 0 && c > 0.7 ? 0.3 : 0.46), 1);
-          const d = Math.hypot(sp.position.x - cam.x, sp.position.y - cam.y, sp.position.z - cam.z);
-          const m = sp.material as THREE.SpriteMaterial;
-          m.opacity = clamp((d - 250) / 700, 0, 1) * (layer === 2 ? 0.55 : 0.92);
-          sp.visible = m.opacity > 0.02;
-          m.color.copy(this.cloudColor);
-        }
-      }
-    }
-    for (; k < target; k++) this.clouds[k].visible = false;
-    for (let i = target; i < this.clouds.length; i++) this.clouds[i].visible = false;
-    // thunderstorm: occasional lightning flash lights the whole scene
-    if (this.wx.thunder) {
-      this.nextFlash -= 1 / 60; if (this.nextFlash <= 0) { this.flash = 0.35; this.nextFlash = 3 + Math.random() * 9; }
-    }
-    if (this.flash > 0) { this.flash -= 1 / 60; this.hemi.intensity += this.flash * 3.5 * (Math.random() > 0.4 ? 1 : 0.3); if (this.flash <= 0) this.updateSunFromClock(true); }
+    // clouds advect with the live wind (World clock freezes while paused, so the drift freezes too);
+    // lightning shares the same clock and hooks the host for distance-delayed thunder audio
+    this.clouds.update(camPos, time, this.sunDir, this.cloudColor, this.cloudShadow, this.windDriftX, this.windDriftZ);
+    this.lightning.update(time, camPos, this.wx.baseMsl, this.heightAtFn);
   }
 
   dispose() {
@@ -1126,7 +1068,8 @@ export class World {
     this.detail.clear();
     this.structures.dispose();
     for (const [id, sc] of this.airports) this.removeAirport(id, sc);
-    this.cloudTex.dispose();
+    this.clouds.dispose();
+    this.lightning.dispose();
     this.papiOn.dispose();
     this.papiOff.dispose();
     this.strobeOn.dispose();

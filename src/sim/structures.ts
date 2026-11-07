@@ -601,6 +601,13 @@ function disposeGroup(group: THREE.Group) {
   });
 }
 
+/** Per-tile material clones so a tile can fade in/out (anti pop-in) without touching other tiles.
+ *  The clones share the same shader program (patchBuildingShader re-applies the same cache key). */
+interface TileMats { solid: THREE.MeshLambertMaterial; water: THREE.MeshPhongMaterial; tree: THREE.MeshLambertMaterial | null }
+
+/** Dispose the per-tile material clones (the originals on the Structures instance outlive them). */
+function disposeTileMats(mats: TileMats) { mats.solid.dispose(); mats.water.dispose(); if (mats.tree) mats.tree.dispose(); }
+
 interface TileEntry {
   key: string;
   group: THREE.Group;
@@ -608,11 +615,16 @@ interface TileEntry {
   isProcedural: boolean;
   lights: THREE.InstancedMesh | null;
   lastSeen?: number;
+  /** 0..1 opacity of this tile's meshes: fades in when streamed, out at the AGL gate / prune. */
+  fade: number;
+  fadeTgt: number;
+  mats: TileMats;
 }
 
 interface BuiltTile {
   group: THREE.Group;
   lights: THREE.InstancedMesh | null;
+  mats: TileMats;
 }
 
 /**
@@ -912,6 +924,8 @@ export class Structures {
   private buildQueue: { key: string; area: Area; x: number; z: number; bounds: TileBounds; tries: number; outer: boolean }[] = [];
   /** Deferred tree scatter/instance jobs, processed a few grid rows per frame. */
   private treeJobs = new Map<string, TreeJob>();
+  /** Wall-clock timestamp of the previous update() call — drives the per-tile fade. */
+  private lastFrameMs = 0;
 
   constructor(
     private proj: Projection,
@@ -929,6 +943,29 @@ export class Structures {
 
   private get profile(): QualityProfile { return QUALITY[this.quality]; }
 
+  /** Per-tile material clones (shader-patched like the originals, sharing the same program cache key). */
+  private cloneTileMats(): TileMats {
+    const solid = this.solidMat.clone();
+    const water = this.waterMat.clone();
+    patchBuildingShader(solid, { ...this.uniforms, ...this.uniformsNoise });
+    solid.opacity = 0; solid.transparent = true;
+    water.opacity = 0; water.transparent = true;
+    return { solid, water, tree: null };
+  }
+
+  /** Advance every tile's fade toward its target and drive group visibility + material opacity.
+   *  Fade-in 450 ms when a tile streams in; fade-out 300 ms at the AGL gate, retention or prune. */
+  private stepTileFades(dtMs: number) {
+    for (const t of this.tiles.values()) {
+      t.fade = Math.max(0, Math.min(1, t.fade + (t.fadeTgt > t.fade ? dtMs / 450 : -dtMs / 300)));
+      const op = t.fade, transparent = op < 0.999;
+      t.mats.solid.opacity = op; t.mats.solid.transparent = transparent;
+      t.mats.water.opacity = op; t.mats.water.transparent = transparent;
+      if (t.mats.tree) { t.mats.tree.opacity = op; t.mats.tree.transparent = transparent; }
+      t.group.visible = t.fade > 0.02;
+    }
+  }
+
   setQuality(q: QualityPreset) {
     if (q === this.quality) return;
     this.quality = q;
@@ -941,6 +978,7 @@ export class Structures {
     for (const [, t] of [...this.tiles]) {
       this.group.remove(t.group);
       disposeGroup(t.group);
+      disposeTileMats(t.mats);
     }
     this.tiles.clear();
     this.requested.clear();
@@ -1025,8 +1063,15 @@ export class Structures {
       return;
     }
     const cityOn = agl <= profile.structureMaxAgl;
+    // Frame delta for the per-tile fade (structures.update runs once per rendered frame).
+    const nowMs = performance.now();
+    const dtMs = Math.min(100, Math.max(0, nowMs - this.lastFrameMs));
+    this.lastFrameMs = nowMs;
     if (!cityOn) {
-      for (const t of this.tiles.values()) t.group.visible = false;
+      // Cross the structureMaxAgl gate by fading the whole city layer instead of vanishing it,
+      // which used to pop every building in view in a single frame.
+      for (const t of this.tiles.values()) t.fadeTgt = 0;
+      this.stepTileFades(dtMs);
       return;
     }
 
@@ -1048,7 +1093,10 @@ export class Structures {
       const built = this.buildAreaGroup(job.area, job.outer, job.bounds, false, job.key);
       this.group.remove(entry.group);
       disposeGroup(entry.group);
-      built.group.visible = entry.group.visible;
+      disposeTileMats(entry.mats);
+      // seamless procedural -> MVT swap: inherit the old tile's fade so nothing pops at the swap
+      built.mats.solid.opacity = entry.fade; built.mats.solid.transparent = entry.fade < 0.999;
+      built.mats.water.opacity = entry.fade; built.mats.water.transparent = entry.fade < 0.999;
       this.tiles.set(job.key, {
         key: job.key,
         group: built.group,
@@ -1056,6 +1104,9 @@ export class Structures {
         isProcedural: false,
         lights: built.lights,
         lastSeen: entry.lastSeen || performance.now(),
+        fade: entry.fade,
+        fadeTgt: entry.fadeTgt,
+        mats: built.mats,
       });
       if (built.lights) built.lights.visible = this.uniforms.uSunset.value > 0.5;
       break;
@@ -1071,7 +1122,8 @@ export class Structures {
     const cx = Math.floor(lonToTileXf(lon, ZOOM));
     const cy = Math.floor(latToTileYf(lat, ZOOM));
 
-    // Stream 3x3 (plus a roof-only outer ring at altitude on ultra) tiles around the aircraft.
+    // Stream 3x3 tiles around the aircraft. (The outerRing tier flag exists but is disabled on
+    // every preset, so the 5x5 roof-only branch never engages today.)
     const ring = profile.outerRing && agl > OUTER_RING_AGL ? 2 : 1;
     const wanted = new Set<string>();
     const now = performance.now();
@@ -1110,14 +1162,14 @@ export class Structures {
           const t = this.tiles.get(key);
           if (t) {
             t.lastSeen = now;
-            t.group.visible = true;
+            t.fadeTgt = 1; // visibility itself is driven by the fade (see stepTileFades)
           } else {
             this.loadTile(key, tx, ty, Math.max(Math.abs(dx), Math.abs(dy)) > 1);
           }
         } else {
           const t = this.tiles.get(key);
           if (t) {
-            t.group.visible = false;
+            t.fadeTgt = 0;
             // Graceful retention: keep in memory for up to 6s
             if (now - (t.lastSeen || 0) < 6000) {
               wanted.add(key);
@@ -1127,11 +1179,16 @@ export class Structures {
       }
     }
 
+    // Advance the per-tile fades BEFORE pruning so tiles leaving the wanted set dissolve first.
+    this.stepTileFades(dtMs);
+
     // Prune distant tiles
     for (const [key, t] of this.tiles) {
       if (!wanted.has(key)) {
+        if (t.fade > 0.02) { t.fadeTgt = 0; continue; } // dissolve first, dispose on a later pass
         this.group.remove(t.group);
         disposeGroup(t.group);
+        disposeTileMats(t.mats);
         this.tiles.delete(key);
         this.treeJobs.delete(key);
         // Allow a re-entry to rebuild from the MVT cache instead of keeping the procedural stand-in.
@@ -1158,7 +1215,7 @@ export class Structures {
     const procArea = generateProceduralArea(minLat, minLon, maxLat, maxLon, this.profile);
     const proc = this.buildAreaGroup(procArea, outer, bounds, true, key);
     proc.group.visible = true;
-    this.tiles.set(key, { key, group: proc.group, area: procArea, isProcedural: true, lights: proc.lights, lastSeen: performance.now() });
+    this.tiles.set(key, { key, group: proc.group, area: procArea, isProcedural: true, lights: proc.lights, lastSeen: performance.now(), fade: 0, fadeTgt: 1, mats: proc.mats });
 
     // 2. Fetch real 1:1 OpenFreeMap MVT vector data (<80ms CDN)
     if (!this.requested.has(key)) {
@@ -1659,9 +1716,11 @@ export class Structures {
       }
     }
 
-    const sm = makeMesh(solid, this.solidMat);
+    // Per-tile material clones: they start fully transparent and fade in via stepTileFades (anti pop-in).
+    const mats = this.cloneTileMats();
+    const sm = makeMesh(solid, mats.solid);
     if (sm) group.add(sm);
-    const wm = makeMesh(liquid, this.waterMat);
+    const wm = makeMesh(liquid, mats.water);
     if (wm) { wm.renderOrder = 1; group.add(wm); }
 
     // 4. Hybrid 1:1 3D Tropical Trees (Satellite Green-Pixel Canopy Detection + OSM Forests)
@@ -1683,7 +1742,7 @@ export class Structures {
     }
 
     this.group.add(group);
-    return { group, lights: lightInst };
+    return { group, lights: lightInst, mats };
   }
 
   /** Scatter one canopy-grid row. Called from processTreeJobs with a small per-frame budget. */
@@ -1792,8 +1851,18 @@ export class Structures {
 
     const glbGeos = getGlbTreeGeometries();
     const glbMat = getGlbTreeMaterial();
+    // Per-tile tree material clone so the canopy fades with the tile (entry guaranteed alive:
+    // processTreeJobs drops jobs whose tile was pruned before calling finishTreeJob).
+    const entry = this.tiles.get(job.key);
+    if (entry && !entry.mats.tree) {
+      const treeMat = glbMat.clone();
+      treeMat.opacity = entry.fade;
+      treeMat.transparent = entry.fade < 0.999;
+      entry.mats.tree = treeMat;
+    }
+    const treeMat = (entry && entry.mats.tree) || glbMat;
     for (let v = 0; v < 2; v++) {
-      addInstances(buckets[v], glbGeos[v], glbMat, -0.2);
+      addInstances(buckets[v], glbGeos[v], treeMat, -0.2);
     }
   }
 
@@ -1804,6 +1873,7 @@ export class Structures {
     for (const [, t] of [...this.tiles]) {
       this.group.remove(t.group);
       disposeGroup(t.group);
+      disposeTileMats(t.mats);
     }
     this.tiles.clear();
     this.requested.clear();
@@ -1813,6 +1883,7 @@ export class Structures {
     for (const t of this.tiles.values()) {
       this.group.remove(t.group);
       disposeGroup(t.group);
+      disposeTileMats(t.mats);
     }
     this.tiles.clear();
     this.requested.clear();

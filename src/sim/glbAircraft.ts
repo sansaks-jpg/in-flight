@@ -27,22 +27,33 @@ interface ModelCfg {
   lights: Lights;
 }
 
-const CFG: Record<string, ModelCfg> = {
-  // Cessna 172: NLM re-export (nose toward +Z, span 3.69 m, length 3.69 m incl. spinner). Rotate PI to face -Z.
-  // Scale to the real 11.0 m span / 8.28 m length; the Tyre meshes bottom out at native y≈0, so the offset
-  // registers them exactly onto the -1.05 m gear contacts.
-  swift: { url: c172Url, rotY: Math.PI, scale: [11.0 / 3.69, 11.0 / 3.69, 8.28 / 3.69], offset: [0, -1.06, 0.2], lights: { wing: [5.5, 0.96, 0.95], tail: [0, 1.45, 4.2], beacon: [0, 1.62, 3.8], landing: [0, -0.2, -4.1] } },
+/** Per-type registration (exported so the scale verification can check it against specs.ts). */
+export const CFG: Record<string, ModelCfg> = {
+  // Cessna 172: NLM re-export (nose toward +Z). Rotate PI to face -Z. Native extents (KHR_mesh_quantization,
+  // i.e. after GPU denormalisation): X 3.6894 m, Y 0.8967 m with the tyre bottoms at native y≈0.003, Z 2.6696 m
+  // — the file is span-long and nose-short, so the Z scale must differ from X/Y to hit the real 8.28 m length.
+  // Offset: the tyre bottoms register onto the -1.05 m gear contacts (native y≈0) AND the wheel stations line up
+  // with the physics contacts — the decoded wheel cluster sits at file z 0.397 (mains) / 0.969 (nose), so
+  // offsetZ = 0.475 + 0.397 × scaleZ puts the MAIN wheels exactly on their +0.475 m station (nose lands 0.12 m
+  // off its -1.18 m station; the file's wheelbase is 1.77 m vs the real 1.655 m).
+  swift: { url: c172Url, rotY: Math.PI, scale: [11.0 / 3.6894, 11.0 / 3.6894, 8.28 / 2.6696], offset: [0, -1.06, 1.706], lights: { wing: [5.5, 0.96, 2.46], tail: [0, 1.45, 5.71], beacon: [0, 1.62, 5.31], landing: [0, -0.2, -2.15] } },
   // ATR 72-600: metres, nose toward -X (27.2 x 26.87 x 7.62 m). Main gear at model x=-0.85, wheel bottoms y=-3.8.
   trek: { url: atr72Url, rotY: -Math.PI / 2, scale: [1, 1, 1], offset: [0, 1.75, 1.95], lights: { wing: [13.44, 1.43, 1.82], tail: [0, 5.3, 15.5], beacon: [0, 1.15, -2.5], landing: [0, -1.2, -10.8] } },
-  // A320: the current export stores the nose toward +Z, so it is rotated PI to face -Z. Per-axis scale to the
-  // real 34.10 m span / 37.57 m length / 11.76 m height; the fuselage belly registers ~1.8 m above the -3.3 m
-  // gear contact and the fuselage centre lands on the main-gear station (z≈+1.2).
-  sky: { url: a320Url, rotY: Math.PI, scale: [0.2283, 0.2272, 0.2332], offset: [0, -2.1, 29.0], lights: { wing: [17.03, 0.83, 5.18], tail: [0, 1.8, 20.9], beacon: [0, 1.95, -6.0], landing: [0, -1.6, -11.2] } },
+  // A320: the current export stores the nose toward +Z, so it is rotated PI to face -Z. Rendered extents
+  // (EXT_mesh_gpu_instancing-aware, measured with the app's own GLTFLoader): X 142.1863, Y 44.5593 (native
+  // minY -1.620 = fuselage belly, maxY 42.939 = fin tip, gear-less), and Z 149.3368 — the raw union was
+  // 195.11 because the z≈0 instancing proxy (7 instances at file z 82.1..173.7, INSIDE the fuselage) and
+  // node translations shifted the union; only the main Object_4 body spans the airframe. Per-axis scale
+  // hits the real 34.10 m span / 37.57 m length and a tail-top of 8.46 m over the CG (= 11.76 m over the
+  // ground at rest); the belly registers 0.83 m above the -3.3 m gear contact and the fuselage centre lands
+  // on the main-gear station (z≈+1.2).
+  sky: { url: a320Url, rotY: Math.PI, scale: [34.1 / 142.1863, 10.928 / 44.5593, 37.57 / 149.3368], offset: [0, -2.071, 31.247], lights: { wing: [17.03, 0.83, 5.18], tail: [0, 1.8, 19.5], beacon: [0, 1.95, -6.0], landing: [0, -1.6, -11.2] } },
 };
 
 const loader = new GLTFLoader();
 loader.setMeshoptDecoder(MeshoptDecoder);
 const cache = new Map<string, Promise<THREE.Group>>();
+const _fwd = new THREE.Vector3(); // shared scratch for the per-frame forward check (zero allocation)
 function loadScene(url: string): Promise<THREE.Group> {
   let p = cache.get(url);
   if (!p) {
@@ -99,6 +110,7 @@ function glowTexture() {
 
 interface Spinner { pivot: THREE.Object3D; axis: 'x' | 'z'; engine: number; blades: THREE.Object3D[]; disc?: THREE.Mesh; fan: boolean; dir: number }
 interface GearPart { objs: THREE.Object3D[]; nose: boolean; drop: number }
+interface ProcGear { g: THREE.Group; nose: boolean; side: number; wheels: THREE.Object3D[]; r: number; attachY: number }
 
 export async function loadAircraftVisual(spec: AircraftSpec): Promise<AircraftVisual> {
   const cfg = CFG[spec.id];
@@ -156,7 +168,10 @@ export async function loadAircraftVisual(spec: AircraftSpec): Promise<AircraftVi
       const disc = new THREE.Mesh(new THREE.CircleGeometry(0.95, 32), discMat()); pivot.add(disc); disc.visible = false;
       spinners.push({ pivot, axis: 'z', engine: 0, blades: [propNode], disc, fan: false, dir: 1 });
     } else {
-      // Cessna 172: carve the two propeller blades out of the baked mesh (thin slab at the front, outside the spinner radius).
+      // Cessna 172 legacy fallback: carve the propeller blades out of the baked mesh. DORMANT with
+      // the current c172.glb (which carries an 'Object_50' prop node, taken by the branch above);
+      // the hardcoded hub below matches the OLD NLM frame, not the measured ±1.85 m X extent — do
+      // not rely on this path without re-calibrating the hub against the file in question.
       const hub = new THREE.Vector3(-3.775, -0.14, 0);
       const meshes: THREE.Mesh[] = []; scene.traverse((o) => { if ((o as THREE.Mesh).isMesh) meshes.push(o as THREE.Mesh); });
       for (const m of meshes) {
@@ -186,7 +201,9 @@ export async function loadAircraftVisual(spec: AircraftSpec): Promise<AircraftVi
     const lists = { nose: ['Cylinder.020_Roda_0', 'Cylinder.020_Silver_0', 'Cylinder.021_Silver_0', 'Circle.027_Body White_0', 'Cube.028_Silver_0'], main: ['Cylinder.022_Roda_0', 'Cylinder.022_Silver_0', 'Cylinder.023_Silver_0', 'Cube.027_Body White_0'] };
     for (const [k, list] of Object.entries(lists)) gearParts.push({ objs: list.map(byName).filter(Boolean) as THREE.Object3D[], nose: k === 'nose', drop: 1.4 });
   } else if (spec.id === 'sky') {
-    // A320: spin the fan wheels (engine axis = Z)
+    // A320: spin the fan wheels (engine axis = Z). The CURRENT export carries no meshes named
+    // 'fanWheel'/'fanWheel_001' (nodes: Object_4, Object_211, one unnamed), so this wiring stays
+    // dormant today and lights up again with a re-export that names its fan discs.
     (['fanWheel', 'fanWheel_001'] as const).forEach((n, k) => {
       const m = byName(n); if (!m) return;
       const hub = sceneBox(m).getCenter(new THREE.Vector3());
@@ -199,7 +216,7 @@ export async function loadAircraftVisual(spec: AircraftSpec): Promise<AircraftVi
   const metal = new THREE.MeshStandardMaterial({ color: 0xaab0b8, roughness: 0.35, metalness: 0.85 });
   const dark = new THREE.MeshStandardMaterial({ color: 0x24282e, roughness: 0.7, metalness: 0.3 });
   const rubber = new THREE.MeshStandardMaterial({ color: 0x101113, roughness: 0.95 });
-  const procGear: { g: THREE.Group; nose: boolean; side: number; wheels: THREE.Object3D[]; r: number }[] = [];
+  const procGear: ProcGear[] = [];
   if (spec.id === 'sky') {
     spec.gear.forEach((gs) => {
       const [gx, gy, gz] = gs.pos; const nose = !!gs.nose; const r = nose ? spec.wheelR[1] : spec.wheelR[0];
@@ -217,7 +234,7 @@ export async function loadAircraftVisual(spec: AircraftSpec): Promise<AircraftVi
         wheels.push(w);
       }
       const axle = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 0.8, 8).rotateZ(Math.PI / 2), metal); axle.position.y = hub; g.add(axle);
-      procGear.push({ g, nose, side: Math.sign(gx), wheels, r });
+      procGear.push({ g, nose, side: Math.sign(gx), wheels, r, attachY });
     });
   }
 
@@ -267,10 +284,16 @@ export async function loadAircraftVisual(spec: AircraftSpec): Promise<AircraftVi
       const gp = fm.gearPos;
       for (const pg of procGear) {
         pg.g.visible = gp > 0.02;
+        // the baked GLB wheels live under the compensated offsetG; these procedural struts hang off
+        // `root`, so apply the same suspension lift here or the tyres sink ~22 cm into the runway at rest
+        pg.g.position.y = pg.attachY + comp;
         if (pg.nose) pg.g.rotation.x = (1 - gp) * 1.55; else pg.g.rotation.z = -pg.side * (1 - gp) * 1.5;
         for (const w of pg.wheels) w.rotation.x = wheelSpin;
       }
-      wheelSpin += (fm.wow ? fm.gs : 0) * dt / 0.58 * (fm.vel.dot(fm.forward()) >= 0 ? 1 : -1);
+      // rolling wheels: ground speed over the REAL main-wheel radius; rolling FORWARD must spin the
+      // wheel about -X (right-hand rule: the crown of the tyre then moves toward the nose, -Z)
+      fm.forward(_fwd);
+      wheelSpin += (fm.wow ? fm.gs : 0) * dt / spec.wheelR[0] * (fm.vel.dot(_fwd) >= 0 ? -1 : 1);
       for (const p of gearParts) for (const o of p.objs) { o.visible = gp > 0.5; o.position.y = (1 - gp) * p.drop; }
       // propellers / fans follow the real engine state
       spin += dt;
@@ -279,7 +302,7 @@ export async function loadAircraftVisual(spec: AircraftSpec): Promise<AircraftVi
         const nn = fm.n[k] ?? 0;
         const rps = sp.fan ? nn * 14 : (spec.kind === 'piston' ? nn * 40 : nn * 17);
         spinAngle[sp.engine] = (spinAngle[sp.engine] ?? 0) + sp.dir * rps * Math.PI * 2 * dt;
-        // above ~900 rpm the eye (and a 60 Hz display) cannot resolve blades: show a translucent disc like real prop blur
+        // above ~540 rpm (rps > 9) the eye (and a 60 Hz display) cannot resolve blades: show a translucent disc like real prop blur
         const fast = !sp.fan && rps > 9;
         const ang = fast ? spin * 3.1 : spinAngle[sp.engine];
         if (sp.axis === 'x') sp.pivot.rotation.x = ang; else sp.pivot.rotation.z = spinAngle[sp.engine];

@@ -56,8 +56,8 @@ export class AudioEngine {
     const mg = c.createGain(), mf = c.createBiquadFilter(); mf.type = 'bandpass'; mf.frequency.value = 500; mf.Q.value = 0.8; mg.gain.value = 0; noiseSrc().connect(mf).connect(mg).connect(this.sfx); this.murmur = { g: mg };
     // warning voice bus
     const wo1 = c.createOscillator(), wo2 = c.createOscillator(), wgn = c.createGain(); wo1.type = 'square'; wo2.type = 'sawtooth'; wgn.gain.value = 0;
-    const wnf = c.createBiquadFilter(); wnf.type = 'bandpass'; wnf.frequency.value = 2500; wnf.Q.value = 1.2; const nG = c.createGain(); nG.gain.value = 0; const wng = c.createGain(); wng.gain.value = 1;
-    wo1.connect(wgn); wo2.connect(wgn); wgn.connect(this.sfx); noiseSrc().connect(wnf).connect(nG).connect(this.sfx); void wng;
+    const wnf = c.createBiquadFilter(); wnf.type = 'bandpass'; wnf.frequency.value = 2500; wnf.Q.value = 1.2; const nG = c.createGain(); nG.gain.value = 0;
+    wo1.connect(wgn); wo2.connect(wgn); wgn.connect(this.sfx); noiseSrc().connect(wnf).connect(nG).connect(this.sfx);
     wo1.start(); wo2.start(); this.warn = { o1: wo1, o2: wo2, g: wgn, ng: wgn, nf: wnf, nG };
   }
   setVolume(v: number) { this.volume = v; if (v <= 0) this.speech.clear(); if (this.master) this.master.gain.setTargetAtTime(this.muted ? 0 : v, this.ctx!.currentTime, 0.05); }
@@ -132,8 +132,31 @@ export class AudioEngine {
   ding() { this.burst(880, 0.9, 0.2); }
   apOff() { for (let i = 0; i < 4; i++) { this.burst(i % 2 ? 700 : 1000, 0.13, 0.18, 'square', undefined, i * 0.14); } }
   apOn() { this.burst(900, 0.1, 0.12, 'sine'); this.burst(1200, 0.1, 0.12, 'sine', undefined, 0.1); }
-  crash() { this.noiseBurst(2.4, 1.0, 1600, 50); this.burst(70, 1.4, 0.9, 'sawtooth', 25); }
+  crash() { this.rumble(0, 2.4, 1.0, 1600, 50, 0.02); this.burst(70, 1.4, 0.9, 'sawtooth', 25); }
   scrape() { this.noiseBurst(0.25, 0.25, 3000, 900, 'bandpass'); }
+  /** Long looping noise rumble (thunder body); nodes join `oneShots` so audio.silence() also stops it. */
+  private rumble(delay: number, dur: number, gain: number, f0: number, f1: number, attack: number) {
+    const c = this.ctx; if (!c) return;
+    const t0 = c.currentTime + delay;
+    const s = c.createBufferSource(); s.buffer = this.noise; s.loop = true;
+    const f = c.createBiquadFilter(); f.type = 'lowpass'; f.frequency.setValueAtTime(f0, t0); f.frequency.exponentialRampToValueAtTime(Math.max(25, f1), t0 + dur);
+    const g = c.createGain(); g.gain.setValueAtTime(0.0001, t0); g.gain.exponentialRampToValueAtTime(gain, t0 + attack); g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    s.connect(f).connect(g).connect(this.sfx); this.oneShots.add(s); s.onended = () => { this.oneShots.delete(s); s.disconnect(); f.disconnect(); g.disconnect(); };
+    s.start(t0, Math.random() * 1.5); s.stop(t0 + dur + 0.05);
+  }
+  /** Procedural thunder: noise crack rolling down into a sub-bass swell plus a delayed echo.
+   *  @param intensity 0..1 (fades with strike distance) @param delay seconds the sound still needs (dist / 343 m/s) */
+  thunder(intensity = 1, delay = 0) {
+    const c = this.ctx; if (!c || this.muted || this.volume <= 0 || intensity <= 0.05) return;
+    const d = Math.max(0, delay), i = Math.min(1, intensity);
+    const dur = 2.6 + 2.4 * i;
+    // distant strikes rise softly: onset ramps with the travel time ALREADY IN SECONDS (7.6 s for
+    // the closest strike, 24 s for the farthest) so the crack never pops in
+    const attack = Math.min(0.35, 0.07 + d / 90);
+    this.rumble(d, dur, 0.8 * i, 240, 38, attack); // main crack -> roll
+    this.rumble(d + 0.45 + Math.random() * 0.4, dur * 0.9, 0.45 * i, 120, 30, 0.5); // rolling echo off the terrain
+    this.burst(44, dur * 0.8, 0.4 * i, 'sine', 26, d + 0.1); // sub-bass swell for the body of the rumble
+  }
   applause() { this.noiseBurst(1.8, 0.2, 3000, 2500, 'bandpass'); }
   pa() { this.burst(1000, 0.08, 0.15, 'sine'); this.burst(1500, 0.14, 0.15, 'sine', undefined, 0.1); }
   speak(text: string, key = text, cooldown = 3, rate = 1.05, pitch = 0.9) {

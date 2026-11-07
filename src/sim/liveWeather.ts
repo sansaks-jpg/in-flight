@@ -15,6 +15,8 @@ export interface LiveWx {
   cover: [number, number, number];
   /** lowest broken/overcast (or estimated) cloud base, metres above ground; null = none below 3 km */
   baseAglM: number | null;
+  /** MSL base of the mid (≈700 hPa) and cirrus (≈300 hPa) decks, from the model's geopotential heights */
+  midBaseMsl: number; highBaseMsl: number;
   rain: number; snow: number; fog: number; thunder: boolean; code: number; wxString: string;
   metar: string; icao: string; obsAgeMin: number;
   layers: WindLayer[]; // MSL heights ascending
@@ -23,7 +25,7 @@ export interface LiveWx {
 
 export const OFFLINE_WX: LiveWx = {
   ok: false, source: 'offline (ISA, calm)', fetchedAt: 0, lat: 0, lon: 0, elevM: 0, tempC: 15, dewC: 8, qnh: 1013.25, windDir: 0, windKt: 0, gustKt: 0, visM: 30000,
-  cover: [0.1, 0, 0.1], baseAglM: null, rain: 0, snow: 0, fog: 0, thunder: false, code: 0, wxString: '', metar: '', icao: '', obsAgeMin: 0, layers: [], condition: 'Weather offline – ISA, calm',
+  cover: [0.1, 0, 0.1], baseAglM: null, midBaseMsl: 3100, highBaseMsl: 9160, rain: 0, snow: 0, fog: 0, thunder: false, code: 0, wxString: '', metar: '', icao: '', obsAgeMin: 0, layers: [], condition: 'Weather offline – ISA, calm',
 };
 
 const WMO: Record<number, string> = {
@@ -34,10 +36,32 @@ const WMO: Record<number, string> = {
 const RAIN_BY_CODE: Record<number, number> = { 51: 0.15, 53: 0.3, 55: 0.45, 56: 0.25, 57: 0.4, 61: 0.35, 63: 0.65, 65: 0.95, 66: 0.5, 67: 0.8, 80: 0.45, 81: 0.75, 82: 1, 95: 0.8, 96: 0.95, 99: 1 };
 const SNOW_BY_CODE: Record<number, number> = { 71: 0.3, 73: 0.6, 75: 0.95, 77: 0.3, 85: 0.5, 86: 0.9 };
 
+/** Mid (≈700 hPa) and cirrus (≈300 hPa) deck bases from the model's geopotential heights, clamped to
+ *  meteorologically sane bands; standard-atmosphere values are the fallback when a level is missing. */
+export function midHighBases(gz700: number | null, gz300: number | null): { mid: number; high: number } {
+  return {
+    mid: gz700 != null ? Math.max(2200, Math.min(5500, gz700)) : 3100,
+    high: gz300 != null ? Math.max(7000, Math.min(12500, gz300)) : 9160,
+  };
+}
+
+/** Horizontal visibility effectively seen in precipitation: showers reduce it beyond the station
+ *  METAR value (which is observed at the airfield, not under the shower you are flying through).
+ *  Heavy rain / snow (~1.0) caps visibility around 6 km, moderate (~0.5) around 13 km. */
+export function precipVisibility(visM: number, rain: number, snow: number): number {
+  const wet = Math.min(1, Math.max(rain, snow));
+  if (wet <= 0) return visM;
+  return Math.min(visM, 20000 - 14000 * wet);
+}
+
 const num = (v: unknown, d = 0) => (typeof v === 'number' && Number.isFinite(v) ? v : d);
 async function getJson(url: string, ms = 6000): Promise<any> {
   const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), ms);
   try { const r = await fetch(url, { signal: ctl.signal }); if (!r.ok) throw new Error(String(r.status)); return await r.json(); } finally { clearTimeout(t); }
+}
+async function getText(url: string, ms = 6000): Promise<string> {
+  const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), ms);
+  try { const r = await fetch(url, { signal: ctl.signal }); if (!r.ok) throw new Error(String(r.status)); return await r.text(); } finally { clearTimeout(t); }
 }
 
 const LEVELS = [1000, 925, 850, 700, 500, 300, 250, 200];
@@ -90,11 +114,11 @@ export async function fetchLiveWeather(lat: number, lon: number, icao?: string):
   const lv = (k: string) => LEVELS.map((l) => `${k}_${l}hPa`).join(',');
   const om = `https://api.open-meteo.com/v1/forecast?latitude=${lat.toFixed(4)}&longitude=${lon.toFixed(4)}`
     + `&current=temperature_2m,relative_humidity_2m,dew_point_2m,precipitation,rain,showers,snowfall,weather_code,cloud_cover,cloud_cover_low,cloud_cover_mid,cloud_cover_high,pressure_msl,surface_pressure,wind_speed_10m,wind_direction_10m,wind_gusts_10m,visibility,is_day`
-    + `&hourly=wind_speed_80m,wind_direction_80m,wind_speed_180m,wind_direction_180m,temperature_80m,${lv('wind_speed')},${lv('wind_direction')},${lv('temperature')},${lv('geopotential_height')}`
+    + `&hourly=wind_speed_80m,wind_direction_80m,wind_speed_180m,wind_direction_180m,temperature_80m,temperature_180m,${lv('wind_speed')},${lv('wind_direction')},${lv('temperature')},${lv('geopotential_height')}`
     + `&forecast_hours=1&wind_speed_unit=kn&timezone=GMT`;
   const metarTxt = async (): Promise<any[] | null> => {
     if (!icao || !/^[A-Z]{4}$/.test(icao)) return null;
-    const r = await fetch(`https://metar.vatsim.net/${icao}`); if (!r.ok) return null; const m = parseRawMetar(await r.text()); return m ? [m] : null;
+    const m = parseRawMetar(await getText(`https://metar.vatsim.net/${icao}`)); return m ? [m] : null;
   };
   const [omR, mR] = await Promise.allSettled([getJson(om), metarTxt()]);
   if (omR.status !== 'fulfilled' && !(mR.status === 'fulfilled' && Array.isArray(mR.value) && mR.value.length)) throw new Error('weather unavailable');
@@ -109,27 +133,38 @@ export async function fetchLiveWeather(lat: number, lon: number, icao?: string):
     wx.qnh = num(c.pressure_msl, 1013.25); wx.windDir = num(c.wind_direction_10m); wx.windKt = num(c.wind_speed_10m); wx.gustKt = Math.max(wx.windKt, num(c.wind_gusts_10m));
     wx.visM = num(c.visibility, 30000);
     wx.cover = [num(c.cloud_cover_low) / 100, num(c.cloud_cover_mid) / 100, num(c.cloud_cover_high) / 100];
-    wx.code = num(c.weather_code); const mmh = (num(c.rain) + num(c.showers) + num(c.precipitation)) * 4 / 2; // 15-min sums -> mm/h-ish
-    wx.rain = Math.max(RAIN_BY_CODE[wx.code] ?? 0, Math.min(1, mmh / 8)); wx.snow = SNOW_BY_CODE[wx.code] ?? Math.min(1, num(c.snowfall) * 2);
+    wx.code = num(c.weather_code);
+    // `precipitation` ALREADY includes rain + showers + snow (water-equivalent) — adding rain/showers
+    // on top double-counted and let snow leak into wx.rain. Snow codes never feed wx.rain.
+    const mmh = num(c.precipitation) * 4; // 15-min sum -> mm/h-ish
+    const snowCode = [71, 73, 75, 77, 85, 86].includes(wx.code);
+    wx.rain = snowCode ? 0 : Math.max(RAIN_BY_CODE[wx.code] ?? 0, Math.min(1, mmh / 8));
+    wx.snow = SNOW_BY_CODE[wx.code] ?? Math.min(1, num(c.snowfall) * 2);
     wx.thunder = wx.code >= 95; wx.fog = wx.code === 45 || wx.code === 48 ? 1 : 0;
     // wind profile (MSL): surface, 80, 180 m AGL, then pressure levels
     const L: WindLayer[] = [];
     L.push({ h: elev + 10, dir: wx.windDir, kt: wx.windKt, tempC: wx.tempC });
-    for (const a of [80, 180]) { const sp = h[`wind_speed_${a}m`]?.[0], dr = h[`wind_direction_${a}m`]?.[0]; if (sp != null && dr != null) L.push({ h: elev + a, dir: dr, kt: sp, tempC: h[`temperature_80m`]?.[0] ?? wx.tempC - a * 0.0065 }); }
+    for (const a of [80, 180]) { const sp = h[`wind_speed_${a}m`]?.[0], dr = h[`wind_direction_${a}m`]?.[0]; if (sp != null && dr != null) L.push({ h: elev + a, dir: dr, kt: sp, tempC: h[`temperature_${a}m`]?.[0] ?? wx.tempC - a * 0.0065 }); }
+    let gz700: number | null = null, gz300: number | null = null;
     for (const p of LEVELS) {
       const sp = h[`wind_speed_${p}hPa`]?.[0], dr = h[`wind_direction_${p}hPa`]?.[0], gz = h[`geopotential_height_${p}hPa`]?.[0], tt = h[`temperature_${p}hPa`]?.[0];
+      if (p === 700 && gz != null) gz700 = gz; if (p === 300 && gz != null) gz300 = gz;
       if (sp != null && dr != null && gz != null && gz > elev + 250) L.push({ h: gz, dir: dr, kt: sp, tempC: tt ?? -20 });
     }
+    const mh = midHighBases(gz700, gz300); wx.midBaseMsl = mh.mid; wx.highBaseMsl = mh.high;
     wx.layers = L.sort((a, b) => a.h - b.h);
     spread = wx.tempC - wx.dewC;
   }
   if (mR.status === 'fulfilled' && Array.isArray(mR.value) && mR.value.length) {
-    const m = mR.value[0]; const ageMin = (Date.now() / 1000 - num(m.obsTime)) / 60;
+    const m = mR.value[0];
+    // a METAR without the DDHHMMZ group has no obsTime — report a stale age instead of ~29000 days
+    const ageMin = num(m.obsTime) > 0 ? (Date.now() / 1000 - m.obsTime) / 60 : 9999;
     wx.metar = String(m.rawOb || ''); wx.icao = String(m.icaoId || icao || ''); wx.obsAgeMin = Math.round(ageMin);
     if (ageMin < 100) {
       srcs.unshift(`METAR ${wx.icao}`);
       if (typeof m.temp === 'number') wx.tempC = m.temp; if (typeof m.dewp === 'number') wx.dewC = m.dewp; if (typeof m.altim === 'number') wx.qnh = m.altim;
-      const ws = num(m.wspd), wg = num(m.wgst); wx.windKt = ws; wx.gustKt = Math.max(ws, wg, ws > 3 ? ws : 0); if (typeof m.wdir === 'number') wx.windDir = m.wdir; // VRB -> keep model direction
+      // wind only overrides the model when the METAR actually carries the group (speed AND direction stay consistent)
+      if (m.wspd !== undefined) { const ws = num(m.wspd), wg = num(m.wgst); wx.windKt = ws; wx.gustKt = Math.max(ws, wg); if (typeof m.wdir === 'number') wx.windDir = m.wdir; } // VRB -> keep model direction
       const vis = num(m.visib, 99); // statute miles (99 = 10 km or more)
       if (vis < 6.2) wx.visM = vis * 1609.34;
       // clouds -> low-level cover and ceiling
@@ -138,14 +173,17 @@ export async function fetchLiveWeather(lat: number, lon: number, icao?: string):
         const frac: Record<string, number> = { SKC: 0, CLR: 0, NSC: 0, CAVOK: 0, FEW: 0.2, SCT: 0.45, BKN: 0.75, OVC: 1, VV: 1 };
         let low = 0; let ceilFt = 1e9;
         for (const cl of m.clouds) { const f = frac[cl.cover] ?? 0; if (cl.base && cl.base < 10000) low = Math.max(low, f); if (cl.base && (cl.cover === 'BKN' || cl.cover === 'OVC' || cl.cover === 'VV')) ceilFt = Math.min(ceilFt, cl.base); }
-        lowCover = low; wx.baseAglM = (m.clouds.find((c: any) => c.base && c.cover !== 'FEW')?.base ?? m.clouds[0].base ?? 2500) * 0.3048;
+        lowCover = low;
         if (ceilFt < 1e9) ceil = ceilFt * 0.3048;
+        // deck base = the METAR ceiling (lowest BKN/OVC/VV) when present, else the lowest reported layer
+        wx.baseAglM = (ceil ?? (m.clouds.find((c: any) => c.base && c.cover !== 'FEW')?.base ?? m.clouds[0].base ?? 2500) * 0.3048);
       } else { lowCover = 0; }
-      wx.cover = [lowCover, wx.cover[1], wx.cover[2]]; void ceil;
+      wx.cover = [lowCover, wx.cover[1], wx.cover[2]];
       const pw = parseMetarWx(String(m.wxString || '')); wx.wxString = String(m.wxString || '');
       if (pw.rain || pw.snow || pw.fog || pw.thunder || (!wx.wxString && ageMin < 100)) {
-        // a METAR with no present-weather group means no precipitation at the station; keep model precip only if the model is heavy
-        wx.rain = pw.rain || (wx.rain > 0.6 ? wx.rain * 0.5 : 0); wx.snow = pw.snow || (wx.snow > 0.6 ? wx.snow * 0.5 : 0); wx.fog = Math.max(pw.fog, wx.code === 45 ? 0 : 0); wx.thunder = pw.thunder;
+        // a METAR with no present-weather group means no precipitation at the station; keep model precip only if the model is heavy.
+        // The station observation likewise wins on fog (model 45/48 is area-wide and drops out here).
+        wx.rain = pw.rain || (wx.rain > 0.6 ? wx.rain * 0.5 : 0); wx.snow = pw.snow || (wx.snow > 0.6 ? wx.snow * 0.5 : 0); wx.fog = pw.fog; wx.thunder = pw.thunder;
       }
       spread = wx.tempC - wx.dewC;
       if (wx.layers.length) wx.layers[0] = { ...wx.layers[0], dir: wx.windDir, kt: wx.windKt, tempC: wx.tempC }; // the station observation is the 10 m wind

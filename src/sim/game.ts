@@ -9,7 +9,7 @@ import { Precip } from './precip';
 import { chooseSpawn, Spawn } from './departure';
 import { AtcRadio, buildExchange, RadioLine, RadioCtx } from './atc';
 import { Projection, haversine, bearing, wrap180, wrap360, D2R, R2D, clamp, M_PER_NM, MS_TO_KT, destination, greatCircle, FlightWaypoint } from './geo';
-import { World, Threshold, TimeOfDay, Weather } from './world';
+import { World, Threshold, TimeOfDay } from './world';
 import { AircraftVisual } from './aircraftModel';
 import { loadAircraftVisual } from './glbAircraft';
 import { Cockpit } from './cockpit';
@@ -19,7 +19,7 @@ import { advanceWaypoint } from './lnav';
 import { AudioEngine, WarnSound } from './audio';
 import { Effects } from './effects';
 import { Settings, addScore, QualityPreset } from './storage';
-import { QUALITY } from './quality';
+import { QUALITY, resolveAutoQuality } from './quality';
 import { DEFAULT_CHECKLIST_ITEMS, buildApproachGates, buildTaxiRibbon, computeWorldScreenMarkers } from './navAssists';
 import { computeFlightPhaseState, FlightPhaseContext } from './flightPhase';
 import { simNowMs, sunPhase } from './clock';
@@ -114,7 +114,8 @@ interface Hooks { onHud(h: HudState): void; onToast(t: Toast): void; onPhase(p: 
 const gLimits = { piston: { p: 5.2, n: -2.4 }, turboprop: { p: 4.4, n: -1.8 }, jet: { p: 3.6, n: -1.4 } };
 const TAU = Math.PI * 2;
 const FINAL_GATE_M = 18000; // join final 18 km (9.7 nm) before the threshold
-const tmpV = new THREE.Vector3(), tmpV2 = new THREE.Vector3(), tmpQ = new THREE.Quaternion(), tmpE = new THREE.Euler();
+const tmpV = new THREE.Vector3(), tmpV2 = new THREE.Vector3(), tmpV3 = new THREE.Vector3(), tmpQ = new THREE.Quaternion(), tmpQ2 = new THREE.Quaternion(), tmpE = new THREE.Euler(), tmpE2 = new THREE.Euler();
+const AXIS_X = new THREE.Vector3(1, 0, 0);
 
 export function buildFlightPlan(
   from: Airport,
@@ -279,7 +280,20 @@ export class Game {
   audio = new AudioEngine();
   world: World | null = null; fm!: FlightModel; spec!: AircraftSpec; visual: AircraftVisual | null = null; cockpit: Cockpit | null = null; effects: Effects | null = null;
   ap = new Autopilot();
-  phase: Phase = 'idle'; mode: 'attract' | 'play' = 'attract'; suspended = false;
+  phase: Phase = 'idle'; mode: 'attract' | 'play' = 'attract';
+  private _suspended = false;
+  /**
+   * Suspending the sim (planner / globe background menu) must ALSO kill the radio and the audio
+   * engine: AtcRadio's pump/say timers are independent `setTimeout`s that never look at the RAF
+   * gate (the game loop bails on `suspended` before any audio update), so queued exchanges would
+   * otherwise keep being voiced over the menu. Setters outside this class (App.tsx) flip this
+   * flag directly — the kill happens here, at the source of truth.
+   */
+  get suspended() { return this._suspended; }
+  set suspended(v: boolean) {
+    if (v && !this._suspended) { this.radio.cancel(); this.audio.silence(); }
+    this._suspended = v;
+  }
   cfg!: ScenarioConfig; hooks: Hooks;
   viewIdx = 0; lookYaw = 0; lookPitch = 0; orbitYaw = 0; orbitPitch = 0.1; zoom = 1; chaseQ = new THREE.Quaternion(); chaseInit = false;
   private raf = 0; private last = 0; private acc = 0; time = 0; private hudT = 0; private slowT = 0; timeScale = 1; private toastId = 1;
@@ -299,6 +313,8 @@ export class Game {
   /** Where the aircraft is parked (stand / gate / apron) and the departure procedure state. */
   spawn: Spawn | null = null; depStage = 0; pushback = { active: false, t: 0, done: false }; private depT = 0;
   private windTmp = new THREE.Vector3(); private relAir = new THREE.Vector3(); private wxTmp = { dir: 0, kt: 0, tempC: 15 };
+  /** Live wind (m/s, world axes) at the cloud decks — refreshed with the weather, drives cloud advection. */
+  private cloudWind = new THREE.Vector3();
   private windFrom = 270; private windKt = 0; private turb = 0; private gustPhase = Math.random() * 100; private gust = new THREE.Vector3();
   private warnState: { text: string; level: 'caution' | 'warning'; sound: WarnSound }[] = []; private warnPenalty: Record<string, number> = {};
   private landing: LandingInfo | null = null; private takeoffDone = false; private stoppedT = 0; private endT = 0; private result: Result | null = null; private crashTimer = 0;
@@ -351,7 +367,7 @@ export class Game {
     (window as any).sim = this;
   }
   get isMobile() { return matchMedia('(pointer: coarse)').matches || Math.min(screen.width, screen.height) < 700; }
-  get quality(): QualityPreset { const q = this.cfg?.settings.quality ?? 'auto'; return q === 'auto' ? (this.isMobile ? 'low' : 'high') : q; }
+  get quality(): QualityPreset { const q = this.cfg?.settings.quality ?? 'auto'; return q === 'auto' ? resolveAutoQuality(this.isMobile) : q; }
   get qualityProfile() { return QUALITY[this.quality]; }
   private basePixelRatio() {
     const p = this.qualityProfile;
@@ -380,7 +396,10 @@ export class Game {
     this.cfg = cfg; this.mode = mode; this.spec = specById(cfg.aircraftId);
     this.dprScale = 1; this.emaFrameMs = 16.6; this.dprCooldown = 1.0;
     const s = cfg.settings, from = cfg.from;
-    this.phase = 'loading'; this.hooks.onPhase('loading'); this.loadStart = performance.now();
+    // Via setPhase, not a bare field write: leaving a PAUSED flight straight into a new load would
+    // otherwise leave AtcRadio paused and speechSynthesis globally frozen (ATC/GPWS voice dead for
+    // the whole next flight). setPhase un-pauses the radio on the way out of 'paused'.
+    this.setPhase('loading'); this.loadStart = performance.now();
     const proj = new Projection(from.lat, from.lon);
     const anisoMap: Record<QualityPreset, number> = {
       ultra: this.renderer.capabilities.getMaxAnisotropy(),
@@ -392,12 +411,17 @@ export class Game {
       quality: this.quality,
       style: s.terrainStyle,
       tod: s.tod as TimeOfDay,
-      weather: s.weather as Weather,
       maxAniso: anisoMap[this.quality] ?? 4,
     });
     this.world.terrain.fallbackH = from.elev;
     this.effects = new Effects(this.world.scene);
-    this.precip = new Precip(this.world.scene);
+    // precipitation arrays are allocated ONCE for the largest preset so a mid-flight quality raise
+    // gets its full budget; the active preset then sets the per-frame cap
+    this.precip = new Precip(this.world.scene, QUALITY.ultra.precipMax);
+    this.precip.setQuality(this.qualityProfile.precipMax);
+    // lightning → procedural thunder with the real speed-of-sound delay (~343 m/s) and distance
+    // falloff; only in play mode so the airport-background menu never rumbles
+    if (mode === 'play') this.world.lightning.onStrike = (distM) => this.audio.thunder(clamp(1 - distM / 15000, 0.06, 1), distM / 343);
     this.visual = await loadAircraftVisual(this.spec); this.world.scene.add(this.visual.root);
     this.cockpit = new Cockpit(this.spec, this.quality); this.cockpit.camera.aspect = this.camera.aspect; this.cockpit.camera.updateProjectionMatrix();
     this.audio.voiceOn = s.voice; this.audio.setVolume(s.volume); this.audio.setMuted(s.muted);
@@ -431,8 +455,11 @@ export class Game {
     this.turb = clamp(0.03 + spreadMs / 3.2 * 0.9 + (wx.thunder ? 0.6 : 0) + wx.rain * 0.08 + wx.windKt / 80 * 0.1, 0.02, 2.2);
     airState.dT = isaDeviation(wx, groundM); airState.qnh = wx.qnh;
     this.applyAirToFm();
-    this.world?.setLiveWeather(wx.cover, wx.baseAglM, groundM, wx.rain, wx.snow, wx.visM, wx.thunder);
+    this.world?.setLiveWeather(wx.cover, wx.baseAglM, groundM, wx.rain, wx.snow, wx.visM, wx.thunder, wx.midBaseMsl, wx.highBaseMsl);
     this.precip?.set(wx.rain, wx.snow);
+    // clouds advect with the live wind at their own altitude (the mid deck), not the surface wind
+    windVector(wx, wx.midBaseMsl, 0, this.cloudWind);
+    this.world?.setCloudWind(this.cloudWind.x, this.cloudWind.z);
   }
   private applyAirToFm() {
     const wx = this.liveWx; if (!wx || !this.fm) return;
@@ -786,7 +813,7 @@ export class Game {
   }
 
   /** Weather is always the real thing – the old presets only report what is live. */
-  setWeather(_w?: Weather) { this.toast(`Live weather: ${wxSummary(this.liveWx)}`, 'info'); void this.refreshWx(); }
+  setWeather(_w?: 'clear' | 'scattered' | 'overcast') { this.toast(`Live weather: ${wxSummary(this.liveWx)}`, 'info'); void this.refreshWx(); }
   setWindPreset(_preset?: 'calm' | 'light' | 'strong') { this.toast(`Live wind: ${this.windFrom}° / ${this.windKt} kt (${this.liveWx?.source ?? 'offline'})`, 'info'); }
 
   setAssistGates(v: boolean) {
@@ -1083,7 +1110,7 @@ export class Game {
     }
   }
   dispose() {
-    cancelAnimationFrame(this.raf); this.disposeScenario(); this.audio.silence();
+    cancelAnimationFrame(this.raf); this.disposeScenario(); this.audio.silence(); this.radio.cancel();
     window.removeEventListener('resize', this.resize); window.removeEventListener('keydown', this.onKeyDown); window.removeEventListener('keyup', this.onKeyUp); window.removeEventListener('blur', this.onBlur);
     this.renderer.dispose();
     if ((window as any).sim === this) delete (window as any).sim;
@@ -1165,6 +1192,7 @@ export class Game {
     this.world?.setStyle(s.terrainStyle);
     this.world?.setQuality(this.quality);
     this.cockpit?.setQuality(this.quality);
+    this.precip?.setQuality(this.qualityProfile.precipMax);
     if (qualityChanged) {
       // Start the new tier at full (already budget-limited) resolution, then let the
       // adaptive scaler settle it instead of inheriting a previous Low scale.
@@ -1760,7 +1788,12 @@ export class Game {
     this.updateDeparture(1);
     // live weather: refresh every 10 min, or when 60 km from the last sample point
     if (!this.wxBusy && (performance.now() - this.wxFetchedAt > 600000 || haversine(lat, lon, this.wxPoint[0], this.wxPoint[1]) > 60000)) void this.refreshWx();
-    if (this.liveWx) { windProfile(this.liveWx, fm.groundH + 10, 10, this.wxTmp); this.windFrom = Math.round(this.wxTmp.dir) % 360; this.windKt = Math.round(this.wxTmp.kt); }
+    if (this.liveWx) {
+      windProfile(this.liveWx, fm.groundH + 10, 10, this.wxTmp); this.windFrom = Math.round(this.wxTmp.dir) % 360; this.windKt = Math.round(this.wxTmp.kt);
+      // refresh the cloud-deck wind (mid-layer altitude) for the impostor advection
+      windVector(this.liveWx, this.liveWx.midBaseMsl, 0, this.cloudWind);
+      w.setCloudWind(this.cloudWind.x, this.cloudWind.z);
+    }
     // auto approach-runway selection while far away
     if (!this.apprLocked) {
       const th = this.bestApproachFor(lat, lon); if (th && th.ident !== this.apprKey) this.apprKey = th.ident;
@@ -2034,10 +2067,11 @@ export class Game {
       cam.near = 0.25;
       const vw = this.cockpit!.views[view as 'cockpit' | 'aisle' | 'window'];
       tmpE.set(vw.pitch + this.lookPitch + sx, vw.yaw + this.lookYaw + sy, sr, 'YXZ');
-      const local = tmpQ.setFromEuler(tmpE).clone();
-      const headLocal = vw.pos.clone(); headLocal.y += gOff;
-      const cq = this.cockpit!.camera; cq.position.copy(headLocal); cq.quaternion.copy(local); cq.fov = this.fovFor(view === 'cockpit' ? 68 : 72); cq.updateProjectionMatrix();
-      cam.position.copy(fm.pos).add(headLocal.clone().applyQuaternion(fm.quat)); cam.quaternion.copy(fm.quat).multiply(local); cam.fov = cq.fov; cam.updateProjectionMatrix();
+      const local = tmpQ.setFromEuler(tmpE); // scratch — no per-frame clone
+      tmpV3.copy(vw.pos); tmpV3.y += gOff;  // head position in body frame (scratch)
+      const cq = this.cockpit!.camera; cq.position.copy(tmpV3); cq.quaternion.copy(local); cq.fov = this.fovFor(view === 'cockpit' ? 68 : 72); cq.updateProjectionMatrix();
+      tmpV3.applyQuaternion(fm.quat);
+      cam.position.copy(fm.pos).add(tmpV3); cam.quaternion.copy(fm.quat).multiply(local); cam.fov = cq.fov; cam.updateProjectionMatrix();
     } else if (view === 'spotter' && this.mode === 'play') {
       const toAc = tmpV.copy(fm.pos).sub(cam.position); const d = toAc.length();
       if (!this.spotAnchor || d > 1800 || (d > 300 && toAc.dot(fm.vel) < 0 && fm.gs > 20)) {
@@ -2049,19 +2083,21 @@ export class Game {
       cam.near = clamp(d * 0.02, 0.5, 10);
       cam.position.copy(this.spotAnchor); cam.lookAt(fm.pos); cam.fov = clamp(2 * Math.atan(L * 1.6 / Math.max(60, d)) * R2D, 8, 50); cam.updateProjectionMatrix();
     } else {
-      // chase
+      // chase (all scratch — the per-frame loop may not allocate)
       if (!this.chaseInit) { this.chaseQ.copy(fm.quat); this.chaseInit = true; }
       this.chaseQ.slerp(fm.quat, 1 - Math.exp(-dt * 3.2));
-      const e = new THREE.Euler().setFromQuaternion(this.chaseQ, 'YXZ'); e.z *= 0.35;
-      const q = new THREE.Quaternion().setFromEuler(e);
-      const off = new THREE.Vector3(0, L * 0.16 + 1.5, L * 0.95 + 5).multiplyScalar(this.zoom);
-      const orb = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, this.orbitYaw, 0, 'YXZ'));
-      off.applyAxisAngle(new THREE.Vector3(1, 0, 0), -(this.orbitPitch - 0.12) * 1.2).applyQuaternion(orb).applyQuaternion(q);
+      const e = tmpE2.setFromQuaternion(this.chaseQ, 'YXZ');
+      e.z *= 0.35;
+      const ezz = e.z * 0.6; // needed after tmpE2 is reused for the orbit yaw below
+      const q = tmpQ2.setFromEuler(e);
+      const off = tmpV3.set(0, L * 0.16 + 1.5, L * 0.95 + 5).multiplyScalar(this.zoom);
+      const orb = tmpQ.setFromEuler(tmpE.set(0, this.orbitYaw, 0, 'YXZ'));
+      off.applyAxisAngle(AXIS_X, -(this.orbitPitch - 0.12) * 1.2).applyQuaternion(orb).applyQuaternion(q);
       cam.position.copy(fm.pos).add(off);
       const gh = this.world!.terrain.heightAt(cam.position.x, cam.position.z); if (cam.position.y < gh + 2.5) cam.position.y = gh + 2.5;
       const camDist = off.length();
       cam.near = clamp(Math.min(0.5, (camDist - L * 0.4) * 0.4), 0.1, 1.5);
-      cam.up.set(0, 1, 0).applyQuaternion(new THREE.Quaternion().setFromEuler(new THREE.Euler(0, 0, e.z * 0.6)));
+      cam.up.set(0, 1, 0).applyQuaternion(tmpQ2.setFromEuler(tmpE2.set(0, 0, ezz)));
       cam.lookAt(fm.pos.x, fm.pos.y + L * 0.03, fm.pos.z);
       cam.rotateX(sx); cam.rotateY(sy); cam.fov = this.fovFor(60 + Math.min(10, fm.gs / 40)); cam.updateProjectionMatrix();
     }
@@ -2180,7 +2216,11 @@ export class Game {
     const nm = (a: Airport) => (a.city || a.name || a.icao).replace(/\s*(international|intl|airport|airfield|regional|domestic).*$/i, '').trim() || a.icao;
     const ctx: RadioCtx = { callsign: cs, fromIcao: from.icao, toIcao: to.icao, fromName: nm(from), toName: nm(to), letter: this.atisLetter, spot: this.spawn?.label ?? 'the apron', atDest, lastCat: this.atcLastCat, rwyFallback: (atDest ? this.apprKey : this.depRwy) || '' };
     const { lines, cat } = buildExchange(sender, text, ctx, () => this.nextAtcId++);
-    this.atcLastCat = cat; this.radio.enqueue(lines);
+    this.atcLastCat = cat;
+    // Airport-background attract mode must never SPEAK (or queue) over the menu: the exchange is
+    // dropped entirely before it reaches the radio — nothing is logged and nothing is voiced.
+    if (this.mode === 'attract') return;
+    this.radio.enqueue(lines);
   }
   /** A line goes on the air: it enters the transmission history (and the subtitle) exactly when it is spoken. */
   private logRadioLine(l: RadioLine) {

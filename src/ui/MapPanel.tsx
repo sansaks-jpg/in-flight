@@ -47,7 +47,7 @@ function airportsInView(map: CanvasMap): Airport[] {
   }
   return IN_VIEW;
 }
-const RANGES_NM = [5, 10, 20, 40], TRACK_DASH = [4, 3], GUIDANCE_DASH = [3, 5], NO_DASH: number[] = [];
+const RANGES_NM = [5, 10, 20, 40], TRACK_DASH = [4, 3], GUIDANCE_DASH = [3, 5], NO_DASH: number[] = [], VIS_DASH = [3, 4];
 const COMPASS_TICKS = Array.from({ length: 36 }, (_, i) => i * 10);
 
 const COL = { from: '#3ddc84', to: '#ffb02e', route: '#38bdf8', dot: '#ffffff', trail: '#35e0ff' };
@@ -466,6 +466,22 @@ export function MapPanel({
       if (gs) {
         map.projectInto(gs.lat, gs.lon, ownshipPoint); const x = ownshipPoint[0], y = ownshipPoint[1];
         if (!compactMap && z > 5) { const ppm = (256 * 2 ** z) / (40075016.7 * Math.cos(gs.lat * D2R)); g.strokeStyle = 'rgba(255,255,255,.35)'; g.lineWidth = 1; for (const nm of RANGES_NM) { const r = nm * M_PER_NM * ppm; if (r > 24 && r < map.W) { g.beginPath(); g.arc(x, y, r, 0, 7); g.stroke(); g.fillStyle = 'rgba(255,255,255,.7)'; g.font = '10px ui-sans-serif'; g.fillText(`${nm}nm`, x + r * 0.7 + 3, y - r * 0.7); } } }
+        // Effective visibility from the sim weather model (world.wx.visEffM, metres): one dashed ring
+        // at the current in-sim visibility so low-approach conditions read straight off the chart.
+        const wxs = p.game?.world?.wx;
+        if (gs && wxs && wxs.visEffM < 25000 && !compactMap) {
+          const vppm = (256 * 2 ** z) / (40075016.7 * Math.cos(gs.lat * D2R));
+          const vr = wxs.visEffM * vppm;
+          if (vr > 16 && vr < Math.max(map.W, map.H) * 0.8) {
+            g.save(); g.strokeStyle = 'rgba(255,255,255,.4)'; g.lineWidth = 1.4; g.setLineDash(VIS_DASH);
+            g.beginPath(); g.arc(x, y, vr, 0, 7); g.stroke(); g.setLineDash(NO_DASH);
+            g.font = '600 9px ui-sans-serif, system-ui'; g.textAlign = 'center'; g.textBaseline = 'middle';
+            const vt = `VIS ${(wxs.visEffM / 1000).toFixed(wxs.visEffM < 10000 ? 1 : 0)} km`;
+            g.lineWidth = 3; g.strokeStyle = 'rgba(0,0,0,.8)'; g.strokeText(vt, x + vr * 0.707, y - vr * 0.707);
+            g.fillStyle = '#d9e4ee'; g.fillText(vt, x + vr * 0.707, y - vr * 0.707);
+            g.restore();
+          }
+        }
         const face = gs.track;
         const ha = face * D2R + map.rot;
         g.beginPath(); g.moveTo(x + Math.sin(ha) * 16, y - Math.cos(ha) * 16); g.lineTo(x + Math.sin(ha) * 46, y - Math.cos(ha) * 46);
