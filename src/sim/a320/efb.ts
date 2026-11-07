@@ -54,8 +54,30 @@ export class Efb {
   private wxCache = new Map<string, { wx: LiveWx | null; state: 'loading' | 'ok' | 'fail'; at: number }>();
 
   /** Click at normalised screen coordinates (0..1, origin top-left). Returns true if a button was hit. */
-  click(u: number, v: number): boolean { if (this.readOnly) return false; const h = this.at(u, v); if (!h) return false; h.fn(); this.dirty = true; return true; }
-  hover(u: number, v: number): string | null { return this.readOnly ? null : this.at(u, v)?.tip ?? null; }
+  click(u: number, v: number): boolean {
+    if (this.readOnly) return false; const h = this.at(u, v); if (!h) return false;
+    h.fn(); this.pressKey = `${h.x},${h.y}`; this.pressUntil = performance.now() + 160; this.dirty = true;
+    setTimeout(() => { this.dirty = true; }, 170);
+    return true;
+  }
+  /** Pointer over the page: returns the tooltip of the button under it and highlights that button on the next repaint. */
+  hover(u: number, v: number): string | null {
+    if (this.readOnly) return null; const h = this.at(u, v), k = h ? `${h.x},${h.y}` : '';
+    if (k !== this.hotKey) { this.hotKey = k; this.dirty = true; } return h?.tip ?? null;
+  }
+  /** Pointer left the tablet. */
+  leave() { if (this.hotKey) { this.hotKey = ''; this.dirty = true; } }
+  private hotKey = ''; private pressKey = ''; private pressUntil = 0;
+  /** Hover outline + brief pressed shade on the button under the pointer (all four pages share it). */
+  private feedback(g: G) {
+    const now = performance.now(), pressed = now < this.pressUntil;
+    for (const h of this.hits) {
+      const k = `${h.x},${h.y}`; if (k !== this.hotKey && !(pressed && k === this.pressKey)) continue;
+      rr(g, h.x, h.y, h.w, h.h, h.h > 40 ? 12 : 10);
+      if (pressed && k === this.pressKey) { g.fillStyle = 'rgba(0,0,0,0.32)'; g.fill(); }
+      if (k === this.hotKey) { g.strokeStyle = 'rgba(241,245,249,0.7)'; g.lineWidth = 3; g.stroke(); }
+    }
+  }
   wheel(dy: number) { if (this.readOnly) return; const k = this.key(); this.scroll[k] = Math.max(0, (this.scroll[k] ?? 0) + (dy > 0 ? 1 : -1)); this.dirty = true; }
   private key() { return this.page === 'CHECK' ? 'CHECK' + this.list : this.page; }
   private at(u: number, v: number) { const x = u * Efb.W, y = v * Efb.H; for (let i = this.hits.length - 1; i >= 0; i--) { const h = this.hits[i]; if (x >= h.x && x <= h.x + h.w && y >= h.y && y <= h.y + h.h) return h; } return null; }
@@ -100,7 +122,7 @@ export class Efb {
       case 'WX': this.drawWx(g, info, body); break;
       case 'RADIO': this.drawRadio(g, info, body); break;
     }
-    g.textAlign = 'left'; this.dirty = false;
+    this.feedback(g); g.textAlign = 'left'; this.dirty = false;
   }
 
   /** Up / down scroll buttons on the right edge of a list. Returns the (clamped) first visible row. */

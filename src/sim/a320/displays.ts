@@ -99,6 +99,8 @@ const spec0 = (c: Ctx) => c.host.fm.spec;
 // =============================================================== MCDU
 export class Mcdu {
   page = 'MENU'; scratch = ''; msg = ''; sub = 0;
+  /** Screen brightness 0.15..1, stepped by the BRT / DIM keys. */
+  brt = 1;
   store = { flt: 'IFL320', crz: 350, ci: 35, v1: 0, vr: 0, v2: 0, flex: 55, zfw: 62.5, block: 0, fuelRes: 2.4, trans: 5000, toConf: 1, qnh: 1013 };
   private host?: CockpitHost;
   attach(h: CockpitHost) { this.host = h; }
@@ -109,11 +111,20 @@ export class Mcdu {
     if (/^[a-z]$/.test(k)) { this.add(k.toUpperCase()); return; }
     if (/^[0-9]$/.test(k)) { this.add(k); return; }
     switch (k) {
-      case '.': this.add('.'); return; case '/': this.add('/'); return; case '+/-': this.add(this.scratch.startsWith('-') ? this.scratch.slice(1) : this.scratch === '' ? '-' : '-'); return;
-      case 'sp': this.add(' '); return; case 'clr': this.scratch = this.scratch.slice(0, -1); this.msg = ''; return;
-      case 'init': this.page = 'INIT'; return; case 'f-pln': case 'f-pln2': this.page = 'F-PLN'; this.sub = 0; return; case 'radnav': this.page = 'RADNAV'; return; case 'fuel-pred': this.page = 'FUEL'; return;
-      case 'prog': this.page = 'PROG'; return; case 'perf': this.page = 'PERF'; return; case 'data': this.page = 'DATA'; return; case 'dir': this.page = 'DIR'; return; case 'airport': this.page = 'AIRPORT'; return; case 'menu': this.page = 'MENU'; return;
-      case 'up': this.sub = Math.max(0, this.sub - 1); return; case 'down': this.sub++; return; case 'left': this.sub = Math.max(0, this.sub - 1); return; case 'right': this.sub++; return;
+      case '.': this.add('.'); return; case '/': this.add('/'); return;
+      // +/- : appends '-', then toggles the sign character at the end of the scratchpad ('-' <-> '+')
+      case '+/-': { const l = this.scratch.slice(-1); if (l === '-') this.scratch = this.scratch.slice(0, -1) + '+'; else if (l === '+') this.scratch = this.scratch.slice(0, -1) + '-'; else this.add('-'); return; }
+      case 'sp': this.add(' '); return;
+      case 'clr': if (this.msg) this.msg = ''; else this.scratch = this.scratch.slice(0, -1); return;
+      case 'BRT': this.brt = Math.min(1, +(this.brt + 0.15).toFixed(2)); return; case 'DIM': this.brt = Math.max(0.15, +(this.brt - 0.15).toFixed(2)); return;
+      case 'init': this.page = 'INIT'; this.sub = 0; return; case 'f-pln': this.page = 'F-PLN'; this.sub = 0; return; case 'f-pln2': this.page = 'SEC'; this.sub = 0; return;
+      case 'radnav': this.page = 'RADNAV'; this.sub = 0; return; case 'fuel-pred': this.page = 'FUEL'; this.sub = 0; return;
+      case 'prog': this.page = 'PROG'; this.sub = 0; return; case 'perf': this.page = 'PERF'; this.sub = 0; return; case 'data': this.page = 'DATA'; this.sub = 0; return;
+      case 'dir': this.page = 'DIR'; this.sub = 0; return; case 'airport': this.page = 'AIRPORT'; this.sub = 0; return; case 'menu': this.page = 'MENU'; this.sub = 0; return;
+      // F-PLN scrolls with the arrow keys; the other pages have a single screen, so the keys are accepted and do nothing
+      case 'up': case 'left': if (this.page === 'F-PLN') this.sub = Math.max(0, this.sub - 1); return;
+      case 'down': case 'right': if (this.page === 'F-PLN') this.sub = Math.min(Math.max(0, this.host ? this.host.route().length - 1 : 0), this.sub + 1); return;
+      case 'overfly': case 'opt1': case 'opt2': return; // no overfly / PERF-option behaviour is modelled
     }
     const m = /^([LR])([1-6])$/.exec(k); if (m) this.lsk(m[1] as 'L' | 'R', +m[2]);
   }
@@ -160,11 +171,13 @@ export class Mcdu {
       case 'FUEL': title('FUEL PRED'); small(1, 'AT', 'EFOB'); row(1, d.dest?.id ?? '----', `${(c.host.fm.fuel / 1000 - 1.2).toFixed(1)}`); small(2, 'FOB', 'FLOW'); row(2, `${(c.host.fm.fuel / 1000).toFixed(1)}`, `${Math.round(c.host.fm.fuelFlow * 3600)} KG/H`); small(3, 'RTE RSV', 'FINAL'); row(3, '0.6', '2.4', C.cyan, C.cyan); break;
       case 'DATA': title('DATA INDEX'); row(1, '<POSITION MONITOR'); row(2, '<IRS MONITOR'); row(3, '<GPS MONITOR'); row(4, '<A/C STATUS'); T(g, 'A320-214 CFM56-5B4/P', 500, L(5), 30, C.white, 'center', M); T(g, 'IRS ' + (c.sys.sw['IR1ModeKnb'] === 0 ? 'OFF' : 'NAV'), 500, L(6), 30, C.green, 'center', M); break;
       case 'DIR': title('DIR TO'); row(1, '[    ]', '', C.cyan); fp.slice(0, 4).forEach((w, i) => row(2 + i, w.name, '', C.green)); break;
+      case 'SEC': title('SEC F-PLN'); row(1, '<COPY ACTIVE'); row(2, '<INIT', ''); T(g, 'SECONDARY F-PLN NOT CREATED', 500, L(4), 30, C.white, 'center', M); break;
       case 'AIRPORT': title('AIRPORT'); row(1, d.dest?.id ?? '----', d.dest?.name?.slice(0, 18) ?? '', C.green, C.white); break;
     }
     // scratchpad
     T(g, this.msg || this.scratch + (Math.floor(c.t * 2) % 2 ? '_' : ' '), 30, 930, 42, this.msg ? C.amber : C.white, 'left', M);
     line(g, 20, 895, 980, 895, '#223', 2);
+    if (this.brt < 1) { g.fillStyle = `rgba(0,0,0,${(1 - this.brt) * 0.85})`; g.fillRect(0, 0, 1000, 1000); }
   }
 }
 

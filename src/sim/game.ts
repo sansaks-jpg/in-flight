@@ -1255,7 +1255,12 @@ export class Game {
       const hit = this.cockpit.press(this.raycaster, e.button, e.shiftKey);
       if (hit) {
         const c = this.fm.ctl;
-        if (hit.handled) { this.audio.click(); this.drag = { id: 'cockpit', sx: e.clientX, sy: e.clientY, v: 0 }; return; }
+        if (hit.handled) {
+          this.audio.click(); this.drag = { id: 'cockpit', sx: e.clientX, sy: e.clientY, v: 0 };
+          // refresh the hover badge straight away so it shows the control's NEW state (e.g. EFB backlight OFF) instead of the state before the click
+          const hv = this.cockpit.hover(this.raycaster); this.cockpitTooltip = hv ? { id: hv.id, label: hv.label, value: hv.value, actionHint: hv.hint, description: hv.desc, x: e.clientX, y: e.clientY } : null;
+          return;
+        }
         switch (hit.id) {
           case 'throttle': this.drag = { id: 'throttle', sx: e.clientX, sy: e.clientY, v: c.throttle }; return;
           case 'flaps': this.drag = { id: 'flaps', sx: e.clientX, sy: e.clientY, v: c.flapsIdx }; return;

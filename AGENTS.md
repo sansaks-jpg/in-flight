@@ -201,6 +201,9 @@ To prevent garbage collection (GC) micro-stutters:
 
 - Model frame: -X forward, +Y up, +Z captain side. `Cockpit.group` rotates it by -90° about Y into the body frame; the captain eye point `EYE_M` is registered to `spec.eye`.
 - Part names in the GLB are the control IDs (`APUStartBtn`, `FlapsLever`, `thr_l_body`, `spd-sel`, ...). Legend nodes `<btn>1F/2O/1A` are lit by emissive; `*_led`/`*_on` nodes are hidden unless lit (see `ledOn`).
-- New physics controls: `thrOffset`, `autobrake`, `spoilersArmed`; jets use an A320 normal-law FBW block (load-factor demand, auto-trim, pitch/bank/alpha/high-speed protections) and detent tables for flap lift/drag.
+- New physics controls: `thrOffset`, `autobrake`, `spoilersArmed`, `rudTrim`; jets use an A320 normal-law FBW block (load-factor demand, auto-trim, pitch/bank/alpha/high-speed protections), detent tables for flap lift/drag, and rudder trim aerodynamics.
+- Overhead systems: latching push-buttons (`ovh`, `mom`), guarded switches (`GUARD_OF`) with pass-through interaction, engine and APU fire shut-off valves and extinguisher agent SQUIB discharge, ELT switch, and live 7-segment green battery voltage displays (`batt_voltage.canvas`).
+- Pedestal & navigation controls: rudder trim knob with reset push-button (`RudderTrim`, `RudderTrimReset`), Radio Management Panels (`rmp`) with active/standby frequency exchange, Audio Control Panels (`acp`), MCDU BRT/DIM display brightness stepping and SEC F-PLN page.
+- EFB tablet integration: spring-damper physical bezel buttons with auto-repeat for BRT/DIM, hover button feedback, and real-time cursor click state refresh.
 - Discrepancies found while verifying this file against the code: the earlier text claimed "no imported 3D meshes" and listed three aircraft; the code ships GLBs and (now) a single A320.
 - Asset provenance and licence: `public/models/a320/NOTICE.txt`. Do not edit the GLB by hand; re-run gltf-transform (webp -> meshopt) on the pinned upstream file if it must be regenerated.

@@ -30,10 +30,12 @@ export interface Controls {
   battery: boolean; mixture: number;
   /** A320 extras: right-engine lever offset (right − left), autobrake 0 off / 1 LO / 2 MED / 3 MAX, ground-spoiler arming. */
   thrOffset: number; autobrake: number; spoilersArmed: boolean;
+  /** Rudder trim, -1 (full left, 20 units L) .. +1 (full right, 20 units R): a constant rudder offset set from the pedestal RUD TRIM knob. */
+  rudTrim: number;
   /** Hydraulic brake authority 0..1 (Yellow system / accumulator, set by A320Systems) and FADEC thrust limit factor (engine / wing anti-ice and bleed penalties). */
   brakePress: number; thrLimit: number;
 }
-export const defaultControls = (): Controls => ({ pitch: 0, roll: 0, yaw: 0, throttle: 0, brake: 0, parking: true, reverse: false, speedbrake: 0, flapsIdx: 0, gearDown: true, trim: 0, assist: true, apHold: false, brakeL: 0, brakeR: 0, battery: true, mixture: 1, thrOffset: 0, autobrake: 0, brakePress: 1, thrLimit: 1, spoilersArmed: false });
+export const defaultControls = (): Controls => ({ pitch: 0, roll: 0, yaw: 0, throttle: 0, brake: 0, parking: true, reverse: false, speedbrake: 0, flapsIdx: 0, gearDown: true, trim: 0, assist: true, apHold: false, brakeL: 0, brakeR: 0, battery: true, mixture: 1, thrOffset: 0, rudTrim: 0, autobrake: 0, brakePress: 1, thrLimit: 1, spoilersArmed: false });
 
 /** A320 slat/flap detents (0, 1, 2, 3, FULL) -> fraction of full-flap lift / drag. CONF 1 is slats only (little CL0, lots of CLmax). */
 const FLAP_LIFT = [0, 0.12, 0.40, 0.62, 1], FLAP_DRAG = [0, 0.08, 0.30, 0.58, 1];
@@ -217,7 +219,7 @@ export class FlightModel {
       if (this.alpha > aMax) pCmd *= 0.5;
       ailCmd = (pCmd - (-this.w.z)) * 1.1 / cb;
       const rudLim = clamp(1 - (kias - 160) / 220, 0.25, 1);                           // rudder travel limiter
-      rudCmd = c.yaw * rudLim + (this.wow ? (Math.abs(c.yaw) < 0.05 && this.gs > 3 ? clamp(this.w.y * 0.9, -0.5, 0.5) : 0) : clamp(this.beta * 7, -0.5, 0.5)); // yaw damper + turn coordination
+      rudCmd = c.yaw * rudLim + c.rudTrim * 0.3 + (this.wow ? (Math.abs(c.yaw) < 0.05 && this.gs > 3 ? clamp(this.w.y * 0.9, -0.5, 0.5) : 0) : clamp(this.beta * 7, -0.5, 0.5)); // yaw damper + turn coordination
     } else if (c.assist) {
       const sp = clamp(this.ias / (s.vs1 * 0.514 * 1.5), 0.55, 1.4);
       const qCmd = pilotPitch * s.maxPitchRate / Math.sqrt(sp);
@@ -233,10 +235,10 @@ export class FlightModel {
       if (!c.apHold && Math.abs(pilotRoll) < 0.03 && Math.abs(bankDeg) < 22) pCmd = -this.bank * 0.9;
       if (Math.abs(bankDeg) > 62 && Math.sign(pilotRoll) === Math.sign(bankDeg)) pCmd = 0;
       ailCmd = (pCmd - (-this.w.z)) * 1.1;
-      rudCmd = c.yaw + (this.wow ? (Math.abs(c.yaw) < 0.05 && this.gs > 3 ? clamp(this.w.y * 0.9, -0.5, 0.5) : 0) : clamp(this.beta * 7, -0.5, 0.5));
+      rudCmd = c.yaw + c.rudTrim * 0.3 + (this.wow ? (Math.abs(c.yaw) < 0.05 && this.gs > 3 ? clamp(this.w.y * 0.9, -0.5, 0.5) : 0) : clamp(this.beta * 7, -0.5, 0.5));
     } else {
       elevCmd = pilotPitch + c.trim * 0.5 + (c.assist ? this.trimAuto * 0.7 + prot : 0);
-      ailCmd = pilotRoll; rudCmd = c.yaw;
+      ailCmd = pilotRoll; rudCmd = c.yaw + c.rudTrim * 0.3;
     }
     // keep auto-trim sensible on ground
     if (this.wow && c.assist) this.trimAuto += (clamp(-(s.Cm0) / s.Cmde, -0.9, 0.9) * 0.5 - this.trimAuto) * dt * 0.8;

@@ -53,6 +53,8 @@ export class A320Systems {
   hyd = { green: 0, yellow: 0, blue: 0 }; accumPsi = 0; ratOut = false;
   // ---- fuel ----
   pumps = [true, true, true, true, true, true]; xfeed = false; fuelMode = true;
+  // ---- fire protection: FIRE pb released (out) per ENG 1 / ENG 2 / APU, extinguisher agents discharged (ENG1 A1,A2 · ENG2 A1,A2 · APU A1), ELT switch ----
+  fireOut = [false, false, false]; agentDisch = [false, false, false, false, false]; elt = false;
   tank = { l: 0, c: 0, r: 0 };
   // ---- engines ----
   engMode: 0 | 1 | 2 = 1; // 0 CRANK, 1 NORM, 2 IGN/START
@@ -159,7 +161,7 @@ export class A320Systems {
     this.bleedPsi[1] = Math.max(bleedSrc(1), apuB, this.xbleed ? bleedSrc(0) * 0.9 : 0);
     // ---------------- pressurisation (cabin altitude schedule, max ΔP 8.06 psi) ----------------
     const altFt = d.altFt, pOutside = 14.696 * Math.pow(1 - 6.8756e-6 * Math.max(0, altFt), 5.2559);
-    const packOn = (this.packs[0] && this.bleedPsi[0] > 20) || (this.packs[1] && this.bleedPsi[1] > 20);
+    const packOn = !this.sw.DitchBtn && ((this.packs[0] && this.bleedPsi[0] > 20) || (this.packs[1] && this.bleedPsi[1] > 20));   // DITCHING pb closes outflow valve and pack flow
     let tgtCab = onGround ? altFt - 0 : Math.min(altFt, Math.max(0, altFt * 0.22 - 400));
     if (!packOn) tgtCab = altFt; // unpressurised
     const cabNow = this.cabAltFt, step = (packOn ? 500 : 3000) * dt / 60;
@@ -168,8 +170,8 @@ export class A320Systems {
     const pCab = 14.696 * Math.pow(1 - 6.8756e-6 * this.cabAltFt, 5.2559);
     this.deltaP = Math.max(0, pCab - pOutside); this.outflow = packOn ? Math.min(1, 0.3 + this.deltaP / 12) : 1;
     // ---------------- hydraulics ----------------
-    const g = this.hydPump.green && engRun[0] ? 3000 : 0;
-    const yEng = this.hydPump.yellow && engRun[1] ? 3000 : 0;
+    const g = this.hydPump.green && engRun[0] && !this.fireOut[0] ? 3000 : 0;   // FIRE pb released closes the hydraulic fire shut-off valve
+    const yEng = this.hydPump.yellow && engRun[1] && !this.fireOut[1] ? 3000 : 0;
     const yEl = this.hydPump.yElec && this.ac ? 3000 : 0;
     const bl = this.hydPump.blue && this.ac ? 3000 : 0;
     const ptu = this.hydPump.ptu && (g > 0) !== (yEng + yEl > 0) && (engRun[0] || engRun[1]) ? 2500 : 0;
@@ -255,6 +257,7 @@ export class A320Systems {
 
   private tryStart(i: number, h: CockpitHost) {
     const fm = h.fm, other = fm.eng[1 - i].state === 2;
+    if (this.fireOut[i]) { this.msg(h, `ENG ${i + 1}: FIRE pb released – push it back in before starting`, 'warn'); this.master[i] = false; return; }
     if (this.engMode !== 2) { this.msg(h, `ENG ${i + 1}: set ENG MODE selector to IGN/START first`, 'warn'); this.master[i] = false; return; }
     if (!this.dc) { this.master[i] = false; return; }
     if (!(this.bleedPsi[i] > 20 || other || this.bleedPsi[1 - i] > 20)) { this.msg(h, `ENG ${i + 1}: no bleed air – start the APU and open APU BLEED`, 'warn'); this.master[i] = false; return; }

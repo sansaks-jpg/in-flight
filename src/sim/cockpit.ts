@@ -34,7 +34,7 @@ export const COCKPIT_PANELS = {
   ecam: { c: V(-0.556, 0.06, -0.013), n: N(1, 0.12, 0), w: 0.2, h: 0.4 },
   instruments: { c: V(-0.55, 0.16, 0.0), n: N(1, 0.1, 0), w: 1.2, h: 0.4 },
   mcdu: { c: V(-0.41, -0.06, 0.18), n: N(0.25, 1, 0), w: 0.2, h: 0.32 },
-  efb: { c: V(-0.0636, 0.3244, 0.9221), n: N(0.588, 0.196, -0.784), w: 0.27, h: 0.2 },
+  efb: { c: V(-0.066, 0.3311, 0.9275), n: N(0.5613, 0.1934, -0.8049), w: 0.31, h: 0.21 }, // centred on glass + bezel button column (u -40..240 mm)
 } as const;
 /** Named camera presets: eye + look-at point in model coordinates and a vertical FOV (pilot / seat / wide views). */
 export const COCKPIT_PRESETS = {
@@ -56,60 +56,74 @@ type Kind = 'push' | 'switch' | 'knob' | 'guard' | 'lever' | 'key' | 'stick' | '
 interface Part { node: THREE.Mesh; m0: THREE.Matrix4; }
 interface Group { id: string; kind: Kind; parts: Part[]; axis?: Axis; pos: number; angle: number; press: number; label: string; steps: number; box: THREE.Box3; lamps: { node: THREE.Mesh; letter: string; row: number }[]; nrm?: THREE.Vector3;
   /** current model-space pose matrix · fallback axis derived from the bounding box · static (state-driven) control · last pose key */
-  xf: THREE.Matrix4; fb?: Axis; still: boolean; lastKey: number; }
+  xf: THREE.Matrix4; fb?: Axis; still: boolean; lastKey: number;
+  /** overhead push-button: `ovh` = lives on the overhead panel, `mom` = momentary (springs back) – every other overhead push-button latches (IN = engaged / AUTO, OUT = OFF) */
+  ovh?: boolean; mom?: boolean; sgn?: number; }
 /** Parts that ride on another control: the A/THR disconnect pushbuttons and the reverse flaps move with their thrust lever. */
 /** Controls whose pose depends on live flight data, not just on their own switch position – never skipped by the static-pose optimisation. */
-const DYNAMIC = new Set(['gear_lever', 'ParkBrk', 'tiller', 'tillerFo', 'rev_l', 'rev_r', 'thr_l_button', 'thr_r_button', 'brakes_lb_psi', 'brakes_rb_psi', 'brakes_accum_psi']);
+const THR_PIVOT_L: [number, number, number] = [-0.1097, -0.09, 0.0215], THR_PIVOT_R: [number, number, number] = [-0.1097, -0.09, -0.0215];
+const DYNAMIC = new Set(['Lcutoff', 'Rcutoff', 'RudderTrim', 'gear_lever', 'ParkBrk', 'tiller', 'tillerFo', 'rev_l', 'rev_r', 'thr_l_button', 'thr_r_button', 'brakes_lb_psi', 'brakes_rb_psi', 'brakes_accum_psi']);
 const LEADER: Record<string, string> = { thr_l_button: 'thr_l_body', thr_r_button: 'thr_r_body', rev_l: 'thr_l_body', rev_r: 'thr_r_body' };
 /** Real (model-space) corners of the captain's EFB screen face – bottom-left, bottom-right, top-right, top-left as seen by the pilot. */
 const EFB_CORNERS: [number, number, number][] = [[0.01997, 0.22737, 0.96257], [-0.17911, 0.264, 0.83253], [-0.17586, 0.43924, 0.87692], [0.02322, 0.40261, 1.00695]]; // exact vertices of the glass quad in the GLB (planar parallelogram)
 /** Reference frame the bezel-button positions (EFB_BTNS, mm) were measured in: origin = bottom-left, u = towards bottom-right, v = towards top-left. */
 const EFB_BTN_FRAME: [number, number, number][] = [[0.0200, 0.2274, 0.9626], [-0.1778, 0.2644, 0.8307], [-0.1747, 0.4396, 0.8752], [0.0245, 0.4031, 1.0052]];
 
-/** The model's tablet has a stray, slightly tilted "glass" quad (about 5 mm proud of the real screen face on one side, and half of it facing the wrong way).
- *  It poked through the live page and showed up as a black triangle over the display. Every large triangle that is parallel to the screen but NOT on the
- *  screen plane is removed from the EFB_cpt mesh (the true screen face and the whole bezel / buttons / mount are untouched). */
+/** The model's tablet bezel plate is a triangle fan that bridges the screen opening: parts of it (and a stray tilted glass quad plus a very thin sliver running
+ *  corner-to-corner) sit 1-5 mm in FRONT of the live page overlay and show up as a black half-screen or a thin dark diagonal line.
+ *  The live overlay replaces the glass completely, so every EFB_cpt triangle near the screen plane (within 20 mm, inside the glass rectangle +/-15 %)
+ *  whose CENTROID lies inside the opening is removed. Bezel-ring triangles (centroid outside the opening), mount, buttons and housing stay. */
 function stripEfbGlass(mesh: THREE.Mesh): number {
   const geo = mesh.geometry, idx = geo.index, pos = geo.attributes.position; if (!idx || !pos) return 0;
   const c = EFB_CORNERS.map((p) => new THREE.Vector3(...p)), eu = c[1].clone().sub(c[0]), ev = c[3].clone().sub(c[0]), n = new THREE.Vector3().crossVectors(eu, ev).normalize();
-  const lu = eu.lengthSq(), lv = ev.lengthSq(), d = new THREE.Vector3(), P = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()], e1 = new THREE.Vector3(), e2 = new THREE.Vector3(), tn = new THREE.Vector3();
+  const lu = eu.lengthSq(), lv = ev.lengthSq(), d = new THREE.Vector3(), P = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
   const near = (p: THREE.Vector3) => { d.copy(p).sub(c[0]); const a = d.dot(eu) / lu, b = d.dot(ev) / lv; return a > -0.15 && a < 1.15 && b > -0.15 && b < 1.15 && Math.abs(d.dot(n)) < 0.02; };
   const keep: number[] = []; let dropped = 0;
   for (let t = 0; t < idx.count; t += 3) {
     for (let k = 0; k < 3; k++) P[k].fromBufferAttribute(pos, idx.getX(t + k));
-    e1.subVectors(P[1], P[0]); e2.subVectors(P[2], P[0]); tn.crossVectors(e1, e2); const area = tn.length() / 2; tn.normalize();
-    const big = area > 0.008 && Math.abs(tn.dot(n)) > 0.99 && P.every(near), off = Math.max(...P.map((p) => Math.abs(d.copy(p).sub(c[0]).dot(n))));
-    if (big && off > 0.0007) { dropped++; continue; }
+    if (P.every(near)) { d.copy(P[0]).add(P[1]).add(P[2]).multiplyScalar(1 / 3).sub(c[0]); const a = d.dot(eu) / lu, b = d.dot(ev) / lv; if (a > 0.02 && a < 0.98 && b > 0.02 && b < 0.98) { dropped++; continue; } }
     keep.push(idx.getX(t), idx.getX(t + 1), idx.getX(t + 2));
   }
   if (dropped) geo.setIndex(keep);
   return dropped;
 }
 /** Bezel controls of the captain's EFB display unit, in millimetres in the screen frame (u right, v up from the bottom-left corner of the glass).
- *  The model bakes them into the tablet mesh, so they are picked through invisible hot-spots registered to the real button caps. */
-const EFB_BTNS: { id: string; u: number; v: number; w: number; h: number; label: string; desc: string }[] = [
-  { id: 'efb_usb1', u: -26, v: 176.1, w: 14, h: 14, label: 'EFB USB PORT 1', desc: 'USB data port of the captain\'s EFB display unit (keyboard / data load). No device is connected in the simulator.' },
-  { id: 'efb_pwr', u: -27, v: 155.3, w: 12, h: 12, label: 'EFB DISPLAY (PWR)', desc: 'Switches the EFB display backlight on / off. The EFB itself stays active when the backlight is off; pressing again restores the last BRT/DIM setting.' },
-  { id: 'efb_brt', u: -27.5, v: 132.4, w: 10, h: 10, label: 'EFB BRT', desc: 'Increases the EFB display backlight intensity (BRT / DIM switch).' },
-  { id: 'efb_dim', u: -27.4, v: 118.8, w: 10, h: 10, label: 'EFB DIM', desc: 'Decreases the EFB display backlight intensity (BRT / DIM switch).' },
-  { id: 'efb_view', u: -25, v: 57.7, w: 13, h: 12, label: 'EFB VIEW OFFSIDE', desc: 'Shows the first officer\'s (offside) EFB page on this display, read-only. Press again to return to your own EFB.' },
-  { id: 'efb_usb2', u: -25.6, v: 8.1, w: 14, h: 14, label: 'EFB USB PORT 2', desc: 'Second USB data port of the captain\'s EFB display unit. No device is connected in the simulator.' },
+ *  Positions are the measured bounding boxes of the real button caps in the GLB (EFB_cpt, 10 triangles each; legends are quads of EFB_cpt_glare).
+ *  `cap` = [u0, u1, v0, v1] of a pressable cap: it is lifted out of the baked tablet mesh and travels `travel` mm into the bezel while held.
+ *  The two USB ports are fixed sockets (no travel). All hot-spots are cap + 0.5 mm. */
+interface EfbBtn { id: string; u: number; v: number; w: number; h: number; label: string; desc: string; cap?: [number, number, number, number]; travel?: number; repeat?: boolean }
+const EFB_BTNS: EfbBtn[] = [
+  { id: 'efb_usb1', u: -26.05, v: 175.85, w: 16.6, h: 12.2, label: 'EFB USB PORT 1', desc: 'USB data port of the captain\'s EFB display unit (keyboard / data load). No device is connected in the simulator.' },
+  { id: 'efb_pwr', u: -27.75, v: 154.5, w: 10.3, h: 11.2, cap: [-32.4, -23.1, 149.4, 159.6], travel: 1.2, label: 'EFB DISPLAY (PWR)', desc: 'Switches the EFB display backlight on / off. The EFB itself stays active when the backlight is off; pressing again restores the last BRT/DIM setting.' },
+  { id: 'efb_brt', u: -27.75, v: 132.15, w: 10.3, h: 11.3, cap: [-32.4, -23.1, 127, 137.3], travel: 1.2, repeat: true, label: 'EFB BRT', desc: 'Increases the EFB display backlight intensity in 10 % steps. Hold to keep increasing.' },
+  { id: 'efb_dim', u: -27.75, v: 118.6, w: 10.3, h: 11.2, cap: [-32.4, -23.1, 113.5, 123.7], travel: 1.2, repeat: true, label: 'EFB DIM', desc: 'Decreases the EFB display backlight intensity in 10 % steps (minimum 10 %). Hold to keep decreasing.' },
+  { id: 'efb_view', u: -25.45, v: 56.85, w: 14.7, h: 11.3, cap: [-32.3, -18.6, 51.7, 62], travel: 1.4, label: 'EFB VIEW OFFSIDE', desc: 'Shows the first officer\'s (offside) EFB page on this display, read-only. Press again to return to your own EFB.' },
+  { id: 'efb_usb2', u: -25.95, v: 7.85, w: 16.6, h: 12.2, label: 'EFB USB PORT 2', desc: 'Second USB data port of the captain\'s EFB display unit. No device is connected in the simulator.' },
 ];
 
 // ---- naming helpers ----
-const MCDU_KEYS = new Set(['init', 'f-pln', 'f-pln2', 'radnav', 'fuel-pred', 'prog', 'perf', 'data', 'dir', 'airport', 'clr', 'sp', 'left', 'right', 'up', 'down', 'opt1', 'opt2', 'overfly', '+/-', '/', '.', 'mcdu', 'sec-fpln']);
+const MCDU_KEYS = new Set(['init', 'f-pln', 'f-pln2', 'radnav', 'fuel-pred', 'prog', 'perf', 'data', 'dir', 'airport', 'clr', 'sp', 'left', 'right', 'up', 'down', 'opt1', 'opt2', 'overfly', '+/-', '/', '.', 'mcdu', 'sec-fpln', 'BRT', 'DIM', '']);
 for (const c of 'abcdefghijklmnopqrstuvwxyz0123456789') MCDU_KEYS.add(c);
 for (let i = 1; i <= 6; i++) { MCDU_KEYS.add('L' + i); MCDU_KEYS.add('R' + i); }
-const ON_WHEN_IN = new Set(['APUMasterBtn', 'APUStartBtn', 'ExtPwrBtn', 'Eng1ManStartBtn', 'Eng2ManStartBtn', 'RamAirBtn', 'WingAntiIceBtn', 'Eng1AntiIceBtn', 'Eng2AntiIceBtn', 'PrbWinHeatBtn', 'EmerCallBtn', 'EvacCommandBtn', 'CrewOxyBtn', 'GalleyPwrBtn', 'CommercialBtn', 'RcdrGndCtlBtn', 'ToiletBtn', 'DitchBtn', 'MaskManOnBtn']);
+const ON_WHEN_IN = new Set(['APUMasterBtn', 'APUStartBtn', 'ExtPwrBtn', 'Eng1ManStartBtn', 'Eng2ManStartBtn', 'RamAirBtn', 'WingAntiIceBtn', 'Eng1AntiIceBtn', 'Eng2AntiIceBtn', 'EmerCallBtn', 'EvacCommandBtn', 'RcdrGndCtlBtn', 'ToiletBtn', 'DitchBtn', 'MaskManOnBtn']);
+/** Overhead push-buttons that spring back (tests, calls, guarded one-shot actions, ACP call keys). Every other overhead push-button is a LATCHING pb-sw: IN = engaged (ON / AUTO), OUT = released (OFF). */
+const MOMENTARY = /(Test|FireTst)(\.\d+)?$|Call$|^(EmerGenTest|CVRErase|EvacHornOff|DLSSys(Next|Prev|SelCtl)Btn|EltTestRst|RATMan|EmerElecManOnBtn|EmerCallBtn|APUExtReset|IDG[12]Btn|APUFireAgtBtn|Eng[12]FireAgt[12]Btn|FwdCargoDischBtn|AftCargoDischBtn)(\.\d+)?$|^audio_(reset|voice|call_\w+|att|mech)\.ovh$/;
+/** Guarded controls -> their cover: the button can only be operated with the guard lifted (a click on a closed guard opens it first). */
+const GUARD_OF: Record<string, string> = { EvacCommandBtn: 'EvacCommandProt', DitchBtn: 'DitchProt', Eng1ManStartBtn: 'Eng1ManStartProt', Eng2ManStartBtn: 'Eng2ManStartProt', Eng1N1Btn: 'Eng1N1Prot', Eng2N1Btn: 'Eng2N1Prot', RamAirBtn: 'RamAirBtnProt', RATMan: 'RATManGuard', EmerElecManOnBtn: 'EmerManOnGuard', EmerGenTest: 'EmerGenTestGuard', 'EmerGenTest.002': 'EmerGenTestGuard', 'EmerGenTest.003': 'EmerGenTestGuard', MaskManOnBtn: 'MaskManOnGuard', AftCargoDischBtn: 'AftCargoDischGuard', FwdCargoDischBtn: 'FwdCargoDischGuard', IDG1Btn: 'IDG1Prot', IDG2Btn: 'IDG2Prot', BlueElecPump: 'BlueElecPumpProt', EmerCallBtn: 'EmerCallProt', ELTSw: 'ELTSwGuard', firebtn1: 'Eng1FireCover', firebtn2: 'Eng2FireCover', firebtnapu: 'APUFireCover' };
+/** Extinguisher agent buttons: index into A320Systems.agentDisch (ENG1 A1, A2 · ENG2 A1, A2 · APU) and the FIRE pb that arms them. */
+const AGENT_IDX: Record<string, number> = { Eng1FireAgt1Btn: 0, Eng1FireAgt2Btn: 1, Eng2FireAgt1Btn: 2, Eng2FireAgt2Btn: 3, APUFireAgtBtn: 4 };
+const fireOf = (agent: number) => (agent === 4 ? 2 : agent >> 1);
+/** Legend text of the 3-position overhead switches, lowest lever position first (as printed on the panel, bottom -> top). */
+const SWITCH_LABELS: Record<string, string[]> = { StrobeLtSwtch: ['OFF', 'AUTO', 'ON'], BeaconLtSwtch: ['OFF', 'ON'], LandingLtSwtch: ['RETRACT', 'OFF', 'ON'], LandingLtRSwtch: ['RETRACT', 'OFF', 'ON'], NavLogoLtSwtch: ['2', 'OFF', '1'], SeatBeltSwtch: ['OFF', 'AUTO', 'ON'], NoSmokingSwtch: ['OFF', 'AUTO', 'ON'], DomeLtSwtch: ['OFF', 'DIM', 'BRT'], ELTSw: ['ARM', 'ON'] };
 const DEFAULT_OFF = new Set(['APUMasterBtn', 'APUStartBtn', 'ExtPwrBtn', 'Eng1ManStartBtn', 'Eng2ManStartBtn', 'RamAirBtn', 'DitchBtn', 'EvacCommandBtn', 'RcdrGndCtlBtn', 'MaskManOnBtn', 'WingAntiIceBtn', 'Eng1AntiIceBtn', 'Eng2AntiIceBtn', 'Lcutoff', 'Rcutoff']);
 const SWITCH3 = new Set(['vor-adf1', 'vor-adf2', 'vor-adf-1-right', 'vor-adf-2-right', 'StrobeLtSwtch', 'LandingLtSwtch', 'LandingLtRSwtch', 'NoseLtSwtch', 'NavLogoLtSwtch', 'SeatBeltSwtch', 'NoSmokingSwtch', 'EmerExtLtSwtch', 'DomeLtSwtch', 'TurnoffLtSwtch', 'WingLtSwtch', 'AnnunciatorLtSwtch', 'CockpitDoorSwitch', 'ManVSCTLSwitch', 'DLSSysSwtch']);
-const KNOB_STEPS: Record<string, number> = { IR1ModeKnb: 3, IR2ModeKnb: 3, IR3ModeKnb: 3, XbleedKnb: 3, eng_mode: 3, nd_mode: 5, nd_mode_fo: 5, nd_range: 6, nd_range_fo: 6, CockpitACKnb: 12, FwdCabinACKnb: 12, AftCabinACKnb: 12, ACFlowKnb: 3, LdgElevKnb: 12, LeftWiperKnb: 4, RightWiperKnb: 4, radar_mode: 4, radar_sys: 3, 'qnh_cpt_sw': 2, 'qnh_fo_sw': 2, 'alt-sel-mode': 2, 'spd-sel': 40, hdg_sel: 40, 'alt-sel': 40, 'vs-sel': 40, 'qnh_cpt_knb': 40, 'qnh_fo_knb': 40, iesi_baro_knb: 40, clock_knob: 3, LReadingLtKnb: 12, RReadingLtKnb: 12, OHPMarkLtKnb: 12 };
+const KNOB_STEPS: Record<string, number> = { IR1ModeKnb: 3, IR2ModeKnb: 3, IR3ModeKnb: 3, XbleedKnb: 3, eng_mode: 3, RudderTrim: 41, nd_mode: 5, nd_mode_fo: 5, nd_range: 6, nd_range_fo: 6, CockpitACKnb: 12, FwdCabinACKnb: 12, AftCabinACKnb: 12, ACFlowKnb: 3, LdgElevKnb: 12, LeftWiperKnb: 4, RightWiperKnb: 4, radar_mode: 4, radar_sys: 3, 'qnh_cpt_sw': 2, 'qnh_fo_sw': 2, 'alt-sel-mode': 2, 'spd-sel': 40, hdg_sel: 40, 'alt-sel': 40, 'vs-sel': 40, 'qnh_cpt_knb': 40, 'qnh_fo_knb': 40, iesi_baro_knb: 40, clock_knob: 3, LReadingLtKnb: 12, RReadingLtKnb: 12, OHPMarkLtKnb: 12 };
 /** Rotary push/pull encoders of the FCU and the EFIS BARO knobs: rotate, PUSH (managed / QNH) and PULL (selected / STD). Knob angle follows the clicks (32 per turn), never the value. */
 const PUSHPULL = new Set(['spd-sel', 'hdg_sel', 'alt-sel', 'vs-sel', 'qnh_cpt_knb', 'qnh_fo_knb']);
 /** Two-position rings: ALT 100/1000 ft step ring, EFIS hPa/inHg ring (position 0 = left). */
 const RING = new Set(['alt-sel-mode', 'qnh_cpt_sw', 'qnh_fo_sw']);
 /** Initial positions that must match the system state (ADF-OFF-VOR switches rest in OFF, ND selectors in ARC / 80 NM). */
-const POS0: Record<string, number> = { 'alt-sel-mode': 0, qnh_cpt_sw: 1, qnh_fo_sw: 1, 'vor-adf1': 1, 'vor-adf2': 1, 'vor-adf-1-right': 1, 'vor-adf-2-right': 1, nd_mode: 3, nd_mode_fo: 3, nd_range: 3, nd_range_fo: 3 };
+const POS0: Record<string, number> = { LeftWiperKnb: 0, RightWiperKnb: 0, LReadingLtKnb: 0, RReadingLtKnb: 0, LdgElevKnb: 0, 'alt-sel-mode': 0, qnh_cpt_sw: 1, qnh_fo_sw: 1, 'vor-adf1': 1, 'vor-adf2': 1, 'vor-adf-1-right': 1, 'vor-adf-2-right': 1, 'audio_int_rad.cpt': 1, 'audio_int_rad.fo': 1, nd_mode: 3, nd_mode_fo: 3, nd_range: 3, nd_range_fo: 3 };
 const ECP_KEYS = new Set([...Object.keys(PAGE_KEYS), 'ecam_all', 'ecam_clr_l', 'ecam_clr_r', 'ecam_rcl', 'ecam_emer_canc', 'ecam_to_config']);
 /** Source switching knobs (pedestal switching panel) -> field of A320Systems.switching and the legend of each position. */
 const SRC_KNOBS: Record<string, { key: 'attHdg' | 'airData' | 'eisDmc' | 'ndXfr'; legend: string[] }> = {
@@ -179,6 +193,10 @@ export class Cockpit {
   camera = new THREE.PerspectiveCamera(68, 1, 0.02, 80);
   views: Record<'cockpit' | 'aisle' | 'window', View>;
   interactive: THREE.Object3D[] = []; readonly cabinHeads: THREE.Object3D[] = [];
+  /** Radio management panels (CAPT / F/O): power, selected radio, BFO / AM. Audio control panels: receive keys + the selected transmit key. */
+  private rmp = [{ on: true, sel: 'vhf1', bfo: false, am: false }, { on: true, sel: 'vhf2', bfo: false, am: false }];
+  private acp = [{ rx: { vhf1: true, int: true } as Record<string, boolean>, tx: 'vhf1' }, { rx: { vhf2: true, int: true } as Record<string, boolean>, tx: 'vhf2' }];
+  private dtA = 0.016; private rudSm = 0; private mstSm: number[] = [0, 0];
   host?: CockpitHost; sys = new A320Systems(); mcdu = [new Mcdu(), new Mcdu()];
   ready: Promise<void>; loaded = false; fallback?: ProceduralCockpit; daylight = 1;
   zoom = 1; private zoomT = 1; private fovCur = 68; private fovT = 68;
@@ -212,6 +230,7 @@ export class Cockpit {
     // GLTFLoader sanitises node names (drops '.'), but every control id below uses the ORIGINAL glTF name (e.g. 'pfd1.screen', 'ap1.cpt'):
     model.traverse((o) => { const u = o.userData as { name?: string; sourceName?: string }; const real = u.name || u.sourceName; if (real) o.name = real; });
     model.traverse((o) => { if ((o as THREE.Mesh).isMesh && o.name === 'EFB_cpt') stripEfbGlass(o as THREE.Mesh); });
+    this.extractEfbCaps(model);
     this.efbFo.page = 'PLAN'; this.efbFo.readOnly = true; this.efbFo.banner = 'OFFSIDE · F/O EFB (read-only)';
     const maxA = 16; const nodes = new Map<string, THREE.Mesh>(); const all: THREE.Mesh[] = [];
     model.traverse((o) => { if ((o as THREE.Mesh).isMesh) { const m = o as THREE.Mesh; all.push(m); nodes.set(m.name, m); const mt = m.material as THREE.MeshStandardMaterial; if (mt.map) { mt.map.anisotropy = maxA; mt.map.needsUpdate = true; } } });
@@ -224,7 +243,10 @@ export class Cockpit {
     const addPart = (g: Group, m: THREE.Mesh) => { m.updateMatrix(); m.matrixAutoUpdate = false; g.parts.push({ node: m, m0: m.matrix.clone() }); used.add(m); const b = new THREE.Box3().setFromObject(m); g.box.union(b); };
     for (const m of all) {
       const n = m.name; if (HIDE.test(n)) { m.visible = false; used.add(m); continue; }
+      if (/^batt_voltage\.canvas\.[LR]$/.test(n)) { this.battMesh.push({ mesh: m, side: n.endsWith('R') ? 1 : 0, key: '' }); used.add(m); continue; }
       if (SCREENS[n]) continue; if (FCU_IND.has(n)) { this.fcuInd.set(n, m); m.visible = false; used.add(m); continue; }
+      if (/^mcdu_ann_\w+\.(cpt|fo)$/.test(n) || /^engine_(fire|fault)_[12]$/.test(n) || n === 'thr_quad_lts') { this.lampNodes.push({ node: m, base: n, kind: 'led', letter: '', row: 0 }); m.visible = false; used.add(m); continue; }
+      if (/^(audio|radio)_\w+_glare\.(cpt|fo)$/.test(n)) { this.lampNodes.push({ node: m, base: n.replace('_glare', ''), kind: 'led', letter: '', row: 0 }); m.visible = false; used.add(m); continue; }
       const leg = baseOfLegend(n);
       if (leg) { this.lampNodes.push({ node: m, base: leg.base, kind: 'leg', letter: leg.letter, row: leg.row }); used.add(m); continue; }
       const lb = n.match(/^(.*?)_(?:led|lit)(\.cpt|\.fo|\.ovh)?(\.\d+)?$/);
@@ -235,15 +257,18 @@ export class Cockpit {
       if (used.has(m) || SCREENS[m.name]) continue; const n = m.name;
       const key = n.replace(/\.(cpt|fo|ovh)$/, ''), side = /\.fo$/.test(n) ? 'fo' : 'cpt';
       let kind: Kind | null = null, id = n;
-      if (/\.mark$/.test(n) && nodes.has(n.replace(/\.mark$/, ''))) { const g = mkGroup(n.replace(/\.mark$/, ''), 'knob'); addPart(g, m); continue; }
+      const im = /^audio_int_rad\.mark\.(cpt|fo)$/.exec(n); if (im) { addPart(mkGroup('audio_int_rad.' + im[1], 'switch'), m); continue; }
+      if (/\.mark(\.ovh)?$/.test(n) && nodes.has(n.replace(/\.mark/, ''))) { const g = mkGroup(n.replace(/\.mark/, ''), 'knob'); addPart(g, m); continue; }
       if (/\.cpt$|\.fo$/.test(n) && MCDU_KEYS.has(key)) { kind = 'key'; id = (side === 'fo' ? 'F:' : 'C:') + key; }
       else if (/(Knb)$/.test(n) || n in KNOB_STEPS || /^(brightness_|pfd_brt|ecam_brt|speaker_volume|lt_knb|flood_lt_main$|flood_lt_ped$|integ_lt$|fcu_integ_knb|light_console|nd_range|nd_mode|radar_(gain|tilt|gcs)|audio_pa_rot|radio_rot)/.test(n)) kind = 'knob';
-      else if (/Swtch$|Switch$/.test(n) || SWITCH3.has(n) || /^pfd_nd_xfr_sw2?$/.test(n) || /_sw$|_sw\.(cpt|fo)$|^qnh_(cpt|fo)_sw$|^(land_sw|NoseLtSwtch|trim_?\w*)$/.test(n)) kind = 'switch';
+      else if (/Swtch$|Switch$|^ELTSw$/.test(n) || SWITCH3.has(n) || /^pfd_nd_xfr_sw2?$/.test(n) || /_sw$|_sw\.(cpt|fo)$|^qnh_(cpt|fo)_sw$|^(land_sw|NoseLtSwtch|trim_?\w*)$/.test(n)) kind = 'switch';
       else if (/(Guard|Prot|Cover)(\.\d+)?$/.test(n) || /^(APUFireCover|Eng[12]FireCover)$/.test(n)) kind = 'guard';
-      else if (/Btn$/.test(n) || /^(OVH_button\.\d+|ecam_(?!.*(_led|_lit)$)\w+|firebtn\w*|PedestalFireBtn\.(cpt|fo)|EmerGenTest(\.\d+)?|Eng[12]FireTst|APUFireTst|CVR\w+|\w+Call|EvacHornOff|EvacCapt-Purs|SEC\dBtn|CargoSmkTest|LeftRainTest|RightRainTest|DLSSys(Next|Prev|SelCtl)Btn|atc_\w+|radio_\w+|audio_\w+|\w+\.(cpt|fo))$/.test(n) || FCU_TOGGLES.has(n) || /^(spd-sel|hdg_sel|alt-sel|vs-sel)$/.test(n)) kind = 'push';
+      else if (/Btn$/.test(n) || /^(BatteryBtn\d|GreenEngPump2|YellowEngPump|BlueElecPump|YellowElecPump|PTU2|RATMan|EltTestRst|APUExtReset)$/.test(n) || /^audio_[a-z0-9_]+\.ovh$/.test(n) && !/(_glare|_led|_sgn|_rot|\.mark|_int_rad)\./.test(n) || /^(OVH_button\.\d+|ecam_(?!.*(_led|_lit)$)\w+|firebtn\w*|PedestalFireBtn\.(cpt|fo)|EmerGenTest(\.\d+)?|Eng[12]FireTst|APUFireTst|CVR\w+|\w+Call|EvacHornOff|EvacCapt-Purs|SEC\dBtn|CargoSmkTest|LeftRainTest|RightRainTest|DLSSys(Next|Prev|SelCtl)Btn|atc_\w+|radio_\w+|audio_\w+|\w+\.(cpt|fo))$/.test(n) || FCU_TOGGLES.has(n) || /^(spd-sel|hdg_sel|alt-sel|vs-sel)$/.test(n)) kind = 'push';
       else if (/^(gear_lever|FlapsLever|SpdBrk|ParkBrk|thr_[lr]_body|Lcutoff|Rcutoff|eng_mode)$/.test(n)) kind = 'lever';
       else if (/^sidestick_[12]/.test(n)) { kind = 'stick'; id = 'stick'; }
       if (/(_led|_on|_lit|_glare|_illuminated)(\.\w+)?$|\.mark$|^audio_.*(_led|_glare|_sgn)/.test(n) || /^(brk_|ecam_.*_led)/.test(n)) kind = kind === 'knob' ? kind : null;
+      if (/^radio_on\.(cpt|fo)$/.test(n) || /^radar_(multiscan|pws)$/.test(n) || n === 'CockpitDoorVideoButton') kind = 'push';   // RMP ON/OFF, weather-radar MULTISCAN / PWS, door video
+      if (/^audio_int_rad\.(cpt|fo)$/.test(n)) kind = 'switch';                                                                          // ACP INT / OFF / RAD 3-position switch
       if (!kind) continue;
       if (kind === 'lever' && /^FlapsLever_low$/.test(n)) continue;
       const g = mkGroup(id, kind); addPart(g, m);
@@ -251,10 +276,11 @@ export class Cockpit {
     // legends & marks follow their button
     for (const l of this.lampNodes) { if (l.kind === 'leg') { const g = groups.get(l.base); if (g) { g.lamps.push({ node: l.node, letter: l.letter, row: l.row }); this.cloneMat(l.node); addPart(g, l.node); } } }
     for (const g of groups.values()) {
-      g.label = g.id.startsWith('C:') ? `MCDU KEY ${g.id.slice(2).toUpperCase()}` : g.id.startsWith('F:') ? `MCDU KEY ${g.id.slice(2).toUpperCase()} (F/O)` : prettify(g.id);
+      { const c0 = g.box.getCenter(new THREE.Vector3()); g.ovh = g.kind === 'push' && c0.y > 0.78 && c0.x > -0.3; g.mom = !!g.ovh && MOMENTARY.test(g.id); }
+      g.label = g.id.startsWith('C:') ? `MCDU KEY ${(g.id.slice(2) || '.').toUpperCase()}` : g.id.startsWith('F:') ? `MCDU KEY ${(g.id.slice(2) || '.').toUpperCase()} (F/O)` : prettify(g.id);
       if (g.kind === 'stick') g.label = 'SIDESTICK';
       for (const p of g.parts) this.interactive.push(p.node);
-      if (!ON_WHEN_IN.has(g.id) && !DEFAULT_OFF.has(g.id)) g.pos = 1; else g.pos = 0; if (g.kind === 'switch') g.pos = 0; if (g.id in POS0) g.pos = POS0[g.id];
+      if (!ON_WHEN_IN.has(g.id) && !DEFAULT_OFF.has(g.id)) g.pos = 1; else g.pos = 0; if (g.kind === 'switch' || g.kind === 'guard') g.pos = 0; /* guard covers start CLOSED */ if (g.kind === 'knob' && g.steps >= 12 && g.steps < 40) g.pos = 6; if (g.ovh && /^audio_/.test(g.id)) g.pos = 0; if (g.id in POS0) g.pos = POS0[g.id];
       for (const p of g.parts) this.byNode.set(p.node, g);
     }
     // lamp nodes (LEDs) default hidden; legends keep texture
@@ -263,7 +289,7 @@ export class Cockpit {
     const toRemove: THREE.Mesh[] = []; const rel = new THREE.Matrix4();
     for (const m of all) {
       if (used.has(m) && !lampSet.has(m)) { if (HIDE.test(m.name) || FCU_IND.has(m.name)) { m.visible = false; } else if (this.byNode.has(m)) continue; }
-      if (this.byNode.has(m) || lampSet.has(m) || SCREENS[m.name] || !m.visible) continue;
+      if (this.byNode.has(m) || lampSet.has(m) || SCREENS[m.name] || !m.visible || this.battMesh.some((b) => b.mesh === m)) continue;
       m.updateWorldMatrix(true, false); const arr = byMat.get(m.material as THREE.Material) ?? []; arr.push(flatten(m.geometry, rel.copy(this.root.matrixWorld).invert().multiply(m.matrixWorld))); /* model space, relative to this.root */ byMat.set(m.material as THREE.Material, arr); toRemove.push(m);
     }
     for (const m of toRemove) { m.parent?.remove(m); m.geometry.dispose(); }
@@ -273,7 +299,7 @@ export class Cockpit {
     // ---- screens ----
     this.buildScreens(nodes);
     // ---- FCU overlay (digits) ----
-    this.buildFcu(nodes); this.buildEfb();
+    this.buildFcu(nodes); this.buildEfb(); this.buildBatt();
     this.ctx = { d: null as unknown as PanelData, sys: this.sys, host: null as unknown as CockpitHost, t: 0, mcdu: this.mcdu[0], utc: new Date() };
     this.collectMaskMats();
     const lead = new Set(Object.values(LEADER)); this.animOrder = [...this.groups.values()].sort((a, b) => (lead.has(b.id) ? 1 : 0) - (lead.has(a.id) ? 1 : 0));
@@ -298,6 +324,24 @@ export class Cockpit {
     this.screenDefs = defs;
     for (const [name, key] of Object.entries(SCREENS)) { const m = nodes.get(name); if (!m) continue; const s = defs[key]; m.material = s.mat; s.meshes.push(m); this.screenMesh.set(name, m); if (name === 'uecam.screen2') m.visible = false; }
   }
+  // ====================================================================== BAT 1 / BAT 2 voltage windows (ELEC panel)
+  private battMesh: { mesh: THREE.Mesh; side: 0 | 1; key: string; cv?: HTMLCanvasElement; tex?: THREE.CanvasTexture }[] = [];
+  private buildBatt() {
+    for (const b of this.battMesh) {
+      const cv = document.createElement('canvas'); cv.width = 192; cv.height = 76; const tex = new THREE.CanvasTexture(cv); tex.flipY = false; tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = 8;
+      b.cv = cv; b.tex = tex; b.mesh.material = new THREE.MeshBasicMaterial({ map: tex, toneMapped: false, side: THREE.DoubleSide });   // one window quad is wound the other way round
+    }
+  }
+  /** Live battery voltage (28 V nominal; reads 0 with the battery pb OFF): green 7-segment-style digits on black, repainted only when the reading changes. */
+  private drawBatt(s: A320Systems) {
+    for (const b of this.battMesh) {
+      if (!b.cv || !b.tex) continue; const v = s.batV[b.side], txt = v > 1 ? v.toFixed(1) : '', key = txt; if (key === b.key) continue; b.key = key;
+      const g = b.cv.getContext('2d')!; g.fillStyle = '#050805'; g.fillRect(0, 0, b.cv.width, b.cv.height);
+      g.fillStyle = '#69ff8a'; g.font = 'bold 50px "Courier New", monospace'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.shadowColor = '#3dff6a'; g.shadowBlur = 8; if (txt) g.fillText(txt, b.cv.width / 2, b.cv.height / 2 + 3);
+      b.tex.needsUpdate = true;
+    }
+  }
+
 
   private buildFcu(nodes: Map<string, THREE.Mesh>) {
     // strip aligned with the original seven-segment meshes (model coords; panel normal = (0.957, 0.289, 0))
@@ -319,6 +363,55 @@ export class Cockpit {
 
   // ====================================================================== EFB tablet (captain's side window mount)
   efb = new Efb(); efbFo = new Efb(); efbPower = true; efbBright = 1; efbOffside = false; private efbBtnMeshes: THREE.Mesh[] = []; private efbFlash = new Map<string, number>();
+  /** Pressable bezel caps lifted out of the tablet mesh: group = cap + legend, `pos` 0 (released) .. 1 (fully pressed), `vel` for the spring. */
+  private efbCaps = new Map<string, { group: THREE.Group; travel: number; pos: number; vel: number }>();
+  /** Button currently held down by the pointer (BRT / DIM auto-repeat while held). */
+  private efbHeld: { id: string; t: number; rep: number } | null = null; private efbFn = new THREE.Vector3(0, 0, 1);
+  private efbFrame() {
+    const fc = EFB_BTN_FRAME.map((p) => new THREE.Vector3(...p)), eu = fc[1].clone().sub(fc[0]).normalize(), ev = fc[3].clone().sub(fc[0]).normalize();
+    return { fc, eu, ev, fn: new THREE.Vector3().crossVectors(eu, ev).normalize() };
+  }
+  /** The bezel buttons are baked into EFB_cpt (each cap = 10 triangles) and their legends into EFB_cpt_glare (2 triangles). Lift every pressable cap + legend out
+   *  into its own group so it can physically travel into the bezel along the screen normal. A cap is only extracted when exactly 10 + 2 triangles are found
+   *  (otherwise the baked geometry stays untouched and the button falls back to the flash hot-spot). */
+  private extractEfbCaps(model: THREE.Object3D) {
+    let body: THREE.Mesh | undefined, glare: THREE.Mesh | undefined;
+    model.traverse((o) => { if (!(o as THREE.Mesh).isMesh) return; if (o.name === 'EFB_cpt') body = o as THREE.Mesh; else if (o.name === 'EFB_cpt_glare') glare = o as THREE.Mesh; });
+    if (!body || !glare) return;
+    this.root.updateWorldMatrix(true, true);
+    const { fc, eu, ev, fn } = this.efbFrame(), inv = new THREE.Matrix4().copy(this.root.matrixWorld).invert(), d = new THREE.Vector3(), v = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
+    this.efbFn.copy(fn);
+    const caps = EFB_BTNS.filter((b) => b.cap);
+    const scan = (mesh: THREE.Mesh, wLo: number, wHi: number) => {
+      const found = new Map<string, number[]>(), idx = mesh.geometry.index!, pos = mesh.geometry.attributes.position, rel = new THREE.Matrix4().multiplyMatrices(inv, mesh.matrixWorld);
+      for (let t = 0; t < idx.count; t += 3) {
+        for (let k = 0; k < 3; k++) v[k].fromBufferAttribute(pos, idx.getX(t + k)).applyMatrix4(rel);
+        for (const c of caps) {
+          const [u0, u1, v0, v1] = c.cap!;
+          if (v.every((p) => { d.copy(p).sub(fc[0]); const u = d.dot(eu) * 1000, vv = d.dot(ev) * 1000, w = d.dot(fn) * 1000; return u >= u0 - 0.6 && u <= u1 + 0.6 && vv >= v0 - 0.6 && vv <= v1 + 0.6 && w > wLo && w < wHi; })) { (found.get(c.id) ?? found.set(c.id, []).get(c.id)!).push(t); break; }
+        }
+      }
+      return found;
+    };
+    const fBody = scan(body, 2, 8), fGlare = scan(glare, 5, 10);
+    const build = (mesh: THREE.Mesh, tris: number[]) => {
+      const g = mesh.geometry, idx = g.index!, pos = g.attributes.position, nor = g.attributes.normal, uv = g.attributes.uv, rel = new THREE.Matrix4().multiplyMatrices(inv, mesh.matrixWorld), nm = new THREE.Matrix3().getNormalMatrix(rel);
+      const P: number[] = [], Nn: number[] = [], U: number[] = [], t3 = new THREE.Vector3();
+      for (const t of tris) for (let k = 0; k < 3; k++) { const i = idx.getX(t + k); t3.fromBufferAttribute(pos, i).applyMatrix4(rel); P.push(t3.x, t3.y, t3.z); t3.fromBufferAttribute(nor, i).applyMatrix3(nm).normalize(); Nn.push(t3.x, t3.y, t3.z); U.push(uv.getX(i), uv.getY(i)); }
+      const geo = new THREE.BufferGeometry(); geo.setAttribute('position', new THREE.Float32BufferAttribute(P, 3)); geo.setAttribute('normal', new THREE.Float32BufferAttribute(Nn, 3)); geo.setAttribute('uv', new THREE.Float32BufferAttribute(U, 2));
+      const m = new THREE.Mesh(geo, mesh.material); m.frustumCulled = false; return m;
+    };
+    const drop = (mesh: THREE.Mesh, tris: Set<number>) => { const idx = mesh.geometry.index!, keep: number[] = []; for (let t = 0; t < idx.count; t += 3) if (!tris.has(t)) keep.push(idx.getX(t), idx.getX(t + 1), idx.getX(t + 2)); mesh.geometry.setIndex(keep); };
+    const dropB = new Set<number>(), dropG = new Set<number>();
+    for (const c of caps) {
+      const tb = fBody.get(c.id), tg = fGlare.get(c.id);
+      if (!tb || tb.length !== 10 || !tg || tg.length !== 2) { console.warn('[cockpit] EFB cap', c.id, 'not extracted', tb?.length, tg?.length); continue; }
+      const grp = new THREE.Group(); grp.name = 'efbcap_' + c.id; grp.add(build(body, tb), build(glare, tg)); this.root.add(grp);
+      tb.forEach((t) => dropB.add(t)); tg.forEach((t) => dropG.add(t));
+      this.efbCaps.set(c.id, { group: grp, travel: (c.travel ?? 1.2) / 1000, pos: 0, vel: 0 });
+    }
+    if (dropB.size) drop(body, dropB); if (dropG.size) drop(glare, dropG);
+  }
   private get efbShown() { return this.efbOffside ? this.efbFo : this.efb; }
   private efbMesh?: THREE.Mesh; private efbCanvas?: HTMLCanvasElement; private efbTex?: THREE.CanvasTexture; private efbNext = 0;
   /** Overlay the live EFB page exactly on the glass of the model's tablet (EFB_cpt). The four corners are the real (slightly non-coplanar, 9.3° rotated)
@@ -329,14 +422,14 @@ export class Cockpit {
     const mat = new THREE.MeshBasicMaterial({ map: tex, toneMapped: false, polygonOffset: true, polygonOffsetFactor: -3, polygonOffsetUnits: -3 });
     const c = EFB_CORNERS.map((p) => new THREE.Vector3(...p)); // BL, BR, TR, TL as seen by the pilot
     const ctr = c[0].clone().add(c[1]).add(c[2]).add(c[3]).multiplyScalar(0.25), n = new THREE.Vector3().crossVectors(c[1].clone().sub(c[0]), c[3].clone().sub(c[0])).normalize();
-    const inset = 0.975, lift = 0.003, pos: number[] = [];
+    const inset = 0.992, lift = 0.003, pos: number[] = [];
     for (const p of c) { const q = p.clone().sub(ctr).multiplyScalar(inset).add(ctr).addScaledVector(n, lift); pos.push(q.x, q.y, q.z); }
     const geo = new THREE.BufferGeometry(); geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
     geo.setAttribute('uv', new THREE.Float32BufferAttribute([0, 0, 1, 0, 1, 1, 0, 1], 2)); geo.setIndex([0, 1, 3, 1, 2, 3]); /* same TL-BR diagonal as the real glass, so the slightly non-planar quad can never show a seam */ geo.computeVertexNormals(); geo.computeBoundingSphere();
     const mesh = new THREE.Mesh(geo, mat); mesh.renderOrder = 4; mesh.name = 'efb_screen'; mesh.frustumCulled = false;
     this.root.add(mesh); this.efbMesh = mesh; this.efbCanvas = cv; this.efbTex = tex;
     // bezel hot-spots, registered to the real button caps (frame: u along the bottom edge, v up the left edge, w out of the glass)
-    const fc = EFB_BTN_FRAME.map((p) => new THREE.Vector3(...p)), eu = fc[1].clone().sub(fc[0]).normalize(), ev = fc[3].clone().sub(fc[0]).normalize(), fn = new THREE.Vector3().crossVectors(eu, ev).normalize(), q = new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(eu, ev, fn));
+    const { fc, eu, ev, fn } = this.efbFrame(), q = new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(eu, ev, fn));
     for (const b of EFB_BTNS) {
       const m = new THREE.Mesh(new THREE.PlaneGeometry(b.w / 1000, b.h / 1000), new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0, depthWrite: false, side: THREE.DoubleSide }));
       m.position.copy(fc[0]).addScaledVector(eu, b.u / 1000).addScaledVector(ev, b.v / 1000).addScaledVector(fn, 0.006); m.quaternion.copy(q); m.name = b.id; m.renderOrder = 6; m.frustumCulled = false;
@@ -348,12 +441,14 @@ export class Cockpit {
   private efbBtnState(id: string): string {
     switch (id) { case 'efb_pwr': return this.efbPower ? 'BACKLIGHT ON' : 'BACKLIGHT OFF'; case 'efb_brt': case 'efb_dim': return this.efbPower ? `BRIGHTNESS ${Math.round(this.efbBright * 100)} %` : 'BACKLIGHT OFF'; case 'efb_view': return this.efbOffside ? 'OFFSIDE (F/O) VIEW' : 'OWN VIEW'; default: return 'NO DEVICE'; }
   }
-  private pressEfbBtn(id: string) {
-    const h = this.host!; this.efbFlash.set(id, 0.18);
+  /** Pointer down on a bezel button: acts once, then (BRT / DIM) repeats while held – see updateEfb(). */
+  private pressEfbBtn(id: string) { this.efbFlash.set(id, 0.12); this.efbHeld = { id, t: 0, rep: 0 }; this.actEfbBtn(id, true); }
+  private actEfbBtn(id: string, announce: boolean) {
+    const h = this.host!;
     switch (id) {
       case 'efb_pwr': this.efbPower = !this.efbPower; h.toast(this.efbPower ? 'EFB display backlight ON' : 'EFB display backlight OFF', 'info'); break;
-      case 'efb_brt': if (this.efbPower) { this.efbBright = Math.min(1, Math.round((this.efbBright + 0.1) * 10) / 10); h.toast(`EFB brightness ${Math.round(this.efbBright * 100)} %`, 'info'); } break;
-      case 'efb_dim': if (this.efbPower) { this.efbBright = Math.max(0.1, Math.round((this.efbBright - 0.1) * 10) / 10); h.toast(`EFB brightness ${Math.round(this.efbBright * 100)} %`, 'info'); } break;
+      case 'efb_brt': if (this.efbPower) { const was = this.efbBright; this.efbBright = Math.min(1, Math.round((this.efbBright + 0.1) * 10) / 10); if (announce || this.efbBright === 1 && was !== 1) h.toast(`EFB brightness ${Math.round(this.efbBright * 100)} %`, 'info'); } else if (announce) h.toast('EFB display backlight is OFF – press DISPLAY first', 'info'); break;
+      case 'efb_dim': if (this.efbPower) { const was = this.efbBright; this.efbBright = Math.max(0.1, Math.round((this.efbBright - 0.1) * 10) / 10); if (announce || this.efbBright === 0.1 && was !== 0.1) h.toast(`EFB brightness ${Math.round(this.efbBright * 100)} %`, 'info'); } else if (announce) h.toast('EFB display backlight is OFF – press DISPLAY first', 'info'); break;
       case 'efb_view': this.efbOffside = !this.efbOffside; h.toast(this.efbOffside ? 'EFB: offside (F/O) view – read-only' : 'EFB: own view', 'info'); break;
       default: h.toast('USB port – no device connected', 'info');
     }
@@ -454,12 +549,18 @@ export class Cockpit {
   private pickGroup(ray: THREE.Raycaster): { g: Group; hit: THREE.Intersection } | null {
     if (!this.loaded) return null;
     const hits = ray.intersectObjects(this.interactive, false);
-    for (const h of hits) { const g = this.byNode.get(h.object); if (g) return { g, hit: h }; }
+    for (let i = 0; i < hits.length; i++) {
+      const g = this.byNode.get(hits[i].object); if (!g) continue;
+      // a LIFTED guard stands clear of its button: the click goes through to the button underneath it
+      if (g.kind === 'guard' && g.pos) for (let j = i + 1; j < hits.length; j++) { const b = this.byNode.get(hits[j].object); if (b && GUARD_OF[b.id] === g.id) return { g: b, hit: hits[j] }; }
+      return { g, hit: hits[i] };
+    }
     return null;
   }
   hover(ray: THREE.Raycaster): CockpitHover | null {
     if (this.fallback) { const p = this.fallback.pick(ray, true); return p ? { id: p.id, label: p.id.toUpperCase(), value: '', hint: 'Click', desc: 'Flight-deck control.' } : null; }
     const p = this.pickGroup(ray), e = this.pickEfb(ray), eb = this.pickEfbBtn(ray);
+    if (!(e && (!p || e.dist < p.hit.distance)) || (eb && eb.dist < e.dist)) { this.efb.leave(); this.efbFo.leave(); }
     if (eb && (!p || eb.dist < p.hit.distance)) { const b = this.efbBtnInfo(eb.id); return { id: eb.id, label: b.label, value: this.efbBtnState(eb.id), hint: eb.id.startsWith('efb_usb') ? 'Port' : 'Click to press', desc: b.desc }; }
     if (e && (!p || e.dist < p.hit.distance)) { const tip = this.efbShown.hover(e.u, e.v); return { id: 'efb', label: 'EFB TABLET (CAPT)', value: tip ?? `Page: ${this.efbShown.page}${this.efbOffside ? ' (F/O)' : ''}`, hint: tip ? 'Click' : 'Click to operate · wheel scrolls', desc: 'Electronic Flight Bag – flight plan, checklists, airport data, radio frequencies, weather and procedures.' }; }
     if (!p) return null;
@@ -473,6 +574,7 @@ export class Cockpit {
       case 'BatteryBtn1': return s.bat[0] ? 'AUTO' : 'OFF'; case 'BatteryBtn2': return s.bat[1] ? 'AUTO' : 'OFF';
       case 'APUMasterBtn': return s.apuMaster ? 'ON' : 'OFF'; case 'APUStartBtn': return s.apuRpm >= 95 ? 'AVAIL' : s.apuStart ? `START ${Math.round(s.apuRpm)}%` : 'OFF';
       case 'Lcutoff': return h?.fm.eng[0].state === 2 ? 'ON · RUNNING' : s.master[0] ? 'ON' : 'OFF'; case 'Rcutoff': return h?.fm.eng[1].state === 2 ? 'ON · RUNNING' : s.master[1] ? 'ON' : 'OFF';
+      case 'RudderTrim': { const u = Math.round((h?.fm.ctl.rudTrim ?? 0) * 20); return u === 0 ? 'NEUTRAL' : `${Math.abs(u)} ${u < 0 ? 'L' : 'R'}`; }
       case 'eng_mode': return ['CRANK', 'NORM', 'IGN/START'][s.engMode]; case 'FlapsLever': return `CONF ${['0', '1', '2', '3', 'FULL'][h?.fm.ctl.flapsIdx ?? 0]}`; case 'rev_l': case 'rev_r': return h?.fm.ctl.reverse ? 'REV DEPLOYED' : 'STOWED';
       case 'gear_lever': return h?.fm.ctl.gearDown ? 'DOWN' : 'UP'; case 'ParkBrk': return h?.fm.ctl.parking ? 'ON' : 'OFF'; case 'spd-sel': return `${Math.round(h?.ap.spd ?? 0)} kt`;
       case 'hdg_sel': return `${Math.round(h?.ap.hdg ?? 0)}°`; case 'alt-sel': return `${Math.round(h?.ap.altFt ?? 0)} ft`; case 'vs-sel': return s.vsMode ? `${s.vsTarget} fpm` : 'LEVEL CH';
@@ -485,6 +587,8 @@ export class Cockpit {
     }
     const ef = EFIS_MAP[id]; if (ef) { const t = this.efisText(ef.side, ef.fn); if (t) return t; }
     if (g.kind === 'key') return '';
+    if (SWITCH_LABELS[id]) return SWITCH_LABELS[id][g.pos] ?? '';
+    if (g.ovh) { const a = AGENT_IDX[id]; if (a !== undefined) return s.agentDisch[a] ? 'DISCHARGED' : s.fireOut[fireOf(a)] ? 'ARMED' : 'SAFE'; return g.mom ? 'MOMENTARY' : this.stateOn(id) ? 'ON / AUTO · pushed in' : 'OFF · released'; }
     if (g.kind === 'switch') return SWITCH3.has(g.id) ? (['OFF / LOW', 'AUTO / MID', 'ON / HIGH'][g.pos] ?? '') : g.pos ? 'ON' : 'OFF';
     if (g.kind === 'guard') return g.pos ? 'OPEN' : 'CLOSED';
     if (g.kind === 'knob') return `position ${g.pos + 1}`;
@@ -499,9 +603,11 @@ export class Cockpit {
     if (e && (!p || e.dist < p.hit.distance)) { this.efbShown.click(e.u, e.v); return { id: 'efb', handled: true }; }
     if (!p || !this.host) return null; const g = p.g; const h = this.host;
     if (g.kind === 'stick') return { id: 'yoke', handled: false };
+    const cover = GUARD_OF[g.id] && this.groups.get(GUARD_OF[g.id]); if (cover && !cover.pos) { this.setGuard(cover, 1); cover.press = 1; this.active = { g: cover, sy: 0, acc: 0, v0: 0, kind: 'push' }; return { id: cover.id, handled: true }; }   // lift the guard first
     if (g.id === 'gear_lever') { h.action('gear'); return { id: g.id, handled: true }; }
     if (g.id === 'ParkBrk') { h.action('park'); return { id: g.id, handled: true }; }
     if (g.id === 'rev_l' || g.id === 'rev_r') { h.action('rev'); return { id: g.id, handled: true }; }
+    if (g.id === 'Lcutoff' || g.id === 'Rcutoff') { this.toggle(g, 1); return { id: g.id, handled: true }; }
     if (g.kind === 'lever') { this.active = { g, sy: 0, acc: 0, v0: this.leverValue(g), kind: 'lever' }; return { id: g.id, handled: true }; }
     if (g.kind === 'key') { this.mcduKey(g.id); g.press = 1; return { id: g.id, handled: true }; }
     if (ECP_KEYS.has(g.id)) { this.sys.ecam.down(g.id); g.press = 1; this.active = { g, sy: 0, acc: 0, v0: 0, kind: 'hold' }; return { id: g.id, handled: true }; }
@@ -531,6 +637,7 @@ export class Cockpit {
     return true;
   }
   release() {
+    this.efbHeld = null;
     const a = this.active; this.active = null; if (a && ECP_KEYS.has(a.g.id)) this.sys.ecam.up(a.g.id); if (!a || !this.host) return;
     const c = this.host.fm.ctl; if (Math.abs(c.thrOffset) < 0.03) c.thrOffset = 0;
     for (const g of this.groups.values()) g.press = 0;
@@ -550,7 +657,7 @@ export class Cockpit {
   private stepDetent(v: number, d: number) { const n = v + d; for (const t of THR_DETENTS) if ((v - t.v) * (n - t.v) < 0) return t.v; return snapThrottle(n, 0.012); }
   private leverValue(g: Group) { const c = this.host!.fm.ctl; return g.id === 'thr_l_body' ? c.throttle : g.id === 'thr_r_body' ? c.throttle + c.thrOffset : g.id === 'FlapsLever' ? c.flapsIdx : g.id === 'SpdBrk' ? (this.sys.spoilerArm ? -0.3 : c.speedbrake) : 0; }
 
-  private mcduKey(id: string) { const fo = id.startsWith('F:'), k = id.slice(2); const m = this.mcdu[fo ? 1 : 0]; m.key(k === 'mcdu' ? 'menu' : k); }
+  private mcduKey(id: string) { const fo = id.startsWith('F:'), k = id.slice(2) || '.'; const m = this.mcdu[fo ? 1 : 0]; m.key(k === 'mcdu' ? 'menu' : k); }
 
   private stepKnob(g: Group, dir: number, shift: boolean) {
     const h = this.host; if (!h) return; const s = this.sys; const id = g.id;
@@ -564,6 +671,7 @@ export class Cockpit {
       case 'nd_range': case 'nd_range_fo': { const e = s.efis[id === 'nd_range_fo' ? 1 : 0]; e.ndRange = Math.max(0, Math.min(5, e.ndRange + dir)); return; }
       case 'nd_mode': case 'nd_mode_fo': { const e = s.efis[id === 'nd_mode_fo' ? 1 : 0]; e.ndMode = Math.max(0, Math.min(4, e.ndMode + dir)); return; }
       case 'eng_mode': s.engMode = Math.max(0, Math.min(2, s.engMode + dir)) as 0 | 1 | 2; g.pos = s.engMode; return;
+      case 'RudderTrim': h.fm.ctl.rudTrim = this.clampN(Math.round((h.fm.ctl.rudTrim + dir * 0.05) * 20) / 20, -1, 1); return;
       case 'XbleedKnb': g.pos = Math.max(0, Math.min(2, (g.pos || 1) + dir)); s.xbleed = g.pos === 0 ? 0 : 1; return;
       case 'pfd_brt_cpt': case 'pfd_brt_fo': { const i = id === 'pfd_brt_fo' ? 1 : 0; s.bright.pfd[i] = clamp01(s.bright.pfd[i] + dir * 0.05); return; }
       case 'brightness_nd_2_cpt': case 'brightness_nd_2_fo': { const i = id === 'brightness_nd_2_fo' ? 1 : 0; s.bright.nd[i] = clamp01(s.bright.nd[i] + dir * 0.05); return; }
@@ -571,16 +679,26 @@ export class Cockpit {
       case 'ecam_brt_upper': case 'ecam_brt_lower': { const k = BRT_KNOBS[id]; s.bright[k] = Math.max(0, Math.min(1, Math.round((s.bright[k] + dir * 0.1) * 10) / 10)); return; }
       case 'ecam_att_hdg': case 'ecam_air_data': case 'ecam_eis_dmc': case 'ecam_nd_xfr': { g.pos = Math.max(0, Math.min(2, g.pos + dir)); s.switching[SRC_KNOBS[id].key] = g.pos; s.sw[id] = g.pos; this.routeDisplays(); return; }
     }
-    const n = g.steps; const cont = n >= 12;
-    g.pos = cont ? g.pos + dir : Math.max(0, Math.min(n - 1, g.pos + dir)); s.sw[id] = g.pos;
+    const n = g.steps; const cont = n >= 40;
+    g.pos = cont ? g.pos + dir : Math.max(0, Math.min(n - 1, g.pos + dir)); s.sw[id] = g.pos;   // rotary selectors / dimmers have end stops
   }
 /** Toggle / cycle a push-button, switch or guard and apply its system effect. */
   private toggle(g: Group, dir: number) {
-    const h = this.host!, s = this.sys, id = g.id, fm = h.fm;
+    const h = this.host!, s = this.sys, id = g.id.replace(/^(EmerGenTest)\.\d+$/, '$1'), fm = h.fm;
     const flip = () => { g.pos = g.pos ? 0 : 1; s.sw[id] = g.pos; return !!g.pos; };
     const cycle = (n: number) => { g.pos = (g.pos + (dir > 0 ? 1 : n - 1)) % n; s.sw[id] = g.pos; return g.pos; };
+    const rmp = /^radio_(\w+)\.(cpt|fo)$/.exec(id);
+    if (rmp) { const st = this.rmp[rmp[2] === 'fo' ? 1 : 0], k = rmp[1]; if (k === 'on') st.on = !st.on; else if (st.on) { if (k === 'bfo') st.bfo = !st.bfo; else if (k === 'am') st.am = !st.am; else if (k === 'exchange') h.toast('RMP · active / standby frequency exchanged', 'info'); else if (k !== 'opt') st.sel = k; } return; }
+    const acp = /^audio_(\w+)\.(cpt|fo)$/.exec(id);
+    if (acp && acp[1] !== 'int_rad' && acp[1] !== 'pa_rot') { const st = this.acp[acp[2] === 'fo' ? 1 : 0], k = acp[1]; if (k === 'reset') { st.rx = {}; } else if (k.startsWith('call_')) { st.tx = k.slice(5); st.rx[st.tx] = true; } else st.rx[k] = !st.rx[k]; return; }
     switch (id) {
-      case 'BatteryBtn1': s.bat[0] = !s.bat[0]; if (!fm.ctl.battery && (s.bat[0])) { h.lights.nav = true; } return;
+      case 'RudderTrimReset': fm.ctl.rudTrim = 0; return;
+      case 'BatteryBtn1': s.bat[0] = !s.bat[0]; return;
+      case 'firebtn1': this.fireToggle(0); return; case 'firebtn2': this.fireToggle(1); return; case 'firebtnapu': this.fireToggle(2); return;
+      case 'Eng1FireAgt1Btn': case 'Eng1FireAgt2Btn': case 'Eng2FireAgt1Btn': case 'Eng2FireAgt2Btn': case 'APUFireAgtBtn': this.discharge(AGENT_IDX[id]); return;
+      case 'ELTSw': flip(); s.elt = g.pos === 1; h.toast(s.elt ? 'ELT ON – transmitting on 121.5 / 243 / 406 MHz' : 'ELT ARMED (will trigger on impact)', s.elt ? 'warn' : 'info'); return;
+      case 'EltTestRst': s.lampTest = 1.5; h.toast('ELT test – transmitter light checked', 'info'); return;
+      case 'APUExtReset': h.toast('APU auto-shutdown RESET', 'info'); return;
       case 'BatteryBtn2': s.bat[1] = !s.bat[1]; return;
       case 'ExtPwrBtn': s.ext = !s.ext; if (s.ext) h.toast('EXT PWR connected', 'info'); return;
       case 'APUMasterBtn': s.apuMaster = !s.apuMaster; return;
@@ -598,10 +716,10 @@ export class Cockpit {
       case 'YellowElecPump': s.hydPump.yElec = !s.hydPump.yElec; g.pos = s.hydPump.yElec ? 1 : 0; return; case 'PTU2': s.hydPump.ptu = !s.hydPump.ptu; return;
       case 'RATMan': s.ratOut = true; return;
       case 'BeaconLtSwtch': { const on = flip(); h.lights.beacon = !!on; g.pos = on ? 1 : 0; if (!on) g.pos = 0; return; }
-      case 'StrobeLtSwtch': { const p = cycle(3); h.lights.strobe = p === 1 || p === 2; return; }
-      case 'NavLogoLtSwtch': { const p = cycle(3); h.lights.nav = p >= 1; return; }
-      case 'LandingLtSwtch': case 'LandingLtRSwtch': case 'land_sw': { const p = cycle(3); h.lights.land = p === 1; return; }
-      case 'SeatBeltSwtch': { cycle(2); if (g.pos === 1 !== h.seatbelt) h.action('belt'); return; }
+      case 'StrobeLtSwtch': { const p = cycle(3); h.lights.strobe = p >= 1; return; }                 // OFF / AUTO / ON
+      case 'NavLogoLtSwtch': { const p = cycle(3); h.lights.nav = p !== 1; return; }                  // 2 / OFF / 1
+      case 'LandingLtSwtch': case 'LandingLtRSwtch': case 'land_sw': { const p = cycle(3); h.lights.land = p === 2; return; }   // RETRACT / OFF / ON
+      case 'SeatBeltSwtch': { const p = cycle(3); if ((p === 2) !== h.seatbelt) h.action('belt'); return; }   // OFF / AUTO / ON
       case 'Lcutoff': s.master[0] = !s.master[0]; return; case 'Rcutoff': s.master[1] = !s.master[1]; return;
       case 'eng_mode': s.engMode = ((s.engMode + (dir > 0 ? 1 : 2)) % 3) as 0 | 1 | 2; return;
       case 'ap1': this.apPress(0); return; case 'ap2': this.apPress(1); return;
@@ -632,9 +750,30 @@ export class Cockpit {
       case 'ecam_fuel': s.page = 'FUEL'; return; case 'ecam_apu': s.page = 'APU'; return; case 'ecam_cond': s.page = 'COND'; return; case 'ecam_door': s.page = 'DOOR'; return; case 'ecam_wheel': s.page = 'WHEEL'; return;
       case 'ecam_fctl': s.page = 'F/CTL'; return; case 'ecam_sts': s.page = 'STS'; return;
     }
-    if (g.kind === 'switch') { cycle(SWITCH3.has(id) ? 3 : 2); return; }
-    if (g.kind === 'guard') { flip(); return; }
+    if (g.kind === 'switch') { cycle(SWITCH3.has(id) || /^audio_int_rad/.test(id) ? 3 : 2); return; }
+    if (g.kind === 'guard') { this.setGuard(g, g.pos ? 0 : 1); return; }
+    if (g.mom) { if (!/^audio_/.test(id)) h.toast(`${g.label} pressed`, 'info'); return; }
     flip();
+  }
+  /** Lifts / closes a guard cover (both halves of split covers such as the ELT guard move together). */
+  private setGuard(g: Group, v: number) { const base = g.id.replace(/\.\d+$/, ''); for (const x of this.groups.values()) if (x.kind === 'guard' && x.id.replace(/\.\d+$/, '') === base) { x.pos = v; this.sys.sw[x.id] = v; } }
+  /** ENG 1 / ENG 2 / APU FIRE pb-sw: released = fuel, hydraulic and bleed shut-off, generator off, agents armed; pushed back in = restored (FCOM DSC-26). */
+  private fireToggle(i: number) {
+    const h = this.host!, s = this.sys, nm = i === 2 ? 'APU' : `ENG ${i + 1}`;
+    if (!s.fireOut[i]) { s.fireOut[i] = true; if (i < 2) { s.master[i] = false; s.gen[i] = false; s.engBleed[i] = false; } else { s.apuMaster = false; s.apuStart = false; s.apuBleed = false; s.apuGen = false; } h.toast(`${nm} FIRE pb released – fuel, hydraulic, bleed & generator shut off · agent SQUIBs armed`, 'warn'); }
+    else { s.fireOut[i] = false; if (i < 2) { s.gen[i] = true; s.engBleed[i] = true; } else s.apuGen = true; h.toast(`${nm} FIRE pb pushed back in – systems restored`, 'info'); }
+  }
+  private discharge(a: number) {
+    const h = this.host!, s = this.sys; if (!s.fireOut[fireOf(a)]) { h.toast('AGENT not armed – release the FIRE pb first', 'warn'); return; }
+    if (s.agentDisch[a]) { h.toast('AGENT already discharged', 'info'); return; } s.agentDisch[a] = true; h.toast('AGENT discharged', 'good');
+  }
+  /** Keeps the posed 3-position light / sign switches equal to the real light state (also when it was changed by keyboard or another path). */
+  private syncSwitches(h: CockpitHost) {
+    const G = (id: string) => this.groups.get(id), L = h.lights; let g = G('BeaconLtSwtch'); if (g && L.beacon !== (g.pos === 1)) g.pos = L.beacon ? 1 : 0;
+    g = G('StrobeLtSwtch'); if (g && L.strobe !== (g.pos >= 1)) g.pos = L.strobe ? 2 : 0;
+    for (const id of ['LandingLtSwtch', 'LandingLtRSwtch']) { g = G(id); if (g && L.land !== (g.pos === 2)) g.pos = L.land ? 2 : 1; }
+    g = G('NavLogoLtSwtch'); if (g && L.nav !== (g.pos !== 1)) g.pos = L.nav ? 2 : 1;
+    g = G('SeatBeltSwtch'); if (g && h.seatbelt !== (g.pos === 2)) g.pos = h.seatbelt ? 2 : 0;
   }
 
   // ====================================================================== EFIS control panels (CAPT / F/O)
@@ -713,12 +852,17 @@ export class Cockpit {
     const lead = LEADER[g.id]; if (lead) { const l = this.groups.get(lead); if (l) g.xf.premultiply(l.xf); }
     for (const p of g.parts) p.node.matrix.multiplyMatrices(g.xf, p.m0);
   }
+  /** Thrust-lever angle (rad) about its pivot, positive = forward. Reverse: pulled aft of IDLE by up to 20 deg. */
+  private thrAngle(t: number, reverse = false) { return reverse ? -(0.17 + 0.18 * Math.min(1, Math.max(0, t))) : Math.min(1, Math.max(0, t)) * (Math.PI / 4); }
   private animate(g: Group, inp: CockpitInputs, d: PanelData) {
     const s = this.sys, ctl = this.host?.fm.ctl;
     if (EFIS_MAP[g.id] && this.animateEfis(g)) return;
     switch (g.id) {
-      case 'thr_l_body': return this.rotAbout(g, [0, -0.09, 0.022], [0, 0, 1], inp.throttle * 0.8);
-      case 'thr_r_body': return this.rotAbout(g, [0, -0.09, -0.022], [0, 0, 1], Math.min(1, Math.max(0, inp.throttle + (ctl?.thrOffset ?? 0))) * 0.8);
+      // pivot = where the lever's own centre line meets the quadrant slot (measured on the mesh: base (-0.095,-0.042), tip (-0.059,0.076) -> x = -0.110 at y = -0.09); 45 deg IDLE -> TOGA, reverse idle 20 deg aft of IDLE
+      case 'thr_l_body': return this.rotAbout(g, THR_PIVOT_L, [0, 0, 1], this.thrAngle(inp.throttle, ctl?.reverse));
+      case 'thr_r_body': return this.rotAbout(g, THR_PIVOT_R, [0, 0, 1], this.thrAngle(Math.min(1, Math.max(0, inp.throttle + (ctl?.thrOffset ?? 0))), ctl?.reverse));
+      case 'Lcutoff': case 'Rcutoff': { const i = g.id === 'Lcutoff' ? 0 : 1, ax = this.axisOf(g), aft = ax.direction[2] < 0 ? 1 : -1; this.mstSm[i] += ((s.master[i] ? 0 : 1) - this.mstSm[i]) * Math.min(1, this.dtA * 16); return this.rotAbout(g, ax.pivot, ax.direction, aft * 0.6 * this.mstSm[i]); }
+      case 'RudderTrim': { const ax = this.axisOf(g); this.rudSm += ((ctl?.rudTrim ?? 0) - this.rudSm) * Math.min(1, this.dtA * 12); return this.rotAbout(g, ax.pivot, ax.direction, this.rudSm * 1.3 * (ax.direction[1] < 0 ? 1 : -1)); }
       case 'rev_l': case 'rev_r': { const ax = g.axis; if (ax) return this.rotAbout(g, ax.pivot, ax.direction, ctl?.reverse ? -0.45 : 0); break; }
       case 'FlapsLever': return this.rotAbout(g, [0.087, -0.188, -0.1], [0, 0, 1], -inp.flapsIdx * 0.17);
       case 'SpdBrk': return this.rotAbout(g, [0.087, -0.206, 0.074], [0, 0, 1], s.spoilerArm ? 0.25 : -inp.speedbrake * 0.6);
@@ -734,13 +878,25 @@ export class Cockpit {
     }
     if (/Rudder(Pedal)/.test(g.id)) return;
     const t = g.kind === 'knob' || g.id === 'spd-sel' || g.id === 'hdg_sel' || g.id === 'alt-sel' || g.id === 'vs-sel';
-    if (t) { const n = g.steps; const a = n >= 12 ? g.angle + g.pos * 0.26 : ((g.pos - (n - 1) / 2) * (n <= 3 ? 0.7 : 0.5)); return this.setRot(g, a + (g.id === 'hdg_sel' ? (d.apHdg * Math.PI / 180) : g.id === 'alt-sel' ? d.apAlt / 100 * 0.26 : g.id === 'spd-sel' ? d.apSpd * 0.26 : 0)); }
-    if (g.kind === 'switch') { const n = SWITCH3.has(g.id) ? 3 : 2; return this.setRot(g, (g.pos - (n - 1) / 2) * (n === 2 ? 0.8 : 0.42)); }
+    if (t) { const n = g.steps; const a = n >= 40 ? g.angle + g.pos * 0.26 : n >= 12 ? (g.pos - (n - 1) / 2) * (4.71 / (n - 1)) : ((g.pos - (n - 1) / 2) * (n <= 3 ? 0.7 : 0.5)); /* 270° sweep for 12-detent dimmers / temperature knobs */ return this.setRot(g, a + (g.id === 'hdg_sel' ? (d.apHdg * Math.PI / 180) : g.id === 'alt-sel' ? d.apAlt / 100 * 0.26 : g.id === 'spd-sel' ? d.apSpd * 0.26 : 0)); }
+    if (g.kind === 'switch') { const n = SWITCH3.has(g.id) || /^audio_int_rad/.test(g.id) ? 3 : 2; return this.setRot(g, this.leverSign(g) * (g.pos - (n - 1) / 2) * (n === 2 ? 0.8 : 0.42)); }
     if (g.kind === 'guard') return this.setRot(g, g.pos ? 1.7 : 0);
+    // overhead pb-sw: engaged (ON / AUTO) = flush IN, released (OFF) = 3.5 mm OUT; pressing adds 2 mm travel. Momentary keys only move while held.
+    if (g.ovh) { const nr = g.nrm ??= this.panelNormal(g.box.getCenter(new THREE.Vector3())), o = (g.mom || this.stateOn(g.id) ? 0 : 0.0035) - (g.press ? 0.002 : 0); g.xf.makeTranslation(nr.x * o, nr.y * o, nr.z * o); this.pose(g); return; }
     // push buttons / keys: 1.8 mm depress while pressed, 0.9 mm when latched IN (toward the panel, along the panel normal)
     const dep = (g.press ? 0.0018 : 0) + (g.kind === 'push' && !ON_WHEN_IN.has(g.id) && g.pos === 0 ? 0.0009 : 0);
     const nrm = g.nrm ??= this.panelNormal(g.box.getCenter(new THREE.Vector3()));
     g.xf.makeTranslation(-nrm.x * dep, -nrm.y * dep, -nrm.z * dep); this.pose(g);
+  }
+
+  /** Overhead toggle levers: the highest position (ON / BRT / ON) is the one printed at the TOP of the legend. The overhead is read looking up with the tops of the characters
+   *  towards the tail (see COCKPIT_PRESETS.overhead), so the top position is the AFT one (model +X). The sign of the model's hinge axis differs from switch to
+   *  switch, so the turn direction is derived once from the lever geometry: a positive turn about the axis must swing the lever tip aft, otherwise it is mirrored. */
+  private leverSign(g: Group): number {
+    if (g.sgn !== undefined) return g.sgn; const c = g.box.getCenter(new THREE.Vector3());
+    if (!(c.y > 0.78 && c.x > -0.3)) return (g.sgn = 1);
+    const ax = this.axisOf(g), d = new THREE.Vector3(...ax.direction).normalize(), r = c.sub(new THREE.Vector3(...ax.pivot)), fwd = new THREE.Vector3().crossVectors(d, r).x;   // x-component of the tip velocity for a positive turn (+ = aft)
+    return (g.sgn = fwd > 1e-6 ? 1 : -1);
   }
 
   private legendLit(g: Group, letter: string, row: number): [boolean, number] {
@@ -751,7 +907,9 @@ export class Cockpit {
       case 'F': { const f = id === 'Gen1Btn' ? !s.gen[0] === false && eng[0] && !s.ac : id === 'Gen2Btn' ? false : id === 'GreenEngPump2' ? s.hydPump.green && eng[0] && s.hyd.green < 1500 : id === 'YellowEngPump' ? s.hydPump.yellow && eng[1] && s.hyd.yellow < 1500 : /FuelTank/.test(id) ? wired && s.tank.l + s.tank.r + s.tank.c < 20 : /Pack/.test(id) ? wired && eng[0] && eng[1] && s.bleedPsi[0] < 5 : false; return [f || s.lampTest > 0, 0xffb000]; }
       case 'A': return [id === 'APUStartBtn' ? s.apuRpm >= 95 : id === 'ExtPwrBtn' ? s.ext === false && fm.wow && fm.gs < 1 : false, 0x40ff60];
       case 'O': { const lit = onType ? wired : !wired; return [lit && s.dc || s.lampTest > 0, onType ? (id === 'APUStartBtn' || id === 'ExtPwrBtn' ? 0x40a8ff : 0x40a8ff) : 0xf0f6ff]; }
-      case 'S': return [false || s.lampTest > 0, 0xffb000]; case 'D': return [s.lampTest > 0, 0xffb000]; case 'M': return [!wired && s.dc, 0xf0f6ff];
+      case 'S': { const a = AGENT_IDX[id]; return [s.lampTest > 0 || (a !== undefined && s.fireOut[fireOf(a)] && !s.agentDisch[a]), 0xffb000]; }
+      case 'D': { const a = AGENT_IDX[id]; return [s.lampTest > 0 || (a !== undefined && s.agentDisch[a]), 0xffb000]; }
+      case 'M': return [!wired && s.dc, 0xf0f6ff];
     }
     return [false, 0];
   }
@@ -763,6 +921,7 @@ export class Cockpit {
       case 'WingAntiIceBtn': return s.wingAI; case 'Eng1AntiIceBtn': return s.engAI[0]; case 'Eng2AntiIceBtn': return s.engAI[1];
       case 'LFuelTank1Btn': return s.pumps[0]; case 'LFuelTank2Btn': return s.pumps[1]; case 'CFuelTank1Btn': return s.pumps[2]; case 'CFuelTank2Btn': return s.pumps[3]; case 'RFuelTank1Btn': return s.pumps[4]; case 'RFuelTank2Btn': return s.pumps[5];
       case 'GreenEngPump2': return s.hydPump.green; case 'YellowEngPump': return s.hydPump.yellow; case 'BlueElecPump': return s.hydPump.blue; case 'YellowElecPump': return s.hydPump.yElec; case 'PTU2': return s.hydPump.ptu;
+      case 'firebtn1': return !s.fireOut[0]; case 'firebtn2': return !s.fireOut[1]; case 'firebtnapu': return !s.fireOut[2];
       case 'Eng1ManStartBtn': return s.master[0] && s.engMode === 2; case 'Eng2ManStartBtn': return s.master[1] && s.engMode === 2;
     }
     return !!g && g.pos === 1 ? true : false;
@@ -777,7 +936,14 @@ export class Cockpit {
       case 'ecam_eng': case 'ecam_bleed': case 'ecam_press': case 'ecam_elec': case 'ecam_hyd': case 'ecam_fuel': case 'ecam_apu': case 'ecam_cond': case 'ecam_door': case 'ecam_wheel': case 'ecam_fctl': case 'ecam_sts': case 'ecam_clr_l': case 'ecam_clr_r': case 'ecam_emer_canc': return s.ecam.lit(base);
       case 'brk_fan': case 'brk_hot': return false;
     }
-    if (/^radio_(on|vhf1|nav)(\.|$)/.test(base)) return true;
+    const rm = /^radio_(\w+?)\.(cpt|fo)$/.exec(base);
+    if (rm) { const st = this.rmp[rm[2] === 'fo' ? 1 : 0], k = rm[1]; if (!st.on) return false; if (k === 'sel') return st.sel !== (rm[2] === 'fo' ? 'vhf2' : 'vhf1'); if (k === 'nav') return st.sel === 'nav' || st.sel === 'vor' || st.sel === 'ls' || st.sel === 'adf'; if (k === 'bfo') return st.bfo; if (k === 'am') return st.am; if (k === 'on' || k === 'opt' || k === 'exchange') return k === 'on'; return st.sel === k; }
+    const am = /^audio_(\w+?)\.(cpt|fo)$/.exec(base);
+    if (am) { const st = this.acp[am[2] === 'fo' ? 1 : 0]; return am[1].startsWith('call_') ? st.tx === am[1].slice(5) : !!st.rx[am[1]]; }
+    const an = /^mcdu_ann_(\w+)\.(cpt|fo)$/.exec(base);
+    if (an) { const mc = this.mcdu[an[2] === 'fo' ? 1 : 0]; switch (an[1]) { case 'msg': return !!mc.msg; case 'rdy': return !mc.msg; case 'fm1': return an[2] === 'cpt'; case 'fm2': return an[2] === 'fo'; default: return false; } }
+    if (base === 'thr_quad_lts') return this.daylight < 0.5 && s.bright.flood > 0.05;
+    if (/^engine_(fire|fault)_[12]$/.test(base)) return false;
     const g = this.groups.get(base); return !!g && g.pos === 1 && g.kind === 'push' && !!s.sw[base];
   }
 
@@ -785,16 +951,16 @@ export class Cockpit {
   update(dt: number, time: number, data: PanelData, inp: CockpitInputs, ui: CockpitUi, visible: boolean) {
     if (this.fallback) { this.fallback.update(dt, time, data, inp, ui, visible); return; }
     if (!visible || !this.loaded || !this.host) return;
-    this.lastInp = inp; const h = this.host, s = this.sys; this.frameNo++;
+    this.lastInp = inp; const h = this.host, s = this.sys; this.frameNo++; this.dtA = dt;
     s.update(dt, h, data); this.syncFcu(dt, h, data);
     this.ctx.d = data; this.ctx.host = h; this.ctx.t = time; this.ctx.utc = new Date(simNowMs());
     for (const m of this.mcdu) m.attach(h);
     // lighting (day/night)
-    const dl = this.daylight; this.hemi.intensity = 0.55 + 1.5 * dl + (1 - dl) * 0.9 * s.bright.flood; /* panel / flood lights at night */ this.sun.intensity = 1.6 * dl;
+    const dl = this.daylight; this.hemi.intensity = 0.55 + 1.5 * dl + (1 - dl) * (0.9 * s.bright.flood + [0, 0.25, 0.7][this.groups.get('DomeLtSwtch')?.pos ?? 0]);   // DOME lt DIM / BRT /* panel / flood lights at night */ this.sun.intensity = 1.6 * dl;
     // screens: culled, resolution-scaled and time-sliced (PFD first, secondary pages at 10-20 Hz, clock 2 Hz) – see scheduleScreens()
     this.camera.updateMatrixWorld(); this.pv.multiplyMatrices(this.camera.projectionMatrix, this.camera.matrixWorldInverse); this.frustum.setFromProjectionMatrix(this.pv);
     this.scheduleScreens(time, s);
-    this.updateEfb(time, s, h); this.drawBaros(s);
+    this.updateEfb(dt, time, s, h); this.drawBaros(s); this.drawBatt(s); this.syncSwitches(h);
     if (this.fcuCanvas && this.fcuTex) {
       const key = [data.apSpd, data.apHdg, data.apAlt, s.ac, s.vsMode, s.vsTarget, s.fpaTarget, s.trkFpa, s.spdMach, s.spdManaged, s.hdgManaged, s.spdPre > 0, s.hdgPre > 0, s.vsPre > 0, s.spdPreVal, s.hdgPreVal, s.bright.fcu, Math.round(this.machFactor())].join('|');
       if (key !== this.fcuKey) { this.fcuKey = key; const cv = this.fcuCanvas, g = cv.getContext('2d')!; drawFCU(g, cv.width, cv.height, this.ctx, (z) => (this.fcuZ.c + this.fcuZ.w / 2 - z) / this.fcuZ.w); this.fcuTex.needsUpdate = true; }
@@ -803,6 +969,7 @@ export class Cockpit {
     // animation – every control is posed about its own pivot axis; static switches / buttons are only re-posed when their state changes
     this.syncEfisGroups();
     for (const g of this.animOrder) {
+      if (g.ovh && !g.mom) g.pos = this.stateOn(g.id) ? 1 : 0;   // pose always follows the real system state
       if (g.still) { const k = g.pos * 7 + g.press * 13 + g.angle * 3; if (k === g.lastKey) { if (g.press > 0 && !this.active) g.press = Math.max(0, g.press - dt * 6); continue; } g.lastKey = k; }
       this.animate(g, inp, data); for (const p of g.parts) p.node.matrixWorldNeedsUpdate = true;
       if (g.press > 0 && !this.active) g.press = Math.max(0, g.press - dt * 6);
@@ -877,10 +1044,18 @@ export class Cockpit {
   }
   private brMap: Record<string, number> = {};
   private efbScale = 1; private efbLast = 0;
-  private updateEfb(time: number, s: A320Systems, h: CockpitHost) {
+  private updateEfb(dt: number, time: number, s: A320Systems, h: CockpitHost) {
     const m = this.efbMesh; if (!m || !this.efbCanvas || !this.efbTex) return;
+    // bezel buttons: BRT / DIM auto-repeat after 0.45 s (every 0.12 s) while the pointer is held
+    const hd = this.efbHeld; if (hd && EFB_BTNS.find((b) => b.id === hd.id)?.repeat) { hd.t += dt; if (hd.t > 0.45) { hd.rep += dt; while (hd.rep >= 0.12) { hd.rep -= 0.12; this.actEfbBtn(hd.id, false); } } }
+    // cap travel: critically damped spring towards pressed (held / just tapped) or released – a tap always shows at least ~0.12 s of travel
+    for (const [id, c] of this.efbCaps) {
+      const f = Math.max(0, (this.efbFlash.get(id) ?? 0) - dt); this.efbFlash.set(id, f); const target = hd?.id === id || f > 0 ? 1 : 0;
+      const k = 900, z = 2 * Math.sqrt(k); c.vel += ((target - c.pos) * k - c.vel * z) * dt; c.pos = Math.min(1.05, Math.max(0, c.pos + c.vel * dt));
+      c.group.position.copy(this.efbFn).multiplyScalar(-c.travel * c.pos);
+    }
     (m.material as THREE.MeshBasicMaterial).color.setScalar((0.3 + 0.7 * this.daylight) * (s.dc ? 1 : 0.08) * (this.efbPower ? 0.25 + 0.75 * this.efbBright : 0)); // PWR = backlight, BRT/DIM = intensity
-    for (const b of this.efbBtnMeshes) { const f = Math.max(0, (this.efbFlash.get(b.name) ?? 0) - 1 / 60); this.efbFlash.set(b.name, f); (b.material as THREE.MeshBasicMaterial).opacity = f > 0 ? 0.45 : 0; } // brief shadow = button pressed in
+    for (const b of this.efbBtnMeshes) { if (this.efbCaps.has(b.name)) continue; const f = Math.max(0, (this.efbFlash.get(b.name) ?? 0) - dt); this.efbFlash.set(b.name, f); (b.material as THREE.MeshBasicMaterial).opacity = f > 0 ? 0.35 : 0; } // ports / un-extractable caps: brief shadow = pressed
     if (this.frameNo % 5 === 0 || !this.efbSphere.radius) { this.efbSphere.copy(m.geometry.boundingSphere ?? (m.geometry.computeBoundingSphere(), m.geometry.boundingSphere!)).applyMatrix4(m.matrixWorld); this.efbVis = this.frustum.intersectsSphere(this.efbSphere); this.efbPx = this.efbVis ? this.projPx(this.efbSphere) : 0; }
     if (!this.efbVis || this.efbPx < 14) return;
     const want = this.efbPx * Math.max(1, this.dpr) / 1.2 > 1024 ? 2 : this.efbPx * Math.max(1, this.dpr) / 1.2 > 640 ? 1.5 : 1; // tablet face ≈ 83 % of the sphere diameter
