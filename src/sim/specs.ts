@@ -34,7 +34,7 @@ export interface AircraftSpec {
   mtow: number; mlw: number;
 }
 
-export const AIRCRAFT: AircraftSpec[] = [
+const ALL_AIRCRAFT: AircraftSpec[] = [
   {
     id: 'swift', name: 'Cessna 172S Skyhawk', role: 'Light single · piston · IO-360-L2A 180 hp', kind: 'piston', engines: 1,
     blurb: 'The world\'s most-built trainer. Fixed gear, 11.0 m wing, Vr 55 kt. Real Lycoming start-up: battery, mixture rich, prime, key.',
@@ -70,18 +70,20 @@ export const AIRCRAFT: AircraftSpec[] = [
   {
     id: 'sky', name: 'Airbus A320-200', role: 'Narrow-body jet airliner · CFM56-5B', kind: 'jet', engines: 2,
     blurb: '37.57 m long, 34.10 m span, 2 × 120 kN. Real ECAM-style cold-and-dark start: battery, APU, beacon, engine mode, master switches.',
-    emptyMass: 42600, payload: 14500, fuelCap: 18730, fuelFlow: 0.75,
+    emptyMass: 42600, payload: 14500, fuelCap: 18730, fuelFlow: 0.95,
     S: 122.6, b: 34.1, c: 4.19, Ixx: 1400000, Iyy: 3000000, Izz: 4200000,
     CL0: 0.25, CLa: 5.2, CLmax: 1.5, flapCL: 1.1, CD0: 0.022, e: 0.8, flapCD: 0.05, gearCD: 0.02, sbCD: 0.07,
     Cma: -1.5, Cm0: 0.1, Cmq: -22, Cmde: 1.2, Clb: -0.1, Clp: -0.5, Clda: 0.16, Cnb: 0.13, Cnr: -0.14, Cndr: 0.09,
-    power: 0, thrust: 205000, staticV0: 0, propEff: 0, spoolUp: 3.2, spoolDown: 3.8, idle: 0.2, ceiling: 11900,
+    power: 0, thrust: 240200, staticV0: 0, propEff: 0, spoolUp: 3.2, spoolDown: 3.8, idle: 0.2, ceiling: 11900,
     flapDetents: 4, vfe: [999, 230, 215, 195, 190], vle: 280, vne: 350, vs1: 142, vs0: 108, vr: 145, vapp: 135,
-    maxPitchRate: 0.12, maxRollRate: 0.45, maxSteer: 0.5, propTorque: 0,
+    maxPitchRate: 0.12, maxRollRate: 0.33, maxSteer: 0.5, propTorque: 0,
     gear: [{ pos: [0, -3.3, -11.44], share: 0.09, nose: true }, { pos: [-3.795, -3.3, 1.2], share: 0.455 }, { pos: [3.795, -3.3, 1.2], share: 0.455 }],
     hull: [[0, -1.7, -14.0], [0, 0.8, 20.5], [-17.05, 1.2, 5.0], [17.05, 1.2, 5.0], [0, -1.85, 0.5], [-5.75, -2.8, -3.5], [5.75, -2.8, -3.5]], gearTravel: 0.5, maxSink: 4.6,
     pax: 150, cruiseAlt: 11000, cruiseKt: 447, rangeKm: 5700, hasSpeedbrake: true, hasReverse: true, hasGlass: true,
-    eye: [-0.55, 1.45, -12.9], color: 0xf7f8fa, accent: 0x0b7a9e, length: 37.57,
+    eye: [-0.52, 1.45, -12.9], color: 0xf7f8fa, accent: 0x0b7a9e, length: 37.57,
     icao: 'A320', realName: 'Airbus A320-200', wingspan: 34.1, height: 11.76, toFlaps: 2, fixedGear: false, startSecs: 28, wheelR: [0.585, 0.38], mtow: 78000, mlw: 66000,
   },
 ];
+/** In-Flight is an Airbus A320-200 simulator: the Cessna 172S / ATR 72 definitions above are kept only as reference data. */
+export const AIRCRAFT: AircraftSpec[] = ALL_AIRCRAFT.filter((a) => a.id === 'sky');
 export const specById = (id: string) => AIRCRAFT.find((a) => a.id === id) || AIRCRAFT[0];

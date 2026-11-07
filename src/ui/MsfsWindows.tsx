@@ -383,35 +383,18 @@ export function CameraWindow({
             Cockpit Perspective
           </span>
           <div className="grid grid-cols-2 gap-1.5">
-            <button
-              onClick={() => game.setCockpitSubview('pilot')}
-              className="p-2 rounded-xl bg-white/5 hover:bg-white/15 border border-white/10 text-left font-bold text-xs transition"
-            >
-              Pilot Eye
-              <span className="block text-[9px] text-slate-400 font-normal">Standard forward view</span>
-            </button>
-            <button
-              onClick={() => game.setCockpitSubview('instruments')}
-              className="p-2 rounded-xl bg-white/5 hover:bg-white/15 border border-white/10 text-left font-bold text-xs transition"
-            >
-              Close Instruments
-              <span className="block text-[9px] text-slate-400 font-normal">PFD / MFD zoom</span>
-            </button>
-            <button
-              onClick={() => game.setCockpitSubview('copilot')}
-              className="p-2 rounded-xl bg-white/5 hover:bg-white/15 border border-white/10 text-left font-bold text-xs transition"
-            >
-              Copilot Seat
-              <span className="block text-[9px] text-slate-400 font-normal">Right chair view</span>
-            </button>
-            <button
-              onClick={() => game.setCockpitSubview('overhead')}
-              className="p-2 rounded-xl bg-white/5 hover:bg-white/15 border border-white/10 text-left font-bold text-xs transition"
-            >
-              Overhead Panel
-              <span className="block text-[9px] text-slate-400 font-normal">Light &amp; system switches</span>
-            </button>
+            {([
+              ['pilot', 'Captain Eye', 'Forward view, left seat'], ['copilot', 'First Officer', 'Right seat view'], ['instruments', 'Main Panel', 'PFD · ND · ECAM'],
+              ['pfd', 'PFD', 'Primary flight display'], ['nd', 'ND', 'Navigation display'], ['ecam', 'ECAM', 'E/WD + system display'],
+              ['fcu', 'FCU / EFIS', 'Autoflight & glareshield'], ['overhead', 'Overhead', 'Systems panel'], ['pedestal', 'Pedestal', 'Thrust · flaps · MCDU · ENG'], ['mcdu', 'MCDU', 'FMGC keypad'],
+            ] as const).map(([id, title, sub]) => (
+              <button key={id} onClick={() => game.setCockpitSubview(id)} className="p-2 rounded-xl bg-white/5 hover:bg-white/15 border border-white/10 text-left font-bold text-xs transition">
+                {title}
+                <span className="block text-[9px] text-slate-400 font-normal">{sub}</span>
+              </button>
+            ))}
           </div>
+          <p className="mt-1.5 text-[9px] text-slate-400">Mouse wheel zooms smoothly (up to 14×) · double-click any switch or screen to fly the camera to it · wheel over a knob turns it.</p>
         </div>
 
         {/* External & Cinematic Showcase */}
@@ -419,7 +402,7 @@ export function CameraWindow({
           <span className="text-[9px] text-slate-400 uppercase tracking-widest font-bold block mb-1.5">
             External &amp; Cinematic Views
           </span>
-          <div className="grid grid-cols-3 gap-1.5">
+          <div className="grid grid-cols-2 gap-1.5">
             <button
               onClick={() => game.setView('chase')}
               className={`p-2 rounded-xl border text-xs font-bold transition flex items-center justify-center gap-1.5 ${
@@ -437,15 +420,6 @@ export function CameraWindow({
             >
               <FlightIcon name="camera" size={12} />
               <span>Spotter</span>
-            </button>
-            <button
-              onClick={() => game.setView('window')}
-              className={`p-2 rounded-xl border text-xs font-bold transition flex items-center justify-center gap-1.5 ${
-                hud.view === 'window' ? 'bg-cyan-500/25 border-cyan-400 text-cyan-200' : 'bg-white/5 border-white/10 text-slate-300 hover:bg-white/15'
-              }`}
-            >
-              <FlightIcon name="display" size={12} />
-              <span>Cabin</span>
             </button>
           </div>
         </div>

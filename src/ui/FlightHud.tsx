@@ -190,11 +190,9 @@ function RadioSubtitle({ hud }: { hud: HudState }) {
 }
 
 const CAMERA_VIEWS: { id: ViewId; label: string; description: string; icon: FlightIconName }[] = [
-  { id: 'cockpit', label: 'Cockpit', description: 'Pilot seat & working instruments', icon: 'autopilot' },
+  { id: 'cockpit', label: 'Flight deck', description: 'A320 cockpit – every screen & switch works', icon: 'autopilot' },
   { id: 'chase', label: 'External', description: 'Follow your aircraft', icon: 'plane' },
   { id: 'spotter', label: 'Spotter', description: 'Watch from outside', icon: 'camera' },
-  { id: 'aisle', label: 'Cabin', description: 'Passenger cabin aisle', icon: 'camera' },
-  { id: 'window', label: 'Window', description: 'Passenger window seat', icon: 'camera' },
 ];
 
 function CameraPanel({ game, hud, onDone }: { game: Game; hud: HudState; onDone: () => void }) {
@@ -267,10 +265,12 @@ export function Hud({ game, hud, toasts, settings, setSettings, onMap, mapOpen, 
   const activeTool = TOOLS.find((t) => t.id === tool);
   const pendingRadio = hud.atcLog.some((m) => m.needsAck);
   const metric = settings.units === 'metric';
-  const pfd = !interior && !viewport.touch && !narrow && !short && (width >= 940 || height >= 650) && (mode === 'assisted' || (mode === 'standard' && fullInstruments));
-  const edgeInstruments = !interior && !viewport.touch && !narrow && !short && mode === 'standard' && !fullInstruments;
-  const miniMap = !tool || (workspace.minimized && !compactNav);
-  const telemetry = !edgeInstruments && mode !== 'cockpit' && (!interior || viewport.touch) && !compactNav;
+  const pfd = false;
+  // External camera: show the round edge instruments (speed dial, altitude dial, engine bars).
+  const edgeInstruments = !interior && !viewport.touch;
+  const miniMap = !interior && (!tool || (workspace.minimized && !compactNav));
+  // Telemetry (the top-left compact airspeed/altitude block) is hidden when round edge instruments are shown.
+  const telemetry = false;
 
 
   const reveal = () => {

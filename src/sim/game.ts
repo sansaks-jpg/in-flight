@@ -11,7 +11,7 @@ import { AtcRadio, buildAmbient, buildExchange, makeCallsign, phoneticLetter, Am
 import { Projection, haversine, bearing, wrap180, wrap360, D2R, R2D, clamp, M_PER_NM, MS_TO_KT, destination, greatCircle, FlightWaypoint } from './geo';
 import { World, Threshold, TimeOfDay } from './world';
 import { AircraftVisual, loadAircraftVisual } from './aircraftModel';
-import { Cockpit } from './cockpit';
+import { Cockpit, CockpitPreset, CockpitHost } from './cockpit';
 import { PanelData } from './instruments';
 import { Autopilot, IlsData } from './autopilot';
 import { advanceWaypoint } from './lnav';
@@ -25,7 +25,7 @@ import { simNowMs, sunPhase } from './clock';
 
 export type Phase = 'idle' | 'loading' | 'playing' | 'paused' | 'crashed' | 'complete';
 export type ViewId = 'cockpit' | 'chase' | 'spotter' | 'aisle' | 'window';
-const VIEWS: ViewId[] = ['cockpit', 'chase', 'spotter', 'aisle', 'window'];
+const VIEWS: ViewId[] = ['cockpit', 'chase', 'spotter']; // A320 flight deck is the primary view; cabin views were removed
 export interface ScenarioConfig {
   aircraftId: string; from: Airport; to: Airport; settings: Settings;
   /** Runway ident chosen in the planner (otherwise the best runway for wind/route is picked). */
@@ -390,7 +390,7 @@ export class Game {
     const pr = Math.max(0.5, this.basePixelRatio() * this.dprScale);
     this.renderer.setPixelRatio(pr); this.renderer.setSize(w, h, false);
     this.camera.aspect = w / h; this.camera.updateProjectionMatrix();
-    if (this.cockpit) { this.cockpit.camera.aspect = w / h; this.cockpit.camera.updateProjectionMatrix(); }
+    if (this.cockpit) { for (const cam of [this.cockpit.camera, this.cockpit.activeCamera]) { cam.aspect = w / h; cam.updateProjectionMatrix(); } }
   };
   private fovFor(base: number) { return this.camera.aspect < 1 ? base + 22 : base; }
 
@@ -429,7 +429,8 @@ export class Game {
     // falloff; only in play mode so the airport-background menu never rumbles
     if (mode === 'play') this.world.lightning.onStrike = (distM) => this.audio.thunder(clamp(1 - distM / 15000, 0.06, 1), distM / 343);
     this.visual = await loadAircraftVisual(this.spec); this.world.scene.add(this.visual.root);
-    this.cockpit = new Cockpit(this.spec, this.quality); this.cockpit.camera.aspect = this.camera.aspect; this.cockpit.camera.updateProjectionMatrix();
+    this.cockpit = new Cockpit(this.spec, this.quality); this.cockpit.host = this.makeCockpitHost(); await this.cockpit.ready;
+    for (const cam of [this.cockpit.camera, this.cockpit.activeCamera]) { cam.aspect = this.camera.aspect; cam.updateProjectionMatrix(); }
     this.audio.voiceOn = s.voice; this.audio.setVolume(s.volume); this.audio.setMuted(s.muted);
     // REAL weather: METAR + model data for the departure airfield (no presets). Never blocks the sim for more than a few seconds.
     let wx: LiveWx = OFFLINE_WX;
@@ -782,39 +783,25 @@ export class Game {
     this.taxiRibbonGroup.visible = this.showTaxiRibbon && this.currentFlightPhase === 'taxi' && this.fm?.wow;
   }
 
-  setCockpitSubview(sub: 'pilot' | 'instruments' | 'copilot' | 'overhead') {
+  /** Smooth, damped camera move to one of the named flight-deck presets (see COCKPIT_PRESETS). */
+  setCockpitSubview(sub: CockpitPreset) {
     if (!this.cockpit) return;
     this.setView('cockpit');
-    const [ex, ey, ez] = this.spec.eye;
-    switch (sub) {
-      case 'pilot':
-        this.cockpit.views.cockpit.pos.set(ex, ey, ez);
-        this.cockpit.views.cockpit.yaw = 0;
-        this.cockpit.views.cockpit.pitch = -0.1;
-        this.camera.fov = 65;
-        break;
-      case 'instruments':
-        this.cockpit.views.cockpit.pos.set(ex, ey - 0.12, ez + 0.15);
-        this.cockpit.views.cockpit.yaw = 0;
-        this.cockpit.views.cockpit.pitch = -0.38;
-        this.camera.fov = 50;
-        break;
-      case 'copilot':
-        this.cockpit.views.cockpit.pos.set(-ex, ey, ez);
-        this.cockpit.views.cockpit.yaw = 0.08;
-        this.cockpit.views.cockpit.pitch = -0.1;
-        this.camera.fov = 65;
-        break;
-      case 'overhead':
-        this.cockpit.views.cockpit.pos.set(0, ey + 0.15, ez + 0.1);
-        this.cockpit.views.cockpit.yaw = 0;
-        this.cockpit.views.cockpit.pitch = 0.65;
-        this.camera.fov = 68;
-        break;
-    }
+    this.cockpit.setPreset(sub);
     this.lookYaw = 0;
     this.lookPitch = 0;
     this.toast(`Cockpit Camera: ${sub.toUpperCase()}`, 'info');
+  }
+
+  /** Bridge between the 3D flight deck and the simulation (cockpit switches act on the real flight model). */
+  private makeCockpitHost(): CockpitHost {
+    const g = this;
+    return {
+      get fm() { return g.fm; }, get ap() { return g.ap; }, get lights() { return g.lights; }, get seatbelt() { return g.seatbelt; },
+      action: (id: string) => g.action(id), setApTarget: (t, v) => g.setApTarget(t, v), toast: (m, k) => g.toast(m, k ?? 'info'),
+      route: () => g.flightPlan.slice(Math.max(0, g.activeWpIdx)).map((w) => ({ name: w.name, lat: w.lat, lon: w.lon })),
+      position: () => ({ lat: g.lat(), lon: g.lon() }), magVar: (h: number) => g.magHdg(h) - h,
+    };
   }
 
   setFov(fov: number) {
@@ -844,200 +831,6 @@ export class Game {
     this.toast(`3D Taxi Ribbon: ${v ? 'ON' : 'OFF'}`, 'info');
   }
 
-  private resolveCockpitTooltip(id: string, x: number, y: number): CockpitTooltip | null {
-    if (!this.fm) return null;
-    const c = this.fm.ctl, s = this.spec;
-    switch (id) {
-      case 'throttle':
-        return {
-          id,
-          label: 'THROTTLE CONTROL',
-          value: `${Math.round(c.throttle * 100)}% THRUST (${Math.round(this.fm.n[0] * 100)}% N1)`,
-          actionHint: 'Drag up/down or press keys 1–9 / F1–F4',
-          x,
-          y,
-        };
-      case 'flaps':
-        return {
-          id,
-          label: 'FLAPS LEVER',
-          value: `Position ${c.flapsIdx} of ${s.flapDetents}`,
-          actionHint: 'Drag or press [F] Flaps+, [V] Flaps−',
-          x,
-          y,
-        };
-      case 'gear':
-        return {
-          id,
-          label: 'LANDING GEAR LEVER',
-          value: c.gearDown ? 'DOWN & LOCKED (3-GREEN)' : 'UP & RETRACTED',
-          actionHint: 'Click or press [G] to toggle',
-          x,
-          y,
-        };
-      case 'speedbrake':
-        return {
-          id,
-          label: 'SPEEDBRAKE / SPOILERS',
-          value: c.speedbrake > 0.05 ? 'DEPLOYED' : 'RETRACTED',
-          actionHint: 'Drag or press [Z] to toggle',
-          x,
-          y,
-        };
-      case 'yoke':
-        return {
-          id,
-          label: s.kind === 'jet' ? 'SIDE STICK CONTROLLER' : 'PRIMARY FLIGHT YOKE',
-          value: `Pitch ${(this.fm.pitch * R2D).toFixed(1)}° · Roll ${(this.fm.bank * R2D).toFixed(1)}°`,
-          actionHint: 'Drag to fly or use Arrow / WASD keys',
-          x,
-          y,
-        };
-      case 'park':
-        return {
-          id,
-          label: 'PARKING BRAKE',
-          value: c.parking ? 'SET (ON)' : 'RELEASED (OFF)',
-          actionHint: 'Click or press [B] to toggle',
-          x,
-          y,
-        };
-      case 'rev':
-        return {
-          id,
-          label: 'REVERSE THRUST',
-          value: c.reverse ? 'ARMED (ACTIVE)' : 'OFF (FORWARD)',
-          actionHint: 'Click or press [T] to toggle',
-          x,
-          y,
-        };
-      case 'ap':
-        return {
-          id,
-          label: 'AUTOPILOT MASTER',
-          value: this.ap.on ? `ENGAGED · ${this.ap.phase.toUpperCase()}` : 'DISENGAGED (FD ONLY)',
-          actionHint: 'Click or press [Y] to engage/disengage',
-          x,
-          y,
-        };
-      case 'apnav':
-        return {
-          id,
-          label: 'AUTOPILOT NAV (LNAV)',
-          value: this.ap.nav ? `ACTIVE · TRACKING ${this.cfg.to.icao}` : 'HDG SELECT MODE',
-          actionHint: 'Click or press [N] to toggle',
-          x,
-          y,
-        };
-      case 'appr':
-        return {
-          id,
-          label: 'AUTOPILOT APPROACH (APPR)',
-          value: this.ap.appr ? 'ARMED · ILS GLIDESLOPE CAPTURE' : 'OFF',
-          actionHint: 'Click or press [U] to arm approach',
-          x,
-          y,
-        };
-      case '_hdg':
-      case 'hdg-':
-      case 'hdg+':
-        return {
-          id,
-          label: 'AUTOPILOT HEADING BUG',
-          value: `${String(Math.round(this.ap.hdg)).padStart(3, '0')}° MAG`,
-          actionHint: 'Click [- / +] or press [, / .] to change',
-          x,
-          y,
-        };
-      case '_alt':
-      case 'alt-':
-      case 'alt+':
-        return {
-          id,
-          label: 'AUTOPILOT TARGET ALTITUDE',
-          value: `${this.ap.altFt.toLocaleString()} FT MSL`,
-          actionHint: 'Click [- / +] or press [[ / ]] to change',
-          x,
-          y,
-        };
-      case '_spd':
-      case 'spd-':
-      case 'spd+':
-        return {
-          id,
-          label: 'AUTOPILOT TARGET AIRSPEED',
-          value: `${this.ap.spd} KT IAS`,
-          actionHint: 'Click [- / +] or press [- / =] to change',
-          x,
-          y,
-        };
-      case 'bcn':
-        return {
-          id,
-          label: 'BEACON LIGHT SWITCH',
-          value: this.lights.beacon ? 'ON (FLASHING)' : 'OFF',
-          actionHint: 'Click to toggle',
-          x,
-          y,
-        };
-      case 'strb':
-        return {
-          id,
-          label: 'STROBE LIGHTS SWITCH',
-          value: this.lights.strobe ? 'ON (HIGH INTENSITY)' : 'OFF',
-          actionHint: 'Click or press [O] to toggle',
-          x,
-          y,
-        };
-      case 'nav':
-        return {
-          id,
-          label: 'NAVIGATION LIGHTS',
-          value: this.lights.nav ? 'ON (PORT/STBD/TAIL)' : 'OFF',
-          actionHint: 'Click to toggle',
-          x,
-          y,
-        };
-      case 'land':
-        return {
-          id,
-          label: 'LANDING LIGHTS',
-          value: this.lights.land ? 'ON (RUNWAY BEAMS)' : 'OFF',
-          actionHint: 'Click or press [L] to toggle',
-          x,
-          y,
-        };
-      case 'belt':
-        return {
-          id,
-          label: 'SEATBELT SIGN',
-          value: this.seatbelt ? 'ON (CHIME ARMED)' : 'OFF',
-          actionHint: 'Click or press [J] to chime',
-          x,
-          y,
-        };
-      case 'pa':
-        return {
-          id,
-          label: 'PASSENGER ADDRESS (CABIN PA)',
-          value: 'CAPTAIN MICROPHONE',
-          actionHint: 'Click or press [K] to make broadcast',
-          x,
-          y,
-        };
-      case 'pax':
-        return {
-          id,
-          label: 'PASSENGER CABIN',
-          value: `${Math.round(this.comfort)}% PAX COMFORT`,
-          actionHint: 'Click to interact with passengers',
-          x,
-          y,
-        };
-      default:
-        return null;
-    }
-  }
 
   private updateChecklist() {
     if (!this.fm) return;
@@ -1159,10 +952,7 @@ export class Game {
     this.zoom = 1;
     this.chaseInit = false;
     if (this.cockpit) {
-      const [ex, ey, ez] = this.spec.eye;
-      this.cockpit.views.cockpit.pos.set(ex, ey, ez);
-      this.cockpit.views.cockpit.yaw = 0;
-      this.cockpit.views.cockpit.pitch = -0.1;
+      this.cockpit.setPreset('pilot'); this.cockpit.resetZoom();
     }
   }
   cycleView() { this.setView(VIEWS[(this.viewIdx + 1) % VIEWS.length]); this.audio.click(); this.toast(`Camera: ${this.viewName()}`, 'info'); }
@@ -1419,6 +1209,7 @@ export class Game {
   }
 
   // ---- pointer ----
+  private lastClickT = 0; private lastHoverT = 0; private lastDX = 0; private lastDY = 0;
   private ndc(e: PointerEvent) { const r = this.canvas.getBoundingClientRect(); return new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1); }
   private onPointerDown = (e: PointerEvent) => {
     if (e.button !== 0 && e.button !== 2) return;
@@ -1426,11 +1217,14 @@ export class Game {
     if (this.phase !== 'playing') return;
     this.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     this.canvas.setPointerCapture?.(e.pointerId);
-    if (e.button === 0 && this.mode === 'play' && this.isInterior() && this.cockpit) {
-      this.cockpit.camera.updateMatrixWorld(); this.raycaster.setFromCamera(this.ndc(e), this.cockpit.camera);
-      const hit = this.cockpit.pick(this.raycaster);
+    if ((e.button === 0 || e.button === 2) && this.mode === 'play' && this.isInterior() && this.cockpit) {
+      const now = performance.now(), dbl = now - this.lastClickT < 320; this.lastClickT = now;
+      const cam = this.cockpit.activeCamera; cam.updateMatrixWorld(); this.raycaster.setFromCamera(this.ndc(e), cam);
+      if (dbl && e.button === 0 && this.cockpit.focusAt(this.raycaster)) { this.audio.click(); return; }
+      const hit = this.cockpit.press(this.raycaster, e.button, e.shiftKey);
       if (hit) {
         const c = this.fm.ctl;
+        if (hit.handled) { this.audio.click(); this.drag = { id: 'cockpit', sx: e.clientX, sy: e.clientY, v: 0 }; return; }
         switch (hit.id) {
           case 'throttle': this.drag = { id: 'throttle', sx: e.clientX, sy: e.clientY, v: c.throttle }; return;
           case 'flaps': this.drag = { id: 'flaps', sx: e.clientX, sy: e.clientY, v: c.flapsIdx }; return;
@@ -1448,13 +1242,12 @@ export class Game {
     const d = this.drag;
     if (!d) {
       if (this.mode === 'play' && this.isInterior() && this.cockpit && this.phase === 'playing') {
-        this.cockpit.camera.updateMatrixWorld();
-        this.raycaster.setFromCamera(this.ndc(e), this.cockpit.camera);
-        const hit = this.cockpit.pick(this.raycaster, true);
-        if (hit) {
-          this.cockpitTooltip = this.resolveCockpitTooltip(hit.id, e.clientX, e.clientY);
-        } else {
-          this.cockpitTooltip = null;
+        const nowH = performance.now();
+        if (nowH - this.lastHoverT > 60) {
+          this.lastHoverT = nowH;
+          const cam = this.cockpit.activeCamera; cam.updateMatrixWorld(); this.raycaster.setFromCamera(this.ndc(e), cam);
+          const hv = this.cockpit.hover(this.raycaster);
+          this.cockpitTooltip = hv ? { id: hv.id, label: hv.label, value: hv.value, actionHint: hv.hint, x: e.clientX, y: e.clientY } : null;
         }
       } else {
         this.cockpitTooltip = null;
@@ -1463,6 +1256,7 @@ export class Game {
     }
     const c = this.fm?.ctl; const dx = e.clientX - d.sx, dy = e.clientY - d.sy;
     switch (d.id) {
+      case 'cockpit': { const p = this.pointers.get(e.pointerId); const mx = p ? e.clientX - p.x : dx - (this.lastDX ?? 0), my = p ? e.clientY - p.y : dy - (this.lastDY ?? 0); if (p) { p.x = e.clientX; p.y = e.clientY; } this.cockpit?.drag(mx, my); break; }
       case 'throttle': c.throttle = clamp(d.v - dy / 170, 0, 1); break;
       case 'flaps': c.flapsIdx = clamp(Math.round(d.v + dy / 34), 0, this.spec.flapDetents); break;
       case 'speedbrake': c.speedbrake = clamp(d.v - dy / 110, 0, 1); break;
@@ -1477,12 +1271,21 @@ export class Game {
     }
   };
   private onPointerUp = (e: PointerEvent) => {
+    this.cockpit?.release();
     this.pointers.delete(e.pointerId);
     this.drag = null;
     this.yokeDrag = null;
     this.freelookActive = false;
   };
-  private onWheel = (e: WheelEvent) => { this.zoom = clamp(this.zoom * (1 + e.deltaY * 0.0012), 0.4, 3); };
+  private onWheel = (e: WheelEvent) => {
+    if (this.mode === 'play' && this.isInterior() && this.cockpit) {
+      const cam = this.cockpit.activeCamera; cam.updateMatrixWorld(); const r = this.canvas.getBoundingClientRect();
+      this.raycaster.setFromCamera(new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1), cam);
+      if (!this.cockpit.wheel(this.raycaster, e.deltaY, e.shiftKey)) this.cockpit.zoomBy(e.deltaY); // knob under the cursor, otherwise smooth zoom
+      return;
+    }
+    this.zoom = clamp(this.zoom * (1 + e.deltaY * 0.0012), 0.4, 3);
+  };
   private chatWithPassenger() {
     const m = this.comfort / 100;
     const good = ['“Smooth flight, Captain – thank you!”', '“The view is incredible up here!”', '“Best landing I ever felt… so far!”', '“Can I visit the cockpit later?”'];
@@ -1649,7 +1452,7 @@ export class Game {
     r.clear();
     if (!this.world) return;
     r.render(this.world.scene, this.camera);
-    if (this.mode === 'play' && this.isInterior() && this.cockpit && this.phase !== 'loading') { r.clearDepth(); r.render(this.cockpit.scene, this.cockpit.camera); }
+    if (this.mode === 'play' && this.isInterior() && this.cockpit && this.phase !== 'loading') { r.clearDepth(); r.render(this.cockpit.activeScene, this.cockpit.activeCamera); }
   }
 
   private attractCamera(dt: number) {
@@ -2062,6 +1865,7 @@ export class Game {
     if (this.precip) { this.relAir.copy(fm.wind).add(fm.gust).sub(fm.vel); this.precip.update(this.phase === 'paused' ? 0 : dt, this.camera.position, this.relAir, w.wx.baseMsl, clamp((w.sunElevation + 8) / 20, 0.12, 1)); }
     // sim → cockpit instruments
     const interior = this.isInterior() && this.mode === 'play';
+    if (this.cockpit) this.cockpit.daylight = clamp((w.sunElevation + 8) / 20, 0.12, 1);
     if (interior && this.cockpit) this.cockpit.update(dt, this.time, this.panelData(), { pitch: fm.ctl.pitch, roll: fm.ctl.roll, yaw: fm.ctl.yaw, throttle: fm.ctl.throttle, flapsIdx: fm.ctl.flapsIdx, gearDown: fm.ctl.gearDown, speedbrake: fm.ctl.speedbrake }, { battery: fm.ctl.battery, lights: this.lights, seatbelt: this.seatbelt, parking: fm.ctl.parking, reverse: fm.ctl.reverse, apOn: this.ap.on, apNav: this.ap.nav, apAppr: this.ap.appr, apHdg: this.magHdg(this.ap.hdg), apAlt: this.ap.altFt, apSpd: this.ap.spd, mood: this.comfort / 100, shake: clamp(this.turb * 1.6 + this.shakeImpulse, 0, 1.6) }, true);
     v.setInterior(interior);
     if (this.phase === 'playing') {
@@ -2093,12 +1897,13 @@ export class Game {
     const sx = amp * (Math.sin(t * 23.1) + Math.sin(t * 41.7 + 1.3)), sy = amp * (Math.sin(t * 19.3 + 2) + Math.sin(t * 37.9)), sr = amp * 0.6 * Math.sin(t * 29.1);
     const gOff = flying ? clamp(-(fm.nz - 1) * 0.025, -0.06, 0.06) : 0;
     if (this.isInterior() && this.mode === 'play') {
-      cam.near = 0.25;
-      const vw = this.cockpit!.views[view as 'cockpit' | 'aisle' | 'window'];
-      tmpE.set(vw.pitch + this.lookPitch + sx, vw.yaw + this.lookYaw + sy, sr, 'YXZ');
+      cam.near = 0.02;
+      const vw = this.cockpit!.smooth(dt);
+      const lk = 1 / this.cockpit!.zoom; // look sensitivity follows the zoom so tiny details stay steerable
+      tmpE.set(vw.pitch + this.lookPitch * lk + sx * lk, vw.yaw + this.lookYaw * lk + sy * lk, sr, 'YXZ');
       const local = tmpQ.setFromEuler(tmpE); // scratch — no per-frame clone
       tmpV3.copy(vw.pos); tmpV3.y += gOff;  // head position in body frame (scratch)
-      const cq = this.cockpit!.camera; cq.position.copy(tmpV3); cq.quaternion.copy(local); cq.fov = this.fovFor(view === 'cockpit' ? 68 : 72); cq.updateProjectionMatrix();
+      for (const cq of [this.cockpit!.camera, this.cockpit!.activeCamera]) { cq.position.copy(tmpV3); cq.quaternion.copy(local); cq.fov = this.fovFor(vw.fov); cq.updateProjectionMatrix(); } const cq = this.cockpit!.camera;
       tmpV3.applyQuaternion(fm.quat);
       cam.position.copy(fm.pos).add(tmpV3); cam.quaternion.copy(fm.quat).multiply(local); cam.fov = cq.fov; cam.updateProjectionMatrix();
     } else if (view === 'spotter' && this.mode === 'play') {

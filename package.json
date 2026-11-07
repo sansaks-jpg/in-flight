@@ -28,7 +28,6 @@
     "@types/react-dom": "19.2.3",
     "@types/three": "^0.170.0",
     "@vitejs/plugin-react": "5.1.1",
-    "playwright": "1.58.2",
     "tailwindcss": "4.1.17",
     "tsx": "^4.23.15",
     "typescript": "5.9.3",

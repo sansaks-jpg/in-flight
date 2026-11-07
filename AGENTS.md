@@ -79,9 +79,13 @@ To prevent garbage collection (GC) micro-stutters:
 | `src/ui/globeCamera.ts` | Google-Earth-style camera helpers: eased fly-to with pull-back arc, drag inertia, normalised wheel zoom. |
 | `src/ui/globeRunways.ts` | True-scale (metres) runway markings for the globe overlay with a metres-per-pixel fade gate. |
 | `src/ui/PreGameVisuals.tsx` | Interactive pre-flight globe and planner visuals: `InteractiveEarthGlobe`, runway-end anchors and airport framing helpers. |
-| `src/sim/aircraftModel.ts` + `aircraftGeo.ts` | Original procedural exterior models (lofted fuselage, airfoil wings, hinged control surfaces, props, gear) built 1:1 from `specs.ts`; no imported 3D meshes. Body frame +X right, +Y up, -Z forward, CG at origin; wheel contact points come straight from `spec.gear`. |
-| `src/sim/cockpit.ts` | 3D interactive cockpit models, analog gauges, interactive throttle/stick, PFD and MFD displays. |
-| `src/sim/instruments.ts` | Canvas-drawn flight instruments used as textures inside the 3D cockpit. |
+| `src/sim/aircraftModel.ts` + `aircraftGeo.ts` | Exterior models. NOTE (corrected): the A320 exterior may use `src/assets/models/a320.glb` (see its CREDITS.md); the C172/ATR procedural builders remain only as reference – the product is **A320-only** (`AIRCRAFT` in `specs.ts` is filtered to `sky`). Body frame +X right, +Y up, -Z forward, CG at origin; wheel contact points come straight from `spec.gear`. |
+| `src/sim/cockpit.ts` | **A320 flight deck**: loads the FlightGear A320-family GLB (`public/models/a320/cockpit.glb`, GPL-2.0), merges static geometry per material, animates ~600 switches/knobs/levers/keys about their original axes, replaces screen textures with live canvases, handles pointer/wheel/double-click interaction and the damped camera rig (presets, 1–14x zoom). Falls back to the procedural deck if the GLB cannot be fetched. |
+| `src/sim/a320/assets.ts` | GLB + manifest loader (meshopt decoder) with local-first URL list and pinned jsDelivr / raw.githubusercontent fallbacks. |
+| `src/sim/a320/systems.ts` | Electrics, APU, bleed/packs, pressurisation, hydraulics, fuel, ENG MODE/MASTER start logic, autobrake/ground-spoiler arming, ECAM page selection. `CockpitHost` is the bridge to `Game`. |
+| `src/sim/a320/displays.ts` | PFD, ND (ARC/ROSE/PLAN), E/WD, 13 SD pages, MCDU (2 units), ISIS, FCU digit strip and clock renderers. |
+| `src/sim/a320/proceduralCockpit.ts` | Old procedural cockpit, kept only as runtime fallback. |
+| `src/sim/instruments.ts` | `PanelData` telemetry type shared by the displays (plus the legacy generic instrument painters). |
 | `src/sim/clock.ts` | Single real-world (UTC) time source, NOAA solar position, twilight phases and clock formatting. Never use a separate game clock for time of day. |
 | `src/sim/magvar.ts` | Magnetic variation from the World Magnetic Model (WMM2025); runway numbers, ILS courses, VOR radials and ATC headings are magnetic. |
 | `src/sim/geo.ts` | Geodesy + Web-Mercator helpers: a single `Projection` maps lat/lon <-> world metres, plus unit constants (`M_PER_NM`, `M_PER_FT`, `MS_TO_KT`). |
@@ -185,3 +189,14 @@ To prevent garbage collection (GC) micro-stutters:
    - Do not bypass type errors using untyped `@ts-ignore` without rigorous justification.
 4. **Performance & Quality Presets**:
    - Ensure changes respect the quality presets (`ultra`, `high`, `medium`, `low`) defined in `src/sim/quality.ts` — the `QualityPreset` type lives in `src/sim/storage.ts`. There is no `mobile` preset: mobile devices are handled through the `isMobile` flag in `resolveAutoQuality()` / `qualityProfile()`. Keep draw calls and geometry count within the defined budgets.
+
+
+---
+
+## 6. A320 cockpit conventions (added)
+
+- Model frame: -X forward, +Y up, +Z captain side. `Cockpit.group` rotates it by -90° about Y into the body frame; the captain eye point `EYE_M` is registered to `spec.eye`.
+- Part names in the GLB are the control IDs (`APUStartBtn`, `FlapsLever`, `thr_l_body`, `spd-sel`, ...). Legend nodes `<btn>1F/2O/1A` are lit by emissive; `*_led`/`*_on` nodes are hidden unless lit (see `ledOn`).
+- New physics controls: `thrOffset`, `autobrake`, `spoilersArmed`; jets use an A320 normal-law FBW block (load-factor demand, auto-trim, pitch/bank/alpha/high-speed protections) and detent tables for flap lift/drag.
+- Discrepancies found while verifying this file against the code: the earlier text claimed "no imported 3D meshes" and listed three aircraft; the code ships GLBs and (now) a single A320.
+- Asset provenance and licence: `public/models/a320/NOTICE.txt`. Do not edit the GLB by hand; re-run gltf-transform (webp -> meshopt) on the pinned upstream file if it must be regenerated.

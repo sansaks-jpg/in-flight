@@ -212,7 +212,7 @@ export interface AircraftVariantInfo {
   imageUrl: string;
 }
 
-export const AIRCRAFT_VARIANTS: AircraftVariantInfo[] = [
+const ALL_VARIANTS: AircraftVariantInfo[] = [
   {
     variantId: 'sky-cfm-std',
     aircraftId: 'sky',
@@ -326,6 +326,8 @@ export const AIRCRAFT_VARIANTS: AircraftVariantInfo[] = [
     imageUrl: AIRCRAFT_STUDIO_IMAGES.swift,
   },
 ];
+/** A320-only build: the other airframes' variants are not offered. */
+export const AIRCRAFT_VARIANTS: AircraftVariantInfo[] = ALL_VARIANTS.filter((v) => v.aircraftId === 'sky');
 
 export type HangarCategory = 'all' | 'piston' | 'turboprop' | 'jet';
 

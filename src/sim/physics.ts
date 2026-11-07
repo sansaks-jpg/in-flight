@@ -28,8 +28,14 @@ export interface Controls {
   brakeL: number; brakeR: number;
   /** Aircraft electrics + piston mixture (0 = cut-off, 1 = full rich). */
   battery: boolean; mixture: number;
+  /** A320 extras: right-engine lever offset (right − left), autobrake 0 off / 1 LO / 2 MED / 3 MAX, ground-spoiler arming. */
+  thrOffset: number; autobrake: number; spoilersArmed: boolean;
 }
-export const defaultControls = (): Controls => ({ pitch: 0, roll: 0, yaw: 0, throttle: 0, brake: 0, parking: true, reverse: false, speedbrake: 0, flapsIdx: 0, gearDown: true, trim: 0, assist: true, apHold: false, brakeL: 0, brakeR: 0, battery: true, mixture: 1 });
+export const defaultControls = (): Controls => ({ pitch: 0, roll: 0, yaw: 0, throttle: 0, brake: 0, parking: true, reverse: false, speedbrake: 0, flapsIdx: 0, gearDown: true, trim: 0, assist: true, apHold: false, brakeL: 0, brakeR: 0, battery: true, mixture: 1, thrOffset: 0, autobrake: 0, spoilersArmed: false });
+
+/** A320 slat/flap detents (0, 1, 2, 3, FULL) -> fraction of full-flap lift / drag. CONF 1 is slats only (little CL0, lots of CLmax). */
+const FLAP_LIFT = [0, 0.12, 0.40, 0.62, 1], FLAP_DRAG = [0, 0.08, 0.30, 0.58, 1];
+const tab = (t: number[], x: number) => { const f = clamp(x, 0, 1) * (t.length - 1), i = Math.min(t.length - 2, Math.floor(f)); return t[i] + (t[i + 1] - t[i]) * (f - i); };
 
 export interface GearState { comp: number; fn: number; contact: boolean; skid: number; }
 export interface ContactEvent { kind: 'touchdown' | 'hull' | 'gearbreak'; vs: number; speed: number; bank: number; pitch: number; point: Vector3; severity: number; }
@@ -135,7 +141,10 @@ export class FlightModel {
     this.flapsPos += clamp(tgtFlap - this.flapsPos, -dt * 0.12, dt * 0.12);
     const gTgt = c.gearDown ? 1 : 0;
     if (s.fixedGear) { this.gearPos = 1; c.gearDown = true; } else this.gearPos += clamp(gTgt - this.gearPos, -dt / 6, dt / 6);
-    this.sbPos += clamp(c.speedbrake - this.sbPos, -dt * 0.8, dt * 0.8);
+    // ground spoilers: armed + weight on wheels + idle thrust (or reversers) above 72 kt -> full extension automatically
+    const gSpoil = c.spoilersArmed && this.wow && this.gs > 36 && (c.throttle < 0.12 || c.reverse) ? 1 : 0;
+    if (!this.wow || this.gs < 20) this.autoSb = 0; else if (gSpoil) this.autoSb = 1;
+    this.sbPos += clamp(Math.max(c.speedbrake, this.autoSb) - this.sbPos, -dt * 0.8, dt * 0.8);
 
     // ---- airmass-relative velocity ----
     const windNow = _v3.copy(this.wind).add(this.gust);
@@ -163,7 +172,8 @@ export class FlightModel {
 
     // ---- stall model ----
     const fl = this.flapsPos;
-    const CL0 = s.CL0 + s.flapCL * fl;
+    const flL = s.kind === 'jet' ? tab(FLAP_LIFT, fl) : fl, flD = s.kind === 'jet' ? tab(FLAP_DRAG, fl) : fl;
+    const CL0 = s.CL0 + s.flapCL * flL;
     const CLmaxE = s.CLmax + s.flapCL * fl * 1.05;
     // Real-world stall AoA: 15-18 degrees (0.26-0.31 rad)
     const aStall = Math.max(0.26, (CLmaxE - CL0) / s.CLa + 0.05 * fl);
@@ -178,7 +188,35 @@ export class FlightModel {
     const pilotPitch = c.pitch, pilotRoll = c.roll;
     const aLim = aStall * 0.86;
     const prot = c.assist && this.alpha > aLim ? -(this.alpha - aLim) * 9 : 0; // soft alpha protection (assist)
-    if (c.assist) {
+    if (c.assist && s.kind === 'jet') {
+      // ---- A320 NORMAL LAW: sidestick = load-factor / roll-rate demand, flight-path hold with stick neutral, auto-trim, protections ----
+      const V = Math.max(60, this.tas), q = this.w.x, cb = Math.max(0.2, Math.cos(this.bank)), kias = this.ias / 0.514444;
+      const nzMax = this.flapsPos > 0.05 ? 2.0 : 2.5;
+      let qCmd = (G / V) * (pilotPitch > 0 ? pilotPitch * (nzMax - 1) : pilotPitch * 2) + (G * Math.tan(this.bank) * Math.sin(this.bank)) / V;
+      const pitchDeg = this.pitch * 180 / Math.PI, pLim = this.flapsPos > 0.9 ? 25 : 30;
+      if (pitchDeg > pLim && qCmd > 0) qCmd = -(pitchDeg - pLim) * 0.04;           // pitch attitude protection +30 / +25 (CONF FULL)
+      if (pitchDeg < -15 && qCmd < 0) qCmd = (-15 - pitchDeg) * 0.04;               // −15
+      const aProt = aStall * 0.84, aMax = aStall * 0.95;
+      if (!this.wow && this.alpha > aProt) qCmd = Math.min(qCmd, -(this.alpha - aProt) * 2.5);  // alpha protection: stick back no longer raises alpha beyond alpha max
+      if (this.alpha > aMax) qCmd = Math.min(qCmd, -0.15);
+      const ovsp = Math.max(kias - (s.vne - 0), (this.mach - 0.82) * 300);
+      if (ovsp > 0) qCmd = Math.max(qCmd, Math.min(0.1, ovsp * 0.004));            // high-speed protection: nose-up bias
+      const err = qCmd - q;
+      if (!this.wow) {
+        if (Math.abs(pilotPitch) < 0.04 && !c.apHold) this.trimAuto = clamp(this.trimAuto + err * 0.9 * dt * 0.7, -0.95, 0.95);
+        else this.trimAuto = clamp(this.trimAuto + err * 0.15 * dt, -0.95, 0.95);
+      }
+      elevCmd = this.trimAuto + err * 1.6 + c.trim * 0.3;
+      const bankDeg = this.bank * 180 / Math.PI;
+      let pCmd = pilotRoll * s.maxRollRate;                                           // roll-rate demand (≈15–20 °/s)
+      if (!c.apHold && Math.abs(pilotRoll) < 0.03 && Math.abs(bankDeg) < 33) pCmd = -this.bank * 0.9; // neutral stick: wings level below 33°
+      else if (!c.apHold && Math.abs(pilotRoll) < 0.03) pCmd = -(bankDeg - Math.sign(bankDeg) * 33) * Math.PI / 180 * 0.9; // beyond 33° return to 33°
+      if (Math.abs(bankDeg) > 67 && Math.sign(pilotRoll) === Math.sign(bankDeg)) pCmd = 0; // bank angle protection 67°
+      if (this.alpha > aMax) pCmd *= 0.5;
+      ailCmd = (pCmd - (-this.w.z)) * 1.1 / cb;
+      const rudLim = clamp(1 - (kias - 160) / 220, 0.25, 1);                           // rudder travel limiter
+      rudCmd = c.yaw * rudLim + (this.wow ? (Math.abs(c.yaw) < 0.05 && this.gs > 3 ? clamp(this.w.y * 0.9, -0.5, 0.5) : 0) : clamp(this.beta * 7, -0.5, 0.5)); // yaw damper + turn coordination
+    } else if (c.assist) {
       const sp = clamp(this.ias / (s.vs1 * 0.514 * 1.5), 0.55, 1.4);
       const qCmd = pilotPitch * s.maxPitchRate / Math.sqrt(sp);
       const q = this.w.x;
@@ -193,7 +231,7 @@ export class FlightModel {
       if (!c.apHold && Math.abs(pilotRoll) < 0.03 && Math.abs(bankDeg) < 22) pCmd = -this.bank * 0.9;
       if (Math.abs(bankDeg) > 62 && Math.sign(pilotRoll) === Math.sign(bankDeg)) pCmd = 0;
       ailCmd = (pCmd - (-this.w.z)) * 1.1;
-      rudCmd = c.yaw + (this.wow ? (Math.abs(c.yaw) < 0.05 && this.gs > 3 ? clamp(this.w.y * 0.9, -0.5, 0.5) : 0) : clamp(this.beta * 7, -0.5, 0.5)); // ground: yaw damper (assist)
+      rudCmd = c.yaw + (this.wow ? (Math.abs(c.yaw) < 0.05 && this.gs > 3 ? clamp(this.w.y * 0.9, -0.5, 0.5) : 0) : clamp(this.beta * 7, -0.5, 0.5));
     } else {
       elevCmd = pilotPitch + c.trim * 0.5 + (c.assist ? this.trimAuto * 0.7 + prot : 0);
       ailCmd = pilotRoll; rudCmd = c.yaw;
@@ -207,13 +245,14 @@ export class FlightModel {
 
     // ---- engines (real start-up sequence: OFF -> starter -> light-off -> idle -> running) ----
     let thrust = 0, ff = 0;
-    const thr = this.fuel > 0 ? c.throttle : 0;
+    const thrBase = this.fuel > 0 ? c.throttle : 0;
     const nEng = s.engines;
     let anyOut = false;
     for (let i = 0; i < nEng; i++) {
       const e = this.eng[i];
       if (this.fuel <= 0 && e.state !== 0) { e.state = 0; anyOut = true; }
       if (s.kind === 'piston' && e.state === 2 && c.mixture < 0.15) e.state = 0; // idle cut-off
+      const thr = i === 1 ? clamp(thrBase + c.thrOffset, 0, 1) : thrBase;
       let tgt: number, tau: number;
       if (e.state === 1) {
         e.t += dt;
@@ -278,7 +317,7 @@ export class FlightModel {
     const h = Math.max(0.5, this.agl);
     const ge = (16 * h / s.b) ** 2; const geF = ge / (1 + ge);
     const k = 1 / (Math.PI * s.e * (s.b * s.b / s.S));
-    let CD = s.CD0 + k * geF * CL * CL + s.flapCD * fl + s.gearCD * this.gearPos + s.sbCD * this.sbPos + 0.45 * Math.sin(this.alpha) ** 2 * smoothstep(aSAbs * 0.9, aSAbs * 1.5, aAbs) + 0.6 * Math.sin(this.beta) ** 2;
+    let CD = s.CD0 + k * geF * CL * CL + s.flapCD * flD + s.gearCD * this.gearPos + s.sbCD * this.sbPos + 0.45 * Math.sin(this.alpha) ** 2 * smoothstep(aSAbs * 0.9, aSAbs * 1.5, aAbs) + 0.6 * Math.sin(this.beta) ** 2;
     if (s.kind === 'jet' && this.mach > 0.78) CD += 0.12 * (this.mach - 0.78) ** 1.5 * 12;
     CD += (this.damage / 100) * 0.02;
     const qS = this.qbar * s.S;
@@ -322,7 +361,14 @@ export class FlightModel {
     let anyContact = false, maxFn = 0;
     let steer = 0;
     if (this.wow || this.agl < 4) steer = (c.yaw + (c.assist && Math.abs(c.yaw) < 0.05 && this.gs > 3 ? clamp(this.w.y * 0.6, -0.3, 0.3) : 0)) * s.maxSteer * (1 - smoothstep(8, 40, this.gs));
-    const brakeIn = c.parking ? 1 : c.brake;
+    // autobrake: decel target LO 1.7 / MED 3.0 / MAX 4.0 m/s² once the ground spoilers are out; pedals above 30 % disarm it
+    let abBrake = 0;
+    if (c.autobrake > 0 && this.wow && this.autoSb > 0 && this.gs > 6 && c.brake < 0.3) {
+      const tgt = [0, 1.7, 3.0, 4.0][Math.min(3, c.autobrake)];
+      this.autoBrk = clamp(this.autoBrk + (tgt - (-this.nx * G)) * 0.22 * dt, 0, 1);
+      abBrake = this.autoBrk;
+    } else { this.autoBrk = 0; if (c.brake >= 0.3) c.autobrake = 0; }
+    const brakeIn = c.parking ? 1 : Math.max(c.brake, abBrake);
     const gearActive = this.gearPos > 0.9;
     s.gear.forEach((g, i) => {
       const st = this.gear[i];
@@ -424,7 +470,7 @@ export class FlightModel {
     this.prevAccel.copy(acc);
     // harsh failure: ground collision destruction at huge speed handled above
   }
-  _tdFlag = false;
+  _tdFlag = false; autoSb = 0; autoBrk = 0;
 
   private alphaMoment(aStall: number) {
     // linear restoring moment up to stall, then weakens (nose-drop tendency retained)

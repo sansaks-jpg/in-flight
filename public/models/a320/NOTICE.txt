@@ -1,0 +1,16 @@
+Airbus A320 flight deck 3D model
+================================
+Source : FlightGear "A320-family" (https://github.com/legoboyvdlp/A320-family, commit fec1ecba767c8fffd145337b27012e89c01e3ade),
+         converted to glTF 2.0 by the radebit/flight-simulator project (https://github.com/radebit/flight-simulator,
+         public/models/a320/cockpit.glb, commit b2afd173081aea5db00031baa1003aa7c46a789a).
+License: GNU General Public License v2 (see LICENSE.txt in this folder).
+Copyright (c) 2025 Josh Davidson, Jonathan Redpath, merspieler, Matthew Maring, Thorsten Herrmann, Semir Gebran and the
+respective FlightGear A320-family contributors.
+
+Modifications made for In-Flight:
+  * textures re-encoded PNG/JPEG -> WebP (quality 94, resolution unchanged: up to 4096 x 4096),
+  * geometry quantised and compressed with EXT_meshopt_compression (gltf-transform "meshopt"),
+  * no vertices, UVs, node names or coordinates were edited. cockpit-manifest.json is the unmodified upstream manifest
+    (animation axes / part bounding boxes in the original model coordinates).
+
+The unmodified original is available at runtime from the permanent pinned fallbacks listed in src/sim/a320/assets.ts.

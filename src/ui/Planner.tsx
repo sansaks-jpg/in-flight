@@ -717,7 +717,7 @@ export function Planner({
             </div>
 
             <div className="p-2 border-b border-white/10 grid grid-cols-3 gap-1.5 bg-[#0e141d]">
-              {(['sky', 'trek', 'swift'] as const).map((id) => {
+              {(['sky'] as const).map((id) => {
                 const v =
                   AIRCRAFT_VARIANTS.find((item) => item.aircraftId === id) || AIRCRAFT_VARIANTS[0];
                 const active = aircraftId === id;
