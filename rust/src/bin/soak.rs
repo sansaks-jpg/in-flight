@@ -160,8 +160,9 @@ fn main() {
                 cloud_base: f.weather.cloud_base_m as f32,
                 cloud_cover: f.weather.cloud_cover as f32,
                 show_aircraft: third,
+                cockpit: false,
             };
-            let info = HudInfo { fps: 60.0, frame_ms: 16.6, sim_ms: 0.4, view, paused: false, help: false, time: i as f64 / 60.0 };
+            let info = HudInfo { fps: 60.0, frame_ms: 16.6, sim_ms: 0.4, view, paused: false, help: false, time: i as f64 / 60.0, panels3d: false };
             r.render(&off.view, &fp, &mut |u| ui::draw_hud(u, &f, &info));
             if i % 50 == 49 {
                 off.read_rgba(&r, &mut px); // forces the GPU queue to drain so timings include GPU work

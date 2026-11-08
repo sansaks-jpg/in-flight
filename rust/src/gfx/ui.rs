@@ -84,7 +84,7 @@ pub struct Ui {
     pub h: f32,
 }
 
-pub const MAX_UI_VERTS: usize = 96_000;
+pub const MAX_UI_VERTS: usize = 240_000;
 
 impl Ui {
     pub fn new() -> Self {
@@ -156,13 +156,131 @@ impl Ui {
         let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
         let l = (dx * dx + dy * dy).sqrt().max(1e-4);
         let (nx, ny) = (-dy / l * th * 0.5, dx / l * th * 0.5);
-        self.quad([[a[0] + nx, a[1] + ny], [b[0] + nx, b[1] + ny], [b[0] - nx, b[1] - ny], [a[0] - nx, a[1] - ny]], col);
+        self.quad([[a[0] + nx, a[0] + ny], [b[0] + nx, b[0] + ny], [b[0] - nx, b[0] - ny], [a[0] - nx, a[1] - ny]], col);
     }
     pub fn circle(&mut self, c: [f32; 2], r: f32, col: Col) {
         for k in 0..16 {
             let (a0, a1) = (k as f32 / 16.0 * std::f32::consts::TAU, (k + 1) as f32 / 16.0 * std::f32::consts::TAU);
             self.tri(c, [c[0] + a0.cos() * r, c[1] + a0.sin() * r], [c[0] + a1.cos() * r, c[1] + a1.sin() * r], col);
         }
+    }
+
+    /// Triangle with a colour per vertex (Gouraud) - used by the pre-flight globe and gradients.
+    pub fn tri_c(&mut self, a: [f32; 2], b: [f32; 2], c: [f32; 2], ca: Col, cb: Col, cc: Col) {
+        let uv = Self::white_uv();
+        self.push(a, uv, ca);
+        self.push(b, uv, cb);
+        self.push(c, uv, cc);
+    }
+    /// Quad with a colour per corner (order: top-left, top-right, bottom-right, bottom-left).
+    pub fn quad_c(&mut self, p: [[f32; 2]; 4], c: [Col; 4]) {
+        self.tri_c(p[0], p[1], p[2], c[0], c[1], c[2]);
+        self.tri_c(p[0], p[2], p[3], c[0], c[2], c[3]);
+    }
+    /// Vertical gradient rectangle.
+    pub fn rect_v(&mut self, x: f32, y: f32, w: f32, h: f32, top: Col, bottom: Col) {
+        self.quad_c([[x, y], [x + w, y], [x + w, y + h], [x, y + h]], [top, top, bottom, bottom]);
+    }
+    /// Horizontal gradient rectangle.
+    pub fn rect_h(&mut self, x: f32, y: f32, w: f32, h: f32, left: Col, right: Col) {
+        self.quad_c([[x, y], [x + w, y], [x + w, y + h], [x, y + h]], [left, right, right, left]);
+    }
+    /// Filled disc with `n` segments.
+    pub fn disc(&mut self, c: [f32; 2], r: f32, n: u32, col: Col) {
+        for k in 0..n {
+            let (a0, a1) = (k as f32 / n as f32 * std::f32::consts::TAU, (k + 1) as f32 / n as f32 * std::f32::consts::TAU);
+            self.tri(c, [c[0] + a0.cos() * r, c[1] + a0.sin() * r], [c[0] + a1.cos() * r, c[1] + a1.sin() * r], col);
+        }
+    }
+    /// Radial gradient disc (centre colour -> rim colour).
+    pub fn disc_g(&mut self, c: [f32; 2], r: f32, n: u32, centre: Col, rim: Col) {
+        for k in 0..n {
+            let (a0, a1) = (k as f32 / n as f32 * std::f32::consts::TAU, (k + 1) as f32 / n as f32 * std::f32::consts::TAU);
+            self.tri_c(c, [c[0] + a0.cos() * r, c[1] + a0.sin() * r], [c[0] + a1.cos() * r, c[1] + a1.sin() * r], centre, rim, rim);
+        }
+    }
+    /// Ring (annulus) outline with thickness `th`.
+    pub fn ring(&mut self, c: [f32; 2], r: f32, th: f32, n: u32, col: Col) {
+        let (ri, ro) = (r - th * 0.5, r + th * 0.5);
+        for k in 0..n {
+            let (a0, a1) = (k as f32 / n as f32 * std::f32::consts::TAU, (k + 1) as f32 / n as f32 * std::f32::consts::TAU);
+            self.quad(
+                [[c[0] + a0.cos() * ro, c[1] + a0.sin() * ro], [c[0] + a1.cos() * ro, c[1] + a1.sin() * ro], [c[0] + a1.cos() * ri, c[1] + a1.sin() * ri], [c[0] + a0.cos() * ri, c[1] + a0.sin() * ri]],
+                col,
+            );
+        }
+    }
+    /// Connected line segments.
+    pub fn polyline(&mut self, pts: &[[f32; 2]], th: f32, col: Col) {
+        for w in pts.windows(2) {
+            self.line(w[0], w[1], th, col);
+        }
+    }
+    /// Filled simple polygon (ear clipping, works for concave outlines up to 64 points; no heap allocation).
+    pub fn polygon(&mut self, pts: &[[f32; 2]], col: Col) {
+        let n = pts.len().min(64);
+        if n < 3 {
+            return;
+        }
+        let area: f32 = (0..n).map(|i| pts[i][0] * pts[(i + 1) % n][1] - pts[(i + 1) % n][0] * pts[i][1]).sum();
+        let sgn = if area >= 0.0 { 1.0 } else { -1.0 };
+        let mut idx = [0u8; 64];
+        for (i, v) in idx.iter_mut().enumerate().take(n) {
+            *v = i as u8;
+        }
+        let mut m = n;
+        let cross = |a: [f32; 2], b: [f32; 2], c: [f32; 2]| (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+        let mut guard = 0;
+        while m > 3 && guard < 400 {
+            guard += 1;
+            let mut clipped = false;
+            for i in 0..m {
+                let (ia, ib, ic) = (idx[(i + m - 1) % m] as usize, idx[i] as usize, idx[(i + 1) % m] as usize);
+                let (a, b, c) = (pts[ia], pts[ib], pts[ic]);
+                if cross(a, b, c) * sgn <= 1e-6 {
+                    continue;
+                }
+                let mut inside = false;
+                for k in 0..m {
+                    let ip = idx[k] as usize;
+                    if ip == ia || ip == ib || ip == ic {
+                        continue;
+                    }
+                    let p = pts[ip];
+                    if cross(a, b, p) * sgn >= 0.0 && cross(b, c, p) * sgn >= 0.0 && cross(c, a, p) * sgn >= 0.0 {
+                        inside = true;
+                        break;
+                    }
+                }
+                if inside {
+                    continue;
+                }
+                self.tri(a, b, c, col);
+                for k in i..m - 1 {
+                    idx[k] = idx[k + 1];
+                }
+                m -= 1;
+                clipped = true;
+                break;
+            }
+            if !clipped {
+                break;
+            }
+        }
+        if m == 3 {
+            self.tri(pts[idx[0] as usize], pts[idx[1] as usize], pts[idx[2] as usize], col);
+        }
+    }
+
+    /// Text with explicit alignment (0 left, 1 centre, 2 right) and no formatting machinery.
+    pub fn text_a(&mut self, x: f32, y: f32, size: f32, col: Col, align: u8, s: &str) {
+        let w = Self::text_width(size, s.chars().count());
+        let x0 = match align {
+            1 => x - w * 0.5,
+            2 => x - w,
+            _ => x,
+        };
+        self.text(x0, y, size, col, s);
     }
 
     pub fn text_width(size: f32, n: usize) -> f32 {
@@ -215,10 +333,15 @@ impl Default for Ui {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum View {
+    /// captain's eye (3D flight deck with working displays)
     Cockpit,
+    /// leaning towards the display units
+    Panel,
+    Wing,
     Chase,
     Tower,
 }
+
 
 pub struct HudInfo {
     pub fps: f32,
@@ -228,6 +351,8 @@ pub struct HudInfo {
     pub paused: bool,
     pub help: bool,
     pub time: f64,
+    /// the 3D flight deck shows the PFD / ND / ECAM itself => hide the 2D overlay copies
+    pub panels3d: bool,
 }
 
 macro_rules! tf {
@@ -238,7 +363,7 @@ fn rot(c: [f32; 2], ex: [f32; 2], ey: [f32; 2], x: f32, y: f32) -> [f32; 2] {
     [c[0] + ex[0] * x + ey[0] * y, c[1] + ex[1] * x + ey[1] * y]
 }
 
-fn draw_pfd(ui: &mut Ui, f: &Flight, px: f32, py: f32, u: f32) {
+pub fn draw_pfd(ui: &mut Ui, f: &Flight, px: f32, py: f32, u: f32) {
     let fm = &f.fm;
     let kias = fm.ias / KT;
     let alt_ft = fm.pos.y / FT;
@@ -324,12 +449,15 @@ fn draw_pfd(ui: &mut Ui, f: &Flight, px: f32, py: f32, u: f32) {
     // selected speed bug + VLS / limit
     let spd_y = sc - (f.ap.spd as f32 - kias as f32) * ppk;
     ui.tri([sx + sw, spd_y], [sx + sw + 0.35 * u, spd_y - 0.25 * u], [sx + sw + 0.35 * u, spd_y + 0.25 * u], if f.ap.spd_selected { C_CYAN } else { C_MAGENTA });
-    let vls = crate::autopilot::min_speed_kt(fm) as f32;
-    let vy = sc - (vls - kias as f32) * ppk;
-    ui.rect(sx + sw - 0.12 * u, vy, 0.12 * u, ah, C_AMBER);
-    let vmo = fm.spec.vne as f32 - 5.0;
-    let vmy = sc - (vmo - kias as f32) * ppk;
-    ui.rect(sx + sw - 0.12 * u, sy - ah, 0.12 * u, vmy - (sy - ah), C_RED);
+    // FBW protection speeds (fbw::envelope): VLS (amber), Vα prot..Vα max (orange), VSW (red) and VMAX (red)
+    let env = crate::fbw::envelope(fm);
+    let yv = |v: f64| sc - (v as f32 - kias as f32) * ppk;
+    let bw = 0.12 * u;
+    ui.rect(sx + sw - bw, yv(env.vls), bw, ah * 2.0, C_AMBER);
+    ui.rect(sx + sw - bw * 2.3, yv(env.v_alpha_prot), bw * 1.2, (yv(env.v_alpha_max) - yv(env.v_alpha_prot)).max(0.0), [1.0, 0.5, 0.05, 0.95]);
+    ui.rect(sx + sw - bw * 2.3, yv(env.v_alpha_max), bw * 1.2, ah * 2.0, C_RED);
+    ui.rect(sx + sw - bw, yv(env.v_sw), bw, ah * 2.0, C_RED);
+    ui.rect(sx + sw - bw, sy - ah, bw, yv(env.vmax) - (sy - ah), C_RED);
     ui.scissor(None);
     ui.rect(sx, sc - 0.42 * u, sw, 0.84 * u, [0.0, 0.0, 0.0, 1.0]);
     ui.frame(sx, sc - 0.42 * u, sw, 0.84 * u, 0.04 * u, C_WHITE);
@@ -395,7 +523,7 @@ fn draw_pfd(ui: &mut Ui, f: &Flight, px: f32, py: f32, u: f32) {
     tf!(ui, hx + 0.1 * u, hy - 0.62 * u, 0.5 * u, C_GREEN, 0, "{:03.0}T", fm.heading);
 }
 
-fn draw_map(ui: &mut Ui, f: &Flight, x: f32, y: f32, s: f32) {
+pub fn draw_map(ui: &mut Ui, f: &Flight, x: f32, y: f32, s: f32) {
     ui.rect(x, y, s, s, [0.02, 0.05, 0.04, 0.78]);
     ui.scissor(Some([x, y, s, s]));
     // north-up map auto-fitted to the route, aircraft always inside
@@ -444,9 +572,11 @@ pub fn draw_hud(ui: &mut Ui, f: &Flight, info: &HudInfo) {
     let (w, h) = (ui.w, ui.h);
     let base = (h / 46.0).clamp(11.0, 26.0);
     let u = (h * 0.032).clamp(10.0, 34.0);
-    draw_pfd(ui, f, w * 0.5 - 7.0 * u, h - 10.2 * u - 8.0, u);
-    let ms = (h * 0.27).clamp(130.0, 300.0);
-    draw_map(ui, f, 10.0, h - ms - 10.0, ms);
+    if !info.panels3d {
+        draw_pfd(ui, f, w * 0.5 - 7.0 * u, h - 10.2 * u - 8.0, u);
+        let ms = (h * 0.27).clamp(130.0, 300.0);
+        draw_map(ui, f, 10.0, h - ms - 10.0, ms);
+    }
 
     // ---- FCU / autopilot strip (top centre) ----
     let fw = (base * 34.0).min(w * 0.6);
@@ -495,6 +625,7 @@ pub fn draw_hud(ui: &mut Ui, f: &Flight, info: &HudInfo) {
     tf!(ui, 14.0, 10.0 + base * 5.5, base * 0.9, C_GREY, 0, "WIND {:03.0}/{:.0}  QNH {:.0}", wnd.wind_from_deg, wnd.wind_kt, wnd.qnh);
 
     // ---- ECAM-lite (top right) ----
+    if !info.panels3d {
     let ew = base * 15.0;
     let ex = w - ew - 8.0;
     ui.rect(ex, 8.0, ew, base * 12.0, C_PANEL);
@@ -517,6 +648,8 @@ pub fn draw_hud(ui: &mut Ui, f: &Flight, info: &HudInfo) {
     tf!(ui, ex + 12.0, 10.0 + base * 8.6, base * 0.9, C_WHITE, 0, "SPD BRK {:.0}%  {}", fm.sb_pos * 100.0, if fm.ctl.spoilers_armed { "GND SPLR ARM" } else { "" });
     tf!(ui, ex + 12.0, 10.0 + base * 9.6, base * 0.9, C_WHITE, 0, "A/BRK {}  {}", ["OFF", "LO", "MED", "MAX"][fm.ctl.autobrake.min(3) as usize], if fm.ctl.parking { "PARK BRK" } else { "" });
     tf!(ui, ex + 12.0, 10.0 + base * 10.4, base * 0.85, C_GREY, 0, "G {:.2}  AOA {:.1}deg", fm.nz, fm.alpha.to_degrees());
+    }
+    let fm = &f.fm;
 
     // ---- perf (bottom right) ----
     let px = w - base * 15.0 - 8.0;
@@ -607,7 +740,7 @@ fn fmt_into<'a>(buf: &'a mut [u8; 16], args: std::fmt::Arguments) -> &'a str {
     std::str::from_utf8(&buf[..n]).unwrap_or("")
 }
 
-pub const HELP: [(&str, &str); 22] = [
+pub const HELP: [(&str, &str); 23] = [
     ("W / S", "pitch down / up (sidestick)"),
     ("A / D", "roll left / right"),
     ("Q / E", "rudder / nosewheel"),
@@ -624,8 +757,9 @@ pub const HELP: [(&str, &str); 22] = [
     ("N / H", "LNAV / HDG mode      L  approach (LOC/GS)"),
     ("Up / Down", "FCU altitude +-100 ft   [ ]  speed"),
     ("Left / Right", "FCU heading -+5      PgUp/PgDn  V/S"),
-    ("C", "camera: cockpit / chase / tower"),
-    ("Mouse wheel", "chase camera distance"),
+    ("C", "camera: captain / panel / wing / chase / tower"),
+    ("Mouse drag / Num 4 6 8 2", "look around     Num 5 centre"),
+    ("Mouse wheel / Num + -", "zoom (chase: distance)"),
     ("F1", "this help"),
     ("F11", "fullscreen"),
     ("Esc", "menu / quit"),

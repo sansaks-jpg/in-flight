@@ -16,6 +16,14 @@ pub struct Weather {
     pub vis_km: f64,
     pub cloud_base_m: f64,
     pub cloud_cover: f64,
+    /// precipitation intensity 0 (dry) .. 1 (downpour); only falls out of a broken / overcast deck
+    pub precip: f64,
+    /// precipitation falls as snow (cold air mass)
+    pub snow: bool,
+    /// embedded convection: lightning flashes (needs heavy rain)
+    pub thunder: bool,
+    /// high cirrus / cirrostratus coverage 0..1 (layer near FL280)
+    pub cirrus: f64,
 }
 
 fn hash01(seed: u64, k: u64) -> f64 {
@@ -31,21 +39,30 @@ fn hash01(seed: u64, k: u64) -> f64 {
 impl Weather {
     pub fn generate(seed: u64) -> Self {
         let r = |k| hash01(seed, k);
+        let cover = r(9);
+        // rain needs a thick deck; the roll keeps ~1 day in 3 wet so the effect shows up regularly
+        let wet = if cover > 0.55 && r(10) > 0.45 { r(11) * ((cover - 0.55) / 0.45).min(1.0) } else { 0.0 };
+        let precip = if wet > 0.08 { wet } else { 0.0 };
+        let d_t = (r(4) - 0.5) * 16.0;
         Self {
             wind_from_deg: (r(1) * 360.0).floor(),
             wind_kt: 3.0 + r(2) * 14.0,
             gust_kt: r(3) * 8.0,
-            d_t: (r(4) - 0.5) * 16.0,
+            d_t,
             qnh: 1013.25 + (r(5) - 0.5) * 36.0,
             turb: r(6) * 0.5,
-            vis_km: 6.0 + r(7) * 24.0,
+            vis_km: (6.0 + r(7) * 24.0) * (1.0 - 0.65 * precip),
             cloud_base_m: 1200.0 + r(8) * 2200.0,
-            cloud_cover: r(9),
+            cloud_cover: cover,
+            precip,
+            snow: precip > 0.0 && d_t < -5.0 && r(12) > 0.35,
+            thunder: precip > 0.55 && r(13) > 0.4 && d_t > -3.0,
+            cirrus: r(14) * 0.85,
         }
     }
 
     pub fn calm() -> Self {
-        Self { wind_from_deg: 0.0, wind_kt: 0.0, gust_kt: 0.0, d_t: 0.0, qnh: 1013.25, turb: 0.0, vis_km: 30.0, cloud_base_m: 3000.0, cloud_cover: 0.2 }
+        Self { wind_from_deg: 0.0, wind_kt: 0.0, gust_kt: 0.0, d_t: 0.0, qnh: 1013.25, turb: 0.0, vis_km: 30.0, cloud_base_m: 3000.0, cloud_cover: 0.2, precip: 0.0, snow: false, thunder: false, cirrus: 0.15 }
     }
 
     /// Steady wind vector (m/s, world frame: +X east, -Z north; direction the air moves TO) at altitude.
@@ -78,6 +95,9 @@ mod tests {
             assert_eq!(w.wind_from_deg, Weather::generate(seed).wind_from_deg);
             assert!(w.wind_kt >= 3.0 && w.wind_kt <= 17.0 && w.qnh > 990.0 && w.qnh < 1040.0);
             assert!(w.cloud_cover >= 0.0 && w.cloud_cover <= 1.0);
+            assert!((0.0..=1.0).contains(&w.precip) && (w.precip == 0.0 || w.cloud_cover > 0.55), "rain needs a thick deck");
+            assert!(!w.thunder || w.precip > 0.5);
+            assert!(w.vis_km > 2.0);
         }
     }
     #[test]

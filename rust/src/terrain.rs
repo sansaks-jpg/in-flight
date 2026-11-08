@@ -89,6 +89,18 @@ impl Terrain {
         h
     }
 
+    /// Unit surface normal (Y up) from central differences over `eps` metres - used by shading, GPWS look-ahead and tests.
+    pub fn normal(&self, x: f64, z: f64, eps: f64) -> glam::DVec3 {
+        let dx = self.height(x + eps, z) - self.height(x - eps, z);
+        let dz = self.height(x, z + eps) - self.height(x, z - eps);
+        glam::DVec3::new(-dx, 2.0 * eps, -dz).normalize()
+    }
+
+    /// Airport blend weight at (x, z): 1 on the flat plateau (field elevation), smoothly falling to 0 at the skirt edge.
+    pub fn airport_weight(&self, x: f64, z: f64) -> f64 {
+        self.zones.iter().map(|zn| 1.0 - smoothstep(zn.r_flat, zn.r_blend, (x - zn.x).hypot(z - zn.z))).fold(0.0, f64::max)
+    }
+
     /// Land / building density 0..1 used to scatter urban areas and forests.
     pub fn urban(&self, x: f64, z: f64) -> f64 {
         smoothstep(0.58, 0.72, fbm(x / 6000.0, z / 6000.0, 3, self.seed ^ 0xBEEF))
@@ -160,6 +172,19 @@ mod tests {
                 d += 500.0;
             }
         }
+    }
+
+    #[test]
+    fn normal_is_unit_and_flat_on_the_plateau() {
+        let mut t = Terrain::new(7);
+        t.add_airport(0.0, 0.0, 12.0);
+        let n = t.normal(500.0, 300.0, 5.0);
+        assert!((n.length() - 1.0).abs() < 1e-9 && n.y > 0.999999);
+        let n = t.normal(60_000.0, -33_000.0, 8.0);
+        assert!((n.length() - 1.0).abs() < 1e-9 && n.y > 0.0);
+        assert_eq!(t.airport_weight(100.0, 100.0), 1.0);
+        assert!(t.airport_weight(6000.0, 0.0) > 0.0 && t.airport_weight(6000.0, 0.0) < 1.0);
+        assert_eq!(t.airport_weight(30_000.0, 0.0), 0.0);
     }
 
     #[test]

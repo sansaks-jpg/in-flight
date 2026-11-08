@@ -98,7 +98,35 @@ const CONCRETE: Vec4 = Vec4::new(0.42, 0.42, 0.41, 0.0);
 const GRASS_RWY: Vec4 = Vec4::new(0.22, 0.36, 0.14, 0.0);
 const WHITE: Vec4 = Vec4::new(0.92, 0.92, 0.9, 0.0);
 
-/// Runway pavement, markings, edge / threshold / approach lights.
+/// Seven-segment mask of a runway-designator character (bit 0..6 = a top, b upper-right, c lower-right, d bottom,
+/// e lower-left, f upper-left, g middle). Letters L / R / C use the closest segment shapes.
+pub fn glyph_segments(ch: char) -> u8 {
+    const A: u8 = 1;
+    const B: u8 = 2;
+    const C: u8 = 4;
+    const D: u8 = 8;
+    const E: u8 = 16;
+    const F: u8 = 32;
+    const G: u8 = 64;
+    match ch {
+        '0' => A | B | C | D | E | F,
+        '1' => B | C,
+        '2' => A | B | D | E | G,
+        '3' => A | B | C | D | G,
+        '4' => B | C | F | G,
+        '5' => A | C | D | F | G,
+        '6' => A | C | D | E | F | G,
+        '7' => A | B | C,
+        '8' => A | B | C | D | E | F | G,
+        '9' => A | B | C | D | F | G,
+        'L' => D | E | F,
+        'R' => A | B | E | F | G,
+        'C' => A | D | E | F,
+        _ => 0,
+    }
+}
+
+/// Runway pavement, markings, designators, PAPI, edge / threshold / approach lights.
 pub fn add_runway(mb: &mut MeshBuilder, proj: &Projection, elev: f64, a: &RunwayEnd, b: &RunwayEnd, surface_paved: bool, lit: bool) {
     let (ax, az) = (proj.x(a.start_lon) as f32, proj.z(a.start_lat) as f32);
     let (bx, bz) = (proj.x(b.start_lon) as f32, proj.z(b.start_lat) as f32);
@@ -148,6 +176,32 @@ pub fn add_runway(mb: &mut MeshBuilder, proj: &Projection, elev: f64, a: &Runway
                 mark(mb, s0.min(s1), s0.max(s1), side * 6.0 - 1.0, side * 6.0 + 1.0);
                 mark(mb, s0.min(s1), s0.max(s1), side * (6.0 + ls * 0.5) - 1.0, side * (6.0 + ls * 0.5) + 1.0);
             }
+        }
+    }
+    // runway designators (7-segment glyphs, readable from the approach) + PAPI bars
+    for (end, e) in [(0usize, a), (1usize, b)] {
+        let ident: Vec<char> = e.ident.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+        let (gw, gh, gap, t) = (3.1f32, 9.0f32, 1.4f32, 0.6f32);
+        let total = ident.len() as f32 * gw + (ident.len() as f32 - 1.0).max(0.0) * gap;
+        for (ci, ch) in ident.iter().enumerate() {
+            let x0 = -total / 2.0 + ci as f32 * (gw + gap);
+            let mask = glyph_segments(*ch);
+            for (bit, (sx0, sx1, sy0, sy1)) in [(0.0, gw, gh - t, gh), (gw - t, gw, gh / 2.0, gh), (gw - t, gw, 0.0, gh / 2.0), (0.0, gw, 0.0, t), (0.0, t, 0.0, gh / 2.0), (0.0, t, gh / 2.0, gh), (0.0, gw, gh / 2.0 - t / 2.0, gh / 2.0 + t / 2.0)].into_iter().enumerate() {
+                if mask & (1 << bit) == 0 {
+                    continue;
+                }
+                let s0 = 50.0;
+                let (sa, sb) = if end == 0 { (s0 + sy0, s0 + sy1) } else { (len - (s0 + sy0), len - (s0 + sy1)) };
+                let (la, lb) = if end == 0 { (x0 + sx0, x0 + sx1) } else { (-(x0 + sx0), -(x0 + sx1)) };
+                mark(mb, sa, sb, la, lb);
+            }
+        }
+        // PAPI: four lamp housings on the left of the runway (as seen on approach), 300 m past the threshold
+        let sgn = if end == 0 { -1.0f32 } else { 1.0 };
+        let sp = if end == 0 { 300.0 } else { len - 300.0 };
+        for k in 0..4 {
+            let col = if k < 2 { Vec4::new(1.0, 0.12, 0.08, 1.0) } else { Vec4::new(1.0, 0.97, 0.9, 1.0) };
+            mb.cuboid(at(sp, sgn * (w / 2.0 + 14.0 + k as f32 * 9.0), 0.0) + Vec3::Y * 0.5, Vec3::new(0.7, 0.5, 0.7), 0.0, if lit { col } else { col * 0.55 });
         }
     }
     // lights
@@ -375,6 +429,9 @@ pub const LEVELS: usize = 8;
 pub const BASE_SPACING: f64 = 16.0;
 pub const RING_VERTS: usize = (RING_N + 1) * (RING_N + 1);
 
+/// Fraction of the ring half-extent where geomorphing starts (0.72 => outer 28 % of each ring).
+pub const MORPH_START: f32 = 0.72;
+
 pub fn level_spacing(l: usize) -> f64 {
     BASE_SPACING * (1u64 << l) as f64
 }
@@ -404,7 +461,22 @@ pub fn fill_ring(t: &Terrain, l: usize, org: (i64, i64), scratch: &mut Vec<f32>,
     for j in 0..=n {
         for i in 0..=n {
             let (si, sj) = (i + 1, j + 1);
-            let hc = scratch[sj * m + si];
+            let mut hc = scratch[sj * m + si];
+            // geomorphing: the outer band of the ring blends to the surface of the next coarser ring (same lattice points
+            // plus the interpolated midpoints), so ring seams are continuous and LOD changes never pop
+            let r = ((i as f32 - n as f32 / 2.0).abs().max((j as f32 - n as f32 / 2.0).abs())) / (n as f32 / 2.0);
+            let k = ((r - MORPH_START) / (1.0 - MORPH_START)).clamp(0.0, 1.0);
+            if k > 0.0 && l + 1 < LEVELS {
+                let at = |di: isize, dj: isize| scratch[((sj as isize + dj) as usize) * m + (si as isize + di) as usize];
+                let coarse = match (i % 2 == 0, j % 2 == 0) {
+                    (false, false) => hc,
+                    (true, false) => 0.5 * (at(-1, 0) + at(1, 0)),
+                    (false, true) => 0.5 * (at(0, -1) + at(0, 1)),
+                    (true, true) => 0.5 * (at(1, -1) + at(-1, 1)),
+                };
+                let kk = k * k * (3.0 - 2.0 * k);
+                hc += (coarse - hc) * kk;
+            }
             let dx = scratch[sj * m + si + 1] - scratch[sj * m + si - 1];
             let dz = scratch[(sj + 1) * m + si] - scratch[(sj - 1) * m + si];
             let nrm = Vec3::new(-dx, 2.0 * s as f32, -dz).normalize();
@@ -468,11 +540,69 @@ mod tests {
         let org = snapped_origin(0, 100.0, -50.0);
         fill_ring(&t, 0, org, &mut scratch, &mut verts);
         assert_eq!(verts.len(), RING_VERTS);
-        for v in verts.iter().step_by(97) {
+        for (idx, v) in verts.iter().enumerate().step_by(97) {
+            let (ci, cj) = ((idx % (RING_N + 1)) as i32 - RING_N as i32 / 2, (idx / (RING_N + 1)) as i32 - RING_N as i32 / 2);
+            if ci.abs().max(cj.abs()) as f32 > MORPH_START * (RING_N as f32 / 2.0) - 1.0 {
+                continue; // outer band is geomorphed (see `geomorph_*` tests)
+            }
             let h = t.height(v.pos[0] as f64, v.pos[2] as f64) as f32;
             assert!((v.pos[1] - h).abs() < 0.01, "level-0 ring must be exactly the physics ground");
             assert!(v.nrm[1] > 0.0 && (Vec3::from(v.nrm).length() - 1.0).abs() < 1e-3);
         }
+    }
+
+    #[test]
+    fn geomorph_makes_ring_edges_match_the_coarser_lattice() {
+        // rough terrain so that the midpoint differs from the interpolated height
+        let t = Terrain::new(21);
+        let (mut scratch, mut verts) = (Vec::new(), Vec::new());
+        let org = snapped_origin(2, 5000.0, 3000.0);
+        fill_ring(&t, 2, org, &mut scratch, &mut verts);
+        let w = RING_N + 1;
+        let s = level_spacing(2);
+        let drop = (s * 0.02) as f32;
+        let h = |x: f64, z: f64| t.height(x, z) as f32;
+        let mut max_dev = 0.0f32;
+        let mut checked = 0;
+        // outer row z = ring edge: the vertices must lie ON the coarse surface (midpoints of the coarse edges / cell diagonals)
+        for i in 1..RING_N {
+            let v = verts[i].pos;
+            let (x, z) = (v[0] as f64, v[2] as f64);
+            let coarse = if i % 2 == 1 { 0.5 * (h(x, z - s) + h(x, z + s)) } else { 0.5 * (h(x + s, z - s) + h(x - s, z + s)) };
+            max_dev = max_dev.max((v[1] + drop - coarse).abs());
+            // same on the left column
+            let v = verts[i * w].pos;
+            let (x, z) = (v[0] as f64, v[2] as f64);
+            let coarse = if i % 2 == 1 { 0.5 * (h(x - s, z) + h(x + s, z)) } else { 0.5 * (h(x + s, z - s) + h(x - s, z + s)) };
+            max_dev = max_dev.max((v[1] + drop - coarse).abs());
+            checked += 2;
+        }
+        assert!(checked > 100 && max_dev < 0.01, "ring-edge vertices must lie on the coarse surface: {max_dev}");
+        // and the lattice points themselves are untouched (they are the coarse ring's vertices)
+        let lp = verts[w + 1].pos; // (odd, odd) lattice vertex
+        assert!(((lp[1] + drop) as f64 - t.height(lp[0] as f64, lp[2] as f64)).abs() < 0.01);
+        // inner part keeps full detail
+        let c = RING_N / 2 * w + RING_N / 2;
+        assert!(((verts[c].pos[1] + drop) as f64 - t.height(verts[c].pos[0] as f64, verts[c].pos[2] as f64)).abs() < 0.01);
+    }
+
+    #[test]
+    fn runway_markings_include_designators_and_papi() {
+        use crate::airports::AirportDb;
+        let db = AirportDb::embedded();
+        let ap = db.find("KSFO").unwrap();
+        let proj = Projection::new(ap.lat, ap.lon);
+        let rw = &ap.runways[0];
+        let [a, b] = rw.ends();
+        let mut plain = MeshBuilder::default();
+        add_runway(&mut plain, &proj, ap.elev, &a, &b, true, true);
+        assert!(plain.v.len() > 1000 && plain.i.iter().all(|&i| (i as usize) < plain.v.len()));
+        // glyph masks: every digit and the L/R/C letters map to non-empty segment sets
+        for ch in "0123456789LRC".chars() {
+            assert!(glyph_segments(ch) != 0, "{ch}");
+        }
+        assert_eq!(glyph_segments('8').count_ones(), 7);
+        assert_eq!(glyph_segments('1').count_ones(), 2);
     }
 
     #[test]

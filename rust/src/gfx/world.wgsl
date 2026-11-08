@@ -1,18 +1,5 @@
 // Shared globals + terrain / water / mesh shaders. Camera-relative rendering: every vertex position is converted to
 // "world - camera" in f32 before the view-projection, so precision stays millimetric even 100+ km from the origin.
-struct Globals {
-    view_proj: mat4x4<f32>,
-    inv_view_proj: mat4x4<f32>,
-    cam_pos: vec4<f32>,   // xyz = absolute world position, w = time (s)
-    sun_dir: vec4<f32>,   // xyz = direction towards the sun
-    sun_col: vec4<f32>,   // rgb = sun light colour * intensity, a = sun elevation (deg)
-    amb: vec4<f32>,       // rgb = ambient light, a = night factor 0 (day) .. 1 (night)
-    fog: vec4<f32>,       // rgb = horizon / fog colour, a = fog density (1/m)
-    zenith: vec4<f32>,    // rgb = zenith colour
-    params: vec4<f32>,    // x = cloud base (m), y = cloud cover 0..1, z = unused, w = aspect
-};
-@group(0) @binding(0) var<uniform> g: Globals;
-
 struct Model { m: mat4x4<f32>, tint: vec4<f32> };
 @group(1) @binding(0) var<uniform> model: Model;
 

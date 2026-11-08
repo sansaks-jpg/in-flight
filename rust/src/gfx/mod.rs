@@ -1,10 +1,14 @@
 //! wgpu renderer. Every GPU buffer is allocated once with a fixed capacity; per-frame work is `write_buffer` into those
 //! buffers, so frame time is flat and memory use is constant (no leaks by construction).
 
+pub mod displays;
+pub mod fx;
 pub mod geom;
 pub mod ui;
 
 use crate::clock::sun_position;
+use crate::clouds::{self, Clouds};
+use crate::precip;
 use crate::game::Flight;
 use geom::*;
 use glam::{DVec3, Mat4, Quat, Vec3, Vec4};
@@ -30,6 +34,10 @@ struct Globals {
     fog: [f32; 4],
     zenith: [f32; 4],
     params: [f32; 4],
+    cloud0: [f32; 4],
+    cloud1: [f32; 4],
+    env: [f32; 4],
+    env2: [f32; 4],
 }
 
 #[repr(C)]
@@ -65,6 +73,8 @@ pub struct FrameParams<'a> {
     pub cloud_base: f32,
     pub cloud_cover: f32,
     pub show_aircraft: bool,
+    /// draw the 3D flight deck + working display units (captain / panel views)
+    pub cockpit: bool,
 }
 
 #[derive(Default, Clone, Copy, Debug)]
@@ -78,13 +88,7 @@ pub struct FrameStats {
     pub triangles: u32,
 }
 
-pub struct SkyColors {
-    pub zenith: Vec3,
-    pub horizon: Vec3,
-    pub sun_light: Vec3,
-    pub ambient: Vec3,
-    pub night: f32,
-}
+pub use crate::atmosphere::{sky_colors, sky_colors_ex, SkyColors};
 
 /// Right-handed view matrix for a camera at the origin (camera-relative rendering).
 pub fn view_matrix(fwd: Vec3, up: Vec3) -> Mat4 {
@@ -99,25 +103,6 @@ pub fn view_matrix(fwd: Vec3, up: Vec3) -> Mat4 {
 pub fn proj_infinite_reverse(fovy: f32, aspect: f32, near: f32) -> Mat4 {
     let f = 1.0 / (fovy * 0.5).tan();
     Mat4::from_cols(Vec4::new(f / aspect, 0.0, 0.0, 0.0), Vec4::new(0.0, f, 0.0, 0.0), Vec4::new(0.0, 0.0, 0.0, -1.0), Vec4::new(0.0, 0.0, near, 0.0))
-}
-
-fn sstep(a: f32, b: f32, x: f32) -> f32 {
-    let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
-}
-
-/// Sky / light colours from the real sun elevation (degrees).
-pub fn sky_colors(el: f32) -> SkyColors {
-    let day = sstep(-6.0, 10.0, el);
-    let twi = (1.0 - ((el - 1.0).abs() / 9.0).min(1.0)) * sstep(-8.0, 0.0, el);
-    let zenith = Vec3::new(0.008, 0.012, 0.035).lerp(Vec3::new(0.14, 0.32, 0.72), day);
-    let mut horizon = Vec3::new(0.025, 0.035, 0.065).lerp(Vec3::new(0.62, 0.76, 0.92), day);
-    horizon = horizon.lerp(Vec3::new(1.0, 0.52, 0.28) * 0.85, twi * 0.65);
-    let warm = 1.0 - sstep(2.0, 28.0, el);
-    let sun_col = Vec3::new(1.0, 0.96, 0.9).lerp(Vec3::new(1.0, 0.62, 0.35), warm);
-    let sun_i = sstep(-3.0, 8.0, el) * 1.15 + 0.02;
-    let ambient = (horizon * 0.5 + zenith * 0.35) * (0.35 + 0.65 * day) + Vec3::splat(0.012);
-    SkyColors { zenith, horizon, sun_light: sun_col * sun_i, ambient, night: 1.0 - sstep(-10.0, 0.0, el) }
 }
 
 pub struct Renderer {
@@ -164,6 +149,7 @@ pub struct Renderer {
     pub ui: Ui,
     ui_vb: wgpu::Buffer,
     pub stats: FrameStats,
+    fx: fx::Fx,
 }
 
 fn buf_init(device: &wgpu::Device, label: &str, usage: wgpu::BufferUsages, size: usize) -> wgpu::Buffer {
@@ -179,7 +165,7 @@ fn depth_view(device: &wgpu::Device, w: u32, h: u32) -> wgpu::TextureView {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: DEPTH_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         })
         .create_view(&wgpu::TextureViewDescriptor::default())
@@ -257,9 +243,9 @@ impl Renderer {
         });
 
         // ---- pipelines ----
-        let world_src = format!("{}", include_str!("world.wgsl"));
+        let world_src = format!("{}\n{}", include_str!("globals.wgsl"), include_str!("world.wgsl"));
         let world = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("world"), source: wgpu::ShaderSource::Wgsl(world_src.into()) });
-        let sky = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("sky"), source: wgpu::ShaderSource::Wgsl(include_str!("sky.wgsl").into()) });
+        let sky = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("sky"), source: wgpu::ShaderSource::Wgsl(format!("{}\n{}", include_str!("globals.wgsl"), include_str!("sky.wgsl")).into()) });
         let uis = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("ui"), source: wgpu::ShaderSource::Wgsl(include_str!("ui.wgsl").into()) });
         let world_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("world"), bind_group_layouts: &[Some(&globals_bgl), Some(&model_bgl)], immediate_size: 0 });
         let sky_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("sky"), bind_group_layouts: &[Some(&globals_bgl)], immediate_size: 0 });
@@ -297,7 +283,7 @@ impl Renderer {
         let mesh_pipe = mk("mesh", &world_layout, &world, "vs_mesh", "fs_mesh", &[v3l()], Some(depth(true, wgpu::CompareFunction::Greater)), &opaque);
         let model_pipe = mk("model", &world_layout, &world, "vs_model", "fs_mesh", &[v3l()], Some(depth(true, wgpu::CompareFunction::Greater)), &opaque);
         let inst_pipe = mk("inst", &world_layout, &world, "vs_inst", "fs_mesh", &[v3l(), layout(std::mem::size_of::<Inst>(), wgpu::VertexStepMode::Instance, &INST_ATTRS)], Some(depth(true, wgpu::CompareFunction::Greater)), &opaque);
-        let ui_pipe = mk("ui", &ui_layout, &uis, "vs_ui", "fs_ui", &[layout(std::mem::size_of::<ui::UiV>(), wgpu::VertexStepMode::Vertex, &UI_ATTRS)], Some(depth(false, wgpu::CompareFunction::Always)), &blend);
+        let ui_pipe = mk("ui", &ui_layout, &uis, "vs_ui", "fs_ui", &[layout(std::mem::size_of::<ui::UiV>(), wgpu::VertexStepMode::Vertex, &UI_ATTRS)], None, &blend);
 
         // ---- fixed-capacity geometry buffers ----
         let vb_usage = wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST;
@@ -333,6 +319,7 @@ impl Renderer {
         static_mb.i.reserve(STATIC_IDX);
         let depth_view = depth_view(&device, w, h);
         queue.write_buffer(&screen_buf, 0, bytemuck::bytes_of(&ScreenU { size: [w as f32, h as f32], pad: [0.0; 2] }));
+        let fx = fx::Fx::new(&device, &queue, format, &globals_bgl, &model_bgl, &ui_bgl, &atlas_view, &sampler, &depth_view);
         Self {
             device,
             queue,
@@ -377,6 +364,7 @@ impl Renderer {
             ui: Ui::new(),
             ui_vb,
             stats: FrameStats::default(),
+            fx,
         }
     }
 
@@ -387,6 +375,7 @@ impl Renderer {
         }
         self.size = (w, h);
         self.depth_view = depth_view(&self.device, w, h);
+        self.fx.rebind_depth(&self.device, &self.depth_view);
         self.queue.write_buffer(&self.screen_buf, 0, bytemuck::bytes_of(&ScreenU { size: [w as f32, h as f32], pad: [0.0; 2] }));
     }
 
@@ -475,11 +464,29 @@ impl Renderer {
         let (el, az) = sun_position(p.utc, p.lat, p.lon);
         let (elr, azr) = ((el as f32).to_radians(), (az as f32).to_radians());
         let sun = Vec3::new(azr.sin() * elr.cos(), elr.sin(), -azr.cos() * elr.cos());
-        let sc = sky_colors(el as f32);
+        let moon = crate::atmosphere::moon_illumination(p.utc) as f32;
+        let mut sc = sky_colors_ex(el as f32, p.cloud_cover, moon);
         let view = view_matrix(p.cam.fwd, p.cam.up);
         let proj = proj_infinite_reverse(p.cam.fov_deg.to_radians(), w / h, p.cam.near);
         let vp = proj * view;
         let vis = (p.vis_km * 1000.0).max(2000.0);
+        // ---- weather: clouds, precipitation, lightning ----
+        let (clouds, drift, pr) = match p.flight {
+            Some(f) => (Clouds::from_weather(&f.weather), clouds::drift(&f.weather, p.time as f64), precip::state(&f.weather, p.time as f64, p.cam.pos.y)),
+            None => (Clouds::default(), (0.0, 0.0), precip::PrecipState::default()),
+        };
+        // inside a cloud the world fades to the cloud's own grey; rain adds extinction; lightning brightens everything
+        let in_cloud = {
+            let d = clouds.at(p.cam.pos, drift);
+            (d / 0.35).clamp(0.0, 1.0)
+        };
+        let cloud_grey = (sc.ambient * 1.7 + sc.sun_light * 0.30).min(Vec3::splat(0.95));
+        let flash_col = Vec3::new(0.62, 0.68, 1.0);
+        sc.ambient += flash_col * pr.flash * 0.35;
+        let mut fog_rgb = sc.horizon.lerp(cloud_grey, in_cloud) + flash_col * pr.flash * 0.18;
+        fog_rgb = fog_rgb.lerp(fog_rgb * 0.82, (pr.intensity * 0.6).min(0.6));
+        let fog_a = (1.0 / (vis * 1.35)) * (1.0 - in_cloud) + in_cloud / 140.0 + pr.extinction;
+        let clouds_on = clouds.layers.iter().any(|l| l.cover > 0.0);
         let g = Globals {
             view_proj: vp.to_cols_array_2d(),
             inv_view_proj: vp.inverse().to_cols_array_2d(),
@@ -487,9 +494,13 @@ impl Renderer {
             sun_dir: [sun.x, sun.y, sun.z, 0.0],
             sun_col: [sc.sun_light.x, sc.sun_light.y, sc.sun_light.z, el as f32],
             amb: [sc.ambient.x, sc.ambient.y, sc.ambient.z, sc.night],
-            fog: [sc.horizon.x, sc.horizon.y, sc.horizon.z, 1.0 / (vis * 1.35)],
+            fog: [fog_rgb.x, fog_rgb.y, fog_rgb.z, fog_a],
             zenith: [sc.zenith.x, sc.zenith.y, sc.zenith.z, 0.0],
-            params: [p.cloud_base, p.cloud_cover, 0.0, w / h],
+            params: [p.cloud_base, p.cloud_cover, pr.flash, w / h],
+            cloud0: [clouds.layers[0].base, clouds.layers[0].top, clouds.layers[0].cover, clouds.layers[0].sigma],
+            cloud1: [clouds.layers[1].base, clouds.layers[1].top, clouds.layers[1].cover, clouds.layers[1].sigma],
+            env: [drift.0, drift.1, pr.intensity, pr.snow as i32 as f32],
+            env2: [pr.bolt_az, in_cloud, pr.wet, 0.0],
         };
         self.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&g));
 
@@ -504,6 +515,8 @@ impl Renderer {
             st.scatter_ms = t1.elapsed().as_secs_f32() * 1000.0;
             // aircraft model matrix (camera-relative)
             let q = f.fm.quat;
+            let v = f.fm.vel;
+            self.fx.set_precip(&self.queue, [v.x as f32, v.y as f32, v.z as f32], pr.intensity, pr.snow);
             let rot = Mat4::from_quat(Quat::from_xyzw(q.x as f32, q.y as f32, q.z as f32, q.w as f32));
             let rel = (f.fm.pos - p.cam.pos).as_vec3();
             let m = Mat4::from_translation(rel) * rot;
@@ -520,6 +533,9 @@ impl Renderer {
         // ---- encode ----
         let t3 = Instant::now();
         let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
+        if let (true, Some(f)) = (p.cockpit, p.flight) {
+            self.fx.render_displays(&mut enc, &self.queue, &self.ui_pipe, f, p.time as f64);
+        }
         {
             let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("main"),
@@ -531,7 +547,7 @@ impl Renderer {
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &self.depth_view,
-                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(0.0), store: wgpu::StoreOp::Discard }),
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(0.0), store: wgpu::StoreOp::Store }),
                     stencil_ops: None,
                 }),
                 occlusion_query_set: None,
@@ -587,8 +603,32 @@ impl Renderer {
                     st.draw_calls += 1;
                     st.triangles += self.ac_total / 3;
                 }
+                if p.cockpit {
+                    st.triangles += self.fx.draw_cockpit(&mut rp, &self.model_pipe);
+                    st.draw_calls += 2;
+                }
+                if self.fx.draw_precip(&mut rp) {
+                    st.draw_calls += 1;
+                }
             }
-            // ---- UI overlay ----
+        }
+        // ---- volumetric clouds (depth-aware full-screen ray-march) ----
+        if clouds_on {
+            let tc = Instant::now();
+            self.fx.draw_clouds(&mut enc, target, &self.globals_bg);
+            self.fx.cloud_ms = tc.elapsed().as_secs_f32() * 1000.0;
+            st.draw_calls += 1;
+        }
+        // ---- UI overlay (own pass, no depth) ----
+        {
+            let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("ui"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: target, resolve_target: None, depth_slice: None, ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store } })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None,
+                timestamp_writes: None,
+                multiview_mask: None,
+            });
             rp.set_pipeline(&self.ui_pipe);
             rp.set_bind_group(0, &self.ui_bg, &[]);
             rp.set_vertex_buffer(0, self.ui_vb.slice(..));

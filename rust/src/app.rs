@@ -4,7 +4,8 @@ use crate::airports::AirportDb;
 use crate::clock::unix_now;
 use crate::game::{Action, Flight, PilotInput, Status};
 use crate::geo::*;
-use crate::gfx::ui::{self, HudInfo, MenuState, View};
+use crate::ui::{self as pre_ui, screens, Input, Key, Outcome, PreFlight};
+use crate::gfx::ui::{self, HudInfo, View};
 use crate::gfx::{Camera, FrameParams, Renderer};
 use glam::{DQuat, DVec3, Vec3};
 use std::collections::HashSet;
@@ -12,7 +13,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::{ElementState, MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Fullscreen, Window, WindowId};
@@ -32,62 +33,11 @@ impl Default for Options {
     }
 }
 
-/// Camera rig state (smoothed chase yaw, tower spot).
-pub struct CamState {
-    pub yaw: f64,
-    pub spot: Option<DVec3>,
-    pub dist: f64,
-}
-impl Default for CamState {
-    fn default() -> Self {
-        Self { yaw: 0.0, spot: None, dist: 1.0 }
-    }
-}
+pub use crate::cockpit::CamState;
 
+/// Camera for `view` (see `cockpit::rig`).
 pub fn make_camera(f: &Flight, view: View, cs: &mut CamState, dt: f64, orbit: Option<f64>) -> (Camera, bool) {
-    let fm = &f.fm;
-    let q = fm.quat;
-    if let Some(t) = orbit {
-        // menu: slow orbit around the aircraft on the runway
-        let a = t * 0.12;
-        let pos = fm.pos + DVec3::new(a.sin() * 75.0, 14.0 + 4.0 * (t * 0.3).sin(), a.cos() * 75.0);
-        let target = fm.pos + DVec3::new(0.0, 2.5, 0.0);
-        let fwd = (target - pos).normalize().as_vec3();
-        return (Camera { pos, fwd, up: Vec3::Y, fov_deg: 50.0, near: 0.5 }, true);
-    }
-    match view {
-        View::Cockpit => {
-            let eye = DVec3::from_array(fm.spec.eye);
-            let pos = fm.pos + q * eye;
-            let fwd = (q * DVec3::new(0.0, 0.0, -1.0)).as_vec3();
-            let up = (q * DVec3::Y).as_vec3();
-            (Camera { pos, fwd, up, fov_deg: 62.0, near: 0.3 }, false)
-        }
-        View::Chase => {
-            let target_yaw = if fm.gs > 15.0 { fm.track.to_radians() } else { fm.heading.to_radians() };
-            let d = wrap180((target_yaw - cs.yaw).to_degrees()).to_radians();
-            cs.yaw += d * (1.0 - (-dt * 2.5).exp());
-            let back = DVec3::new(-cs.yaw.sin(), 0.0, cs.yaw.cos());
-            let pos = fm.pos + back * (62.0 * cs.dist) + DVec3::new(0.0, 14.0 + 6.0 * cs.dist, 0.0);
-            let target = fm.pos + DVec3::new(0.0, 2.0, 0.0);
-            let fwd = (target - pos).normalize().as_vec3();
-            (Camera { pos, fwd, up: Vec3::Y, fov_deg: 55.0, near: 0.5 }, true)
-        }
-        View::Tower => {
-            let ahead = if fm.gs > 10.0 { DVec3::new(fm.vel.x, 0.0, fm.vel.z).normalize() } else { DVec3::new(fm.forward().x, 0.0, fm.forward().z).normalize_or(DVec3::NEG_Z) };
-            let need_new = cs.spot.map_or(true, |s| (s - fm.pos).length() > 1800.0 || (s - fm.pos).dot(ahead) < -150.0);
-            if need_new {
-                let right = DVec3::new(-ahead.z, 0.0, ahead.x);
-                let p = fm.pos + ahead * 700.0 + right * 120.0;
-                let gy = f.terrain.height(p.x, p.z) + 3.0;
-                cs.spot = Some(DVec3::new(p.x, gy, p.z));
-            }
-            let pos = cs.spot.unwrap();
-            let fwd = (fm.pos - pos).normalize().as_vec3();
-            let dist = (fm.pos - pos).length();
-            (Camera { pos, fwd, up: Vec3::Y, fov_deg: (35.0 - (dist / 120.0).min(25.0)).max(8.0) as f32, near: 0.5 }, true)
-        }
-    }
+    crate::cockpit::rig(f, view, cs, dt, orbit)
 }
 
 struct Gpu {
@@ -97,8 +47,21 @@ struct Gpu {
     adapter_name: String,
 }
 
+
+#[derive(Clone, Debug)]
+struct Launch {
+    dep: String,
+    arr: String,
+    dep_rwy: Option<String>,
+    arr_rwy: Option<String>,
+    cruise_alt_m: Option<f64>,
+}
+
 enum Mode {
-    Menu,
+    /// pre-flight UI: boot, menu, planner, briefing, modals
+    Pre,
+    /// flight-loader scene; the flight is built when `frames` reaches the end of the loader
+    Loading { launch: Launch, frames: u32 },
     Flight,
 }
 
@@ -108,7 +71,11 @@ pub struct App {
     gpu: Option<Gpu>,
     db: AirportDb,
     flight: Option<Flight>,
-    menu: MenuState,
+    pre: PreFlight,
+    inp: Input,
+    last_mouse: Option<[f32; 2]>,
+    last_launch: Option<Launch>,
+    logged: bool,
     mode: Mode,
     keys: HashSet<KeyCode>,
     input: PilotInput,
@@ -125,18 +92,45 @@ pub struct App {
     last_log: Instant,
 }
 
+/// Maps a winit key to the UI key set (None for keys the pre-flight UI ignores).
+fn map_key(code: KeyCode) -> Option<Key> {
+    Some(match code {
+        KeyCode::Enter | KeyCode::NumpadEnter => Key::Enter,
+        KeyCode::Escape => Key::Escape,
+        KeyCode::Backspace => Key::Backspace,
+        KeyCode::Delete => Key::Delete,
+        KeyCode::Tab => Key::Tab,
+        KeyCode::ArrowUp => Key::Up,
+        KeyCode::ArrowDown => Key::Down,
+        KeyCode::ArrowLeft => Key::Left,
+        KeyCode::ArrowRight => Key::Right,
+        KeyCode::PageUp => Key::PageUp,
+        KeyCode::PageDown => Key::PageDown,
+        KeyCode::F1 => Key::F(1),
+        _ => return None,
+    })
+}
+
+const LOADER_FRAMES: u32 = 18;
+
 impl App {
     pub fn new(opts: Options) -> Self {
         let db = AirportDb::embedded();
-        let menu = MenuState { dep: opts.dep.clone(), arr: opts.arr.clone(), field: 0, msg: String::new(), dep_name: String::new(), arr_name: String::new() };
-        let mut a = Self {
+        let mut pre = PreFlight::new(&db);
+        pre.planner.dep = opts.dep.clone();
+        pre.planner.arr = opts.arr.clone();
+        Self {
             opts,
             window: None,
             gpu: None,
             db,
             flight: None,
-            menu,
-            mode: Mode::Menu,
+            pre,
+            inp: Input::default(),
+            last_mouse: None,
+            last_launch: None,
+            logged: false,
+            mode: Mode::Pre,
             keys: HashSet::new(),
             input: PilotInput::default(),
             view: View::Cockpit,
@@ -150,42 +144,43 @@ impl App {
             sim_ms: 0.0,
             frames: 0,
             last_log: Instant::now(),
-        };
-        a.refresh_preview();
-        a
-    }
-
-    /// Validate the typed airports and build a preview flight (parked on the departure runway).
-    fn refresh_preview(&mut self) {
-        let name = |db: &AirportDb, c: &str| db.find(c).map(|a| format!("{} - {}", a.icao, a.name)).unwrap_or_default();
-        self.menu.dep_name = name(&self.db, &self.menu.dep);
-        self.menu.arr_name = name(&self.db, &self.menu.arr);
-        self.menu.msg.clear();
-        if !self.menu.dep_name.is_empty() && !self.menu.arr_name.is_empty() {
-            match Flight::new(&self.db, &self.menu.dep, &self.menu.arr, unix_now()) {
-                Ok(f) => self.flight = Some(f),
-                Err(e) => self.menu.msg = e,
-            }
         }
     }
 
-    fn start_flight(&mut self) {
-        self.refresh_preview();
-        if self.menu.dep_name.is_empty() || self.menu.arr_name.is_empty() {
-            self.menu.msg = "Enter two valid airports".into();
-            return;
-        }
-        if self.flight.is_some() && self.menu.msg.is_empty() {
-            self.mode = Mode::Flight;
-            self.paused = false;
-            self.cam = CamState::default();
-            if let Some(f) = self.flight.as_mut() {
+    /// Queue a launch: the flight-loader scene is shown for a few frames, then the flight is built.
+    fn begin_launch(&mut self, launch: Launch) {
+        self.last_launch = Some(launch.clone());
+        self.flight = None;
+        self.mode = Mode::Loading { launch, frames: 0 };
+    }
+
+    /// Builds the flight and enters the cockpit. On failure returns to the planner with the error shown.
+    fn finish_launch(&mut self, launch: &Launch) {
+        let utc = unix_now();
+        match Flight::new_with_runways(&self.db, &launch.dep, &launch.arr, utc, launch.dep_rwy.as_deref(), launch.arr_rwy.as_deref(), launch.cruise_alt_m) {
+            Ok(mut f) => {
+                self.paused = false;
+                self.logged = false;
+                self.cam = CamState { cockpit_fov: self.pre.settings.fov, ..CamState::default() };
                 self.cam.yaw = f.fm.heading.to_radians();
                 if self.opts.autostart {
                     f.apply(Action::ApAutoTakeoff);
                 }
+                self.flight = Some(f);
+                self.mode = Mode::Flight;
+            }
+            Err(e) => {
+                self.pre.planner.message = e;
+                self.mode = Mode::Pre;
+                self.pre.goto(pre_ui::Screen::Planner);
             }
         }
+    }
+
+    fn return_to_menu(&mut self) {
+        self.flight = None;
+        self.mode = Mode::Pre;
+        self.pre.goto(pre_ui::Screen::Menu);
     }
 
     fn init_gpu(&mut self, window: Arc<Window>) {
@@ -222,56 +217,27 @@ impl App {
         self.gpu = Some(Gpu { surface, config, renderer, adapter_name: info.name });
     }
 
-    fn key_pressed(&mut self, el: &ActiveEventLoop, code: KeyCode, text: Option<&str>) {
-        match self.mode {
-            Mode::Menu => {
-                match code {
-                    KeyCode::Escape => el.exit(),
-                    KeyCode::Enter | KeyCode::NumpadEnter => self.start_flight(),
-                    KeyCode::Tab | KeyCode::ArrowDown | KeyCode::ArrowUp => self.menu.field = 1 - self.menu.field,
-                    KeyCode::Backspace => {
-                        let f = if self.menu.field == 0 { &mut self.menu.dep } else { &mut self.menu.arr };
-                        f.pop();
-                        self.refresh_preview();
-                    }
-                    KeyCode::F1 => self.help = !self.help,
-                    KeyCode::F2 | KeyCode::F3 | KeyCode::F4 | KeyCode::F5 | KeyCode::F6 | KeyCode::F7 | KeyCode::F8 | KeyCode::F9 => {
-                        let p = match code {
-                            KeyCode::F2 => ("KSFO", "KOAK"),
-                            KeyCode::F3 => ("KLAX", "KSAN"),
-                            KeyCode::F4 => ("EGLL", "EGKK"),
-                            KeyCode::F5 => ("KJFK", "KEWR"),
-                            KeyCode::F6 => ("EDDF", "EDDM"),
-                            KeyCode::F7 => ("KSEA", "KPDX"),
-                            KeyCode::F8 => ("LFPG", "LFPO"),
-                            _ => ("YSSY", "YMML"),
-                        };
-                        self.menu.dep = p.0.into();
-                        self.menu.arr = p.1.into();
-                        self.refresh_preview();
-                    }
-                    _ => {
-                        if let Some(t) = text {
-                            let f = if self.menu.field == 0 { &mut self.menu.dep } else { &mut self.menu.arr };
-                            for ch in t.chars().filter(|c| c.is_ascii_alphanumeric()) {
-                                if f.len() < 4 {
-                                    f.push(ch.to_ascii_uppercase());
-                                }
-                            }
-                            self.refresh_preview();
-                        }
-                    }
-                }
+
+    fn key_pressed(&mut self, el: &ActiveEventLoop, code: KeyCode) {
+        // window-level shortcuts available everywhere
+        if code == KeyCode::F11 {
+            if let Some(w) = &self.window {
+                w.set_fullscreen(if w.fullscreen().is_some() { None } else { Some(Fullscreen::Borderless(None)) });
             }
+            return;
+        }
+        match self.mode {
+            Mode::Pre | Mode::Loading { .. } => {}
             Mode::Flight => {
                 let status = self.flight.as_ref().map(|f| f.status);
                 if matches!(status, Some(Status::Landed | Status::Crashed)) {
                     match code {
                         KeyCode::Enter | KeyCode::NumpadEnter => {
-                            self.refresh_preview();
-                            self.start_flight();
+                            if let Some(l) = self.last_launch.clone() {
+                                self.begin_launch(l);
+                            }
                         }
-                        KeyCode::Escape => el.exit(),
+                        KeyCode::Escape => self.return_to_menu(),
                         _ => {}
                     }
                     return;
@@ -279,23 +245,15 @@ impl App {
                 let Some(f) = self.flight.as_mut() else { return };
                 match code {
                     KeyCode::Escape => {
-                        self.mode = Mode::Menu;
-                        self.refresh_preview();
+                        let _ = el;
+                        self.return_to_menu();
                     }
                     KeyCode::KeyP => self.paused = !self.paused,
                     KeyCode::F1 => self.help = !self.help,
-                    KeyCode::F11 => {
-                        if let Some(w) = &self.window {
-                            w.set_fullscreen(if w.fullscreen().is_some() { None } else { Some(Fullscreen::Borderless(None)) });
-                        }
-                    }
                     KeyCode::KeyC => {
-                        self.view = match self.view {
-                            View::Cockpit => View::Chase,
-                            View::Chase => View::Tower,
-                            View::Tower => View::Cockpit,
-                        };
+                        self.view = self.view.next();
                         self.cam.spot = None;
+                        self.cam.head.reset();
                     }
                     KeyCode::KeyG => f.apply(Action::ToggleGear),
                     KeyCode::KeyF => f.apply(Action::FlapsUp),
@@ -337,9 +295,12 @@ impl App {
 
     fn update_input(&mut self, dt: f64) {
         let k = |c: KeyCode| self.keys.contains(&c) as i32 as f64;
-        let tgt = (k(KeyCode::KeyS) - k(KeyCode::KeyW), k(KeyCode::KeyD) - k(KeyCode::KeyA), k(KeyCode::KeyE) - k(KeyCode::KeyQ));
+        let st = &self.pre.settings;
+        let sgn = if st.invert_pitch { -1.0 } else { 1.0 };
+        let sens = st.sens as f64;
+        let tgt = ((k(KeyCode::KeyS) - k(KeyCode::KeyW)) * sgn * sens.min(1.0), (k(KeyCode::KeyD) - k(KeyCode::KeyA)) * sens.min(1.0), k(KeyCode::KeyE) - k(KeyCode::KeyQ));
         let mv = |cur: f64, t: f64| {
-            let rate = if t == 0.0 { 4.0 } else { 3.0 };
+            let rate = if t == 0.0 { 4.0 } else { 3.0 * sens };
             cur + clamp(t - cur, -rate * dt, rate * dt)
         };
         self.input.pitch = mv(self.input.pitch, tgt.0);
@@ -365,21 +326,49 @@ impl App {
             if !self.paused {
                 f.advance(dt, &self.input);
             }
-        } else if let Some(f) = self.flight.as_mut() {
-            // menu preview: parked aircraft, keep physics settled
-            f.advance(dt, &PilotInput::default());
         }
         self.sim_ms += (t_sim.elapsed().as_secs_f32() * 1000.0 - self.sim_ms) * 0.05;
 
+        // ---- logbook: record a completed landing once ----
+        if let (Mode::Flight, Some(f)) = (&self.mode, self.flight.as_ref()) {
+            if !self.logged && f.status == Status::Landed {
+                if let Some(td) = f.touchdown {
+                    self.logged = true;
+                    self.pre.logbook.push(pre_ui::modals::LogEntry {
+                        utc: f.utc(),
+                        dep: f.dep.icao.clone(),
+                        arr: f.arr.icao.clone(),
+                        grade: td.grade.to_string(),
+                        fpm: td.fpm,
+                        speed_kt: td.speed_kt,
+                        centreline_m: td.centreline_m,
+                    });
+                    pre_ui::modals::save_logbook(&self.pre.logbook);
+                }
+            }
+        }
+
+        // ---- launch state machine ----
+        if let Mode::Loading { launch, frames } = &mut self.mode {
+            *frames += 1;
+            if *frames > LOADER_FRAMES {
+                let l = launch.clone();
+                self.finish_launch(&l);
+            }
+        }
+
         let Some(gpu) = self.gpu.as_mut() else { return };
         let time = self.start.elapsed().as_secs_f64();
-        let orbit = if matches!(self.mode, Mode::Menu) { Some(time) } else { None };
-        let (cam, show_ac, params_data) = if let Some(f) = self.flight.as_ref() {
-            let (cam, third) = make_camera(f, self.view, &mut self.cam, dt, orbit);
-            (Some(cam), third, Some((f.utc(), f.lat, f.lon, f.weather.vis_km as f32, f.weather.cloud_base_m as f32, f.weather.cloud_cover as f32)))
-        } else {
-            (None, false, None)
+        let in_flight = matches!(self.mode, Mode::Flight);
+        let (cam, show_ac, params_data) = match (&self.flight, in_flight) {
+            (Some(f), true) => {
+                let (cam, third) = make_camera(f, self.view, &mut self.cam, dt, None);
+                (cam, third, (f.utc(), f.lat, f.lon, f.weather.vis_km as f32, f.weather.cloud_base_m as f32, f.weather.cloud_cover as f32))
+            }
+            // pre-flight screens paint their own opaque background; the 3D pass only needs a harmless sky camera
+            _ => (Camera { pos: DVec3::new(0.0, 100.0, 0.0), fwd: Vec3::new(0.0, 0.1, -1.0).normalize(), up: Vec3::Y, fov_deg: 60.0, near: 0.5 }, false, (unix_now(), 0.0, 0.0, 30.0f32, 3000.0f32, 0.0f32)),
         };
+        let (utc, lat, lon, vis, cb, cc) = params_data;
 
         // ---- acquire frame ----
         let frame = match gpu.surface.get_current_texture() {
@@ -391,38 +380,63 @@ impl App {
             _ => return,
         };
         let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let info = HudInfo { fps: self.fps, frame_ms: self.frame_ms, sim_ms: self.sim_ms, view: self.view, paused: self.paused, help: self.help, time };
-        let menu = &self.menu;
-        let in_menu = matches!(self.mode, Mode::Menu);
-        let flight_ref = self.flight.as_ref();
-        if let (Some(cam), Some((utc, lat, lon, vis, cb, cc))) = (cam, params_data) {
-            let fp = FrameParams { flight: flight_ref, cam, utc, time: time as f32, lat, lon, vis_km: vis, cloud_base: cb, cloud_cover: cc, show_aircraft: show_ac || in_menu };
-            let (fps, help) = (self.fps, self.help);
-            gpu.renderer.render(&view, &fp, &mut |u| {
-                if in_menu {
-                    ui::draw_menu(u, menu, time, fps);
-                    if help {
-                        let b = (u.h / 46.0).clamp(11.0, 26.0);
-                        ui::draw_help(u, b);
+        let info = HudInfo { fps: self.fps, frame_ms: self.frame_ms, sim_ms: self.sim_ms, view: self.view, paused: self.paused, help: self.help, time, panels3d: in_flight && self.view.is_interior() };
+        let flight_ref = if in_flight { self.flight.as_ref() } else { None };
+        let fp = FrameParams { flight: flight_ref, cam, utc, time: time as f32, lat, lon, vis_km: vis, cloud_base: cb, cloud_cover: cc, show_aircraft: show_ac, cockpit: in_flight && self.view.is_interior() };
+        let fps = self.fps;
+        let help = self.help;
+        let wall_utc = unix_now();
+        let mut outcome = Outcome::None;
+        {
+            let pre = &mut self.pre;
+            let inp = &self.inp;
+            let db = &self.db;
+            let mode = &self.mode;
+            let out_ref = &mut outcome;
+            gpu.renderer.render(&view, &fp, &mut |u| match mode {
+                Mode::Pre => *out_ref = pre.frame(u, inp, db, wall_utc, dt, fps),
+                Mode::Loading { launch, frames } => {
+                    if let (Some(d), Some(a)) = (db.find(&launch.dep), db.find(&launch.arr)) {
+                        let mut g = pre_ui::Gui::new(u, inp, time);
+                        let p = (*frames as f32 / LOADER_FRAMES as f32).min(1.0);
+                        let stage = ((p * 5.0) as usize).min(5);
+                        let detail = ["Surveying runways and taxiways...", "Generating simulated weather...", "Building airfield scenery and terrain...", "Initialising flight model and autopilot...", "Compiling shaders and uploading fonts..."][stage.min(4)];
+                        screens::draw_flight_loader(&mut g, d, a, p, stage, detail);
                     }
-                } else if let Some(f) = flight_ref {
-                    ui::draw_hud(u, f, &info);
+                }
+                Mode::Flight => {
+                    if let Some(f) = flight_ref {
+                        ui::draw_hud(u, f, &info);
+                        if help {
+                            let b = (u.h / 46.0).clamp(11.0, 26.0);
+                            ui::draw_help(u, b);
+                        }
+                    }
                 }
             });
         }
         gpu.renderer.queue.present(frame);
+        let stats = gpu.renderer.stats;
+        self.inp.end_frame();
 
         self.frames += 1;
         if self.last_log.elapsed().as_secs_f32() > 5.0 {
             self.last_log = Instant::now();
-            let s = gpu.renderer.stats;
+            let s = stats;
             println!("{:.1} FPS | frame {:.2} ms | sim {:.2} ms | terrain {:.2} ms | scatter {:.2} ms | ui {:.2} ms | draws {} | tris {}k | rss {} MB", self.fps, self.frame_ms, self.sim_ms, s.terrain_ms, s.scatter_ms, s.ui_ms, s.draw_calls, s.triangles / 1000, rss_mb());
         }
         if self.opts.max_frames.is_some_and(|m| self.frames >= m) {
             el.exit();
         }
+        match outcome {
+            Outcome::None => {}
+            Outcome::Quit => el.exit(),
+            Outcome::Start { dep, arr, dep_rwy, arr_rwy, cruise_alt_m } => self.begin_launch(Launch { dep, arr, dep_rwy, arr_rwy, cruise_alt_m }),
+        }
+
     }
 }
+
 
 /// Resident set size in MB (Linux); 0 elsewhere.
 pub fn rss_mb() -> u64 {
@@ -442,7 +456,8 @@ impl ApplicationHandler for App {
         }
         self.window = Some(window);
         if self.opts.autostart {
-            self.start_flight();
+            self.pre.skip_boot(&self.db);
+            self.begin_launch(Launch { dep: self.opts.dep.clone(), arr: self.opts.arr.clone(), dep_rwy: None, arr_rwy: None, cruise_alt_m: None });
         }
     }
 
@@ -459,14 +474,51 @@ impl ApplicationHandler for App {
                     }
                 }
             }
+            WindowEvent::CursorMoved { position, .. } => {
+                let p = [position.x as f32, position.y as f32];
+                if let Some(l) = self.last_mouse {
+                    self.inp.delta = [self.inp.delta[0] + p[0] - l[0], self.inp.delta[1] + p[1] - l[1]];
+                }
+                self.last_mouse = Some(p);
+                self.inp.mouse = p;
+            }
+            WindowEvent::CursorLeft { .. } => self.last_mouse = None,
+            WindowEvent::MouseInput { state, button, .. } => match (button, state) {
+                (MouseButton::Left, ElementState::Pressed) => {
+                    self.inp.pressed = true;
+                    self.inp.down = true;
+                }
+                (MouseButton::Left, ElementState::Released) => {
+                    self.inp.released = true;
+                    self.inp.down = false;
+                }
+                (MouseButton::Right, s) => self.inp.right_down = s == ElementState::Pressed,
+                _ => {}
+            },
             WindowEvent::KeyboardInput { event, .. } => {
                 if let PhysicalKey::Code(code) = event.physical_key {
                     match event.state {
                         ElementState::Pressed => {
                             self.keys.insert(code);
-                            if !event.repeat {
-                                let text = event.text.as_ref().map(|t| t.as_str().to_owned());
-                                self.key_pressed(el, code, text.as_deref());
+                            if matches!(self.mode, Mode::Pre) {
+                                if let Some(k) = map_key(code) {
+                                    self.inp.keys.push(k);
+                                } else if let Some(n) = match code {
+                                    KeyCode::F2 => Some(2u8),
+                                    _ => None,
+                                } {
+                                    let _ = n;
+                                }
+                                if let Some(t) = event.text.as_ref() {
+                                    if !self.keys.contains(&KeyCode::ControlLeft) {
+                                        self.inp.typed.push_str(t.as_str());
+                                    }
+                                }
+                                if !event.repeat && code == KeyCode::F11 {
+                                    self.key_pressed(el, code);
+                                }
+                            } else if !event.repeat {
+                                self.key_pressed(el, code);
                             }
                         }
                         ElementState::Released => {
@@ -480,7 +532,11 @@ impl ApplicationHandler for App {
                     MouseScrollDelta::LineDelta(_, y) => y as f64,
                     MouseScrollDelta::PixelDelta(p) => p.y / 40.0,
                 };
-                self.cam.dist = clamp(self.cam.dist * (1.0 - y * 0.08), 0.35, 6.0);
+                if matches!(self.mode, Mode::Flight) {
+                    self.cam.dist = clamp(self.cam.dist * (1.0 - y * 0.08), 0.35, 6.0);
+                } else {
+                    self.inp.wheel += y as f32;
+                }
             }
             WindowEvent::RedrawRequested => self.redraw(el),
             _ => {}

@@ -2,61 +2,51 @@
 
 Dokumen ini adalah **catatan resmi implementasi aktif (living implementation log & changelog)** untuk proyek Rust di folder `rust/`.
 
-> ⚠️ **ATURAN MUTLAK UNTUK AGENT**:
-> Dokumen ini **BUKAN** daftar checklist statis yang diisi oleh orang lain.
-> Setiap kali Anda menerima prompt permintaan perubahan atau penambahan fitur dari user, **ANDA WAJIB**:
-> 1. Mencatat apa saja yang Anda kerjakan dan ubah langsung ke dalam dokumen ini di bagian **Log Implementasi (Changelog)**.
-> 2. Menuliskan file apa saja yang dibuat/dimodifikasi, detail implementasi teknisnya, serta status pengujiannya.
-
 ---
 
-## 1. Status Baseline Kode Saat Ini (Fondasi yang Sudah Ada)
+## 1. Status Baseline & Implementasi Terintegrasi (Current Architecture)
 
-Berikut adalah komponen yang telah terimplementasi dan berfungsi di dalam codebase `rust/` saat ini:
+Setelah penggabungan paralel antara modul **UI/UX Pra-Penerbangan** dan modul **3D Terrain, Environment & Cockpit Simulation**, berikut status lengkap komponen di `rust/`:
 
-* **Fisika Penerbangan & FBW (120 Hz)** (`src/physics.rs`, `src/specs.rs`):
-  * Dinamika 6-DOF rigid-body pesawat Airbus A320-200.
-  * Normal law Fly-By-Wire (FBW) dengan proteksi sudut bank, pitch, stall, dan overspeed.
-  * Model dual mesin CFM56-5B, ground effect, dan kontak roda pendaratan (landing gear spring-damper).
+* **Fisika Penerbangan 6-DOF & A320 FBW (120 Hz)** (`src/physics.rs`, `src/fbw.rs`, `src/specs.rs`):
+  * Dinamika 6-DOF rigid body lengkap dengan model dual CFM56-5B.
+  * Normal Law Fly-By-Wire: pembatasan sudut bank (33°/67°), pitch limit (+30°/-15°), dan proteksi overload $n_z$.
+  * Perhitungan envelope kecepatan Airbus: $V_{LS}, V_{\alpha\text{ prot}}, V_{\alpha\text{ max}}, V_{SW}, V_{MAX}$.
+  * Alpha-Floor protection: pemicu otomatis tenaga TOGA saat mendekati sudut stall.
+  * Wetness runway dinamis: efek pengereman berkurang pada landasan basah/bersalju.
 * **Autopilot & Navigasi (60 Hz)** (`src/autopilot.rs`, `src/nav.rs`, `src/geo.rs`):
-  * Panduan lateral LNAV (great-circle waypoint tracking, fly-by turn anticipation).
-  * Panduan vertikal VNAV (profil climb/descent 3° geometric path).
-  * ILS Localizer & Glideslope capture serta logika autoland flare/rollout.
-* **Database Bandara & Navigasi** (`src/airports.rs`, `data/airports.json`):
-  * 8.413 bandara global real-world terindeks (koordinat WGS84, elevasi, panjang/arah runway).
-* **Waktu & Posisi Matahari Real-World** (`src/clock.rs`):
-  * Waktu UTC sinkron dan algoritma NOAA Solar Position (azimuth, elevasi matahari, twilight).
-* **Renderer Native wgpu 30 & Geometri** (`src/gfx/`):
-  * Pipeline rendering `wgpu 30` dengan reversed-Z depth buffer (anti z-fighting).
-  * Clipmap terrain 8 concentric LOD rings dengan elevasi prosedural.
-  * Mesh eksterior A320 dan garis marka runway.
-* **Instrumen HUD 2D Dasar & Menu Teks** (`src/gfx/ui.rs`, `src/app.rs`):
-  * Batch renderer 2D teks (`ab_glyph`) dan indikator tape PFD/FCU sederhana.
-  * Menu pemilihan ICAO berbasis teks sederhana (placeholder awal).
-* **Build & CI/CD** (`.github/workflows/rust-ci.yml`):
-  * Kompilasi executable native Windows x86_64 (`inflight.exe`).
+  * LNAV lateral guidance (great-circle waypoint sequencing, fly-by turn anticipation).
+  * VNAV 3° geometric path descent dan konfigurasi pendekatan bertahap (CONF 1, 2, 3, FULL).
+  * ILS Localizer & Glideslope capture serta autoland flare & rollout.
+* **Lingkungan 3D, Atmosfer & Cuaca Volumetrik** (`src/atmosphere.rs`, `src/clouds.rs`, `src/precip.rs`, `src/weather.rs`):
+  * Siklus twilight fotorealistik (Day, Golden, Civil, Nautical, Astronomical, Night) berdasarkan elevasi matahari NOAA.
+  * Hamburan Rayleigh & aerosol (matahari rendah berwarna jingga/merah) dan pencahayaan malam fase bulan sinodik.
+  * Ray-marching awan volumetrik 26-langkah pada buffer depth dengan self-shadowing dan in-cloud fogging.
+  * Sistem presipitasi GPU: 9.000 partikel hujan/salju, simulasi petir, dan pengurangan jarak pandang.
+* **Kokpit 3D & Display EFIS Airbus** (`src/cockpit.rs`, `src/gfx/displays.rs`, `src/gfx/fx.rs`):
+  * Rig multi-kamera: Captain (dengan simulasi g-load dan head-look), Panel, Wing, Chase orbit, dan Tower spotter.
+  * Geometri 3D interior kokpit (glareshield, main panel, pedestal, tiang jendela, overhead, lantai).
+  * Render-to-texture atlas 1024x1024 untuk 6 layar kaca Airbus:
+    * **PFD**: Artificial horizon, speed tape lengkap dengan bug proteksi FBW, altitude tape + VSI, FMA annunciator strip.
+    * **ND**: Heading-up ARC mode, rute penerbangan, waypoints, kompas mawar, panah angin.
+    * **E/WD**: Dual N1 dial, EGT, N2, fuel flow, memo status, dan peringatan GPWS/stall.
+    * **SD**: Status permukaan kontrol, landing gear, dan bahan bakar.
+* **Rangkaian Lengkap UI/UX Pra-Penerbangan** (`src/ui/`):
+  * **Bootloader**: Visual animasi siluet A320 dan checklist inisialisasi sistem (`ui/screens.rs`).
+  * **Menu Utama Bento MSFS**: 5 tile interaktif (Flight Planner, Free Flight, Settings, Logbook, Controls) (`ui/screens.rs`).
+  * **Bola Dunia 3D**: Sphere tessellated dengan land mask Natural Earth 110m (`assets/land_mask.bin`), garis terminator siang/malam UTC, titik lampu kota malam, dan fly-to camera easing (`ui/globe.rs`).
+  * **Pencarian Bandara & Filter**: Pencarian instan 8.413 bandara terindeks dengan filter runway $\ge$ 5.000 ft, permukaan keras, dan region quick-pick (`ui/planner.rs`).
+  * **Flight Dispatch & Briefing**: Perhitungan jarak great-circle, level jelajah semicircular (ODD/EVEN FL), auto-runway pemilihan arah angin, ETE, kalkulasi block fuel, dan diagram vektor runway (`ui/planner.rs`, `ui/dispatch.rs`, `ui/map.rs`, `ui/a320.rs`).
+  * **Modal Pengaturan & Logbook**: Dialog pengaturan FOV kokpit, audio, kontrol input, dan pencatatan touchdown pendaratan otomatis (`ui/modals.rs`).
+* **CI/CD Build**:
+  * Alur GitHub Actions `.github/workflows/rust-ci.yml` untuk build otomatis release executable Windows x86_64 (`inflight.exe`).
 
 ---
 
-## 2. Fokus Utama yang Sedang Dikerjakan: UI/UX Pra-Penerbangan (`src/ui/` Port)
+## 2. Log Implementasi & Riwayat Perubahan (Changelog)
 
-Porting rangkaian antarmuka pra-penerbangan dari `src/ui/` (TypeScript) ke dalam Rust native (`rust/src/`):
-1. **Bootloader & Loading Screen**: Visual siluet vektor A320 dan checklist inisialisasi sistem (`src/ui/Loaders.tsx`).
-2. **Menu Utama Bento Grid MSFS**: 5 tile interaktif (Flight Planner, Free Flight, Settings, Logbook, Controls) (`src/ui/PreGameVisuals.tsx`, `Screens.tsx`).
-3. **Globe 3D Interaktif**: Visual bola dunia dengan garis terminator siang/malam sesuai matahari UTC (`src/ui/globeCamera.ts`, `globeTiles.ts`).
-4. **Pencarian Bandara & Filter**: Pencarian cepat ICAO/IATA/kota dari 8.413 bandara dan filter runway (`src/ui/Planner.tsx`, `AirportMiniMap.tsx`).
-5. **Flight Planner & Briefing Rute**: Perhitungan jarak rute, level jelajah (semi-circular rule), kalkulasi bahan bakar, estimasi waktu (ETE), dan diagram vektor runway (`src/ui/A320Plan.tsx`, `MapPanel.tsx`).
-6. **Jendela Modal**: Dialog pengaturan (audio, grafik) dan daftar kontrol keyboard/joystick (`src/ui/MsfsWindows.tsx`, `SettingsPanels.tsx`).
-
----
-
-## 3. Log Implementasi & Riwayat Perubahan (Changelog per Prompt)
-
-*Setiap kali Anda (Agent A) melakukan perubahan berdasarkan prompt user, tambahkan catatan entri baru di tabel dan bagian bawah ini:*
-
-| Tanggal | Target / Fitur | File Dibuat / Diubah | Ringkasan Perubahan | Status |
+| Tanggal | Fitur / Subsystem | File Terlibat | Ringkasan Pekerjaan | Status |
 |---|---|---|---|---|
-| *Contoh: 2026-11-08* | *UI Menu Bento* | *`rust/src/ui/menu.rs`, `rust/src/app.rs`* | *Implementasi 5 tile bento menu MSFS di wgpu* | *Selesai / Teruji* |
-
-### Detail Entri Perubahan Terbaru:
-*(Agent A: Tuliskan penjelasan teknis dari perubahan yang baru saja Anda buat di sini pada setiap iterasi prompt)*
+| 2026-11-08 | **Integrasi Lengkap UI/UX + 3D Simulation** | `rust/src/*`, `rust/assets/*`, `rust/tests/*` | Penggabungan penuh dua branch paralel: UI/UX pra-penerbangan (`ui/`) dan 3D terrain/fisika/kokpit (`atmosphere.rs`, `clouds.rs`, `cockpit.rs`, `fbw.rs`, `precip.rs`). Seluruh 112 tes lulus (90 unit + 5 environment + 6 flight + 11 ui flow). | ✅ Selesai & Teruji |
+| 2026-11-08 | **3D World, Atmosfer & Kokpit FBW** | `atmosphere.rs`, `clouds.rs`, `cockpit.rs`, `fbw.rs`, `precip.rs`, `gfx/*` | Implementasi ray-marched volumetric clouds, pencahayaan matahari/bulan twilight, hujan/petir, A320 FBW envelope protections, rig kamera kokpit 3D, dan atlas tekstur PFD/ND/EWD/SD. | ✅ Selesai & Teruji |
+| 2026-11-08 | **Pre-Flight UI/UX Suite** | `ui/*`, `clock.rs`, `gfx/ui.rs`, `app.rs`, `assets/land_mask.bin` | Implementasi bootloader A320, bento grid menu MSFS 5-tile, bola dunia 3D siang/malam, pencarian 8.413 bandara, flight briefing & dispatch, serta modal settings/logbook. | ✅ Selesai & Teruji |

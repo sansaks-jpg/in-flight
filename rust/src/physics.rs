@@ -4,6 +4,7 @@
 //! The step function is allocation-free (no heap use in the hot path) so it can run at 120 Hz without GC-like spikes
 //! or leaks. Ground height is supplied as a closure so the model has no dependency on the renderer.
 
+use crate::fbw;
 use crate::geo::{clamp, lerp, smoothstep, G, KT};
 use crate::specs::{AircraftSpec, A320};
 use glam::{DQuat, DVec3};
@@ -102,6 +103,10 @@ impl Default for Controls {
 /// A320 slat/flap detents (0, 1, 2, 3, FULL) -> fraction of full-flap lift / drag.
 const FLAP_LIFT: [f64; 5] = [0.0, 0.12, 0.40, 0.62, 1.0];
 const FLAP_DRAG: [f64; 5] = [0.0, 0.08, 0.30, 0.58, 1.0];
+/// Fraction of full-flap lift at flap position `fl` (0..1) - shared with `fbw::speed_at_alpha_kt`.
+pub fn flap_lift_fraction(fl: f64) -> f64 {
+    tab(&FLAP_LIFT, fl)
+}
 fn tab(t: &[f64; 5], x: f64) -> f64 {
     let f = clamp(x, 0.0, 1.0) * (t.len() - 1) as f64;
     let i = ((t.len() - 2) as f64).min(f.floor()) as usize;
@@ -472,7 +477,7 @@ impl FlightModel {
         self.alpha_stall = a_stall;
         let a_stall_neg = -(a_stall * 0.8) - 0.04;
         let v_stall_ref = (if fl > 0.3 { s.vs0 } else { s.vs1 }) * KT;
-        self.stall_warn = self.airborne_time > 1.2 && !self.wow && (self.alpha > a_stall * 0.92 || self.ias < v_stall_ref * 1.04);
+        self.stall_warn = self.airborne_time > 1.2 && !self.wow && (self.alpha > a_stall * fbw::ALPHA_SW_FRAC || self.ias < v_stall_ref * 1.04);
         self.stalled = self.airborne_time > 1.2 && !self.wow && (self.alpha > a_stall + 0.02 || self.ias < v_stall_ref * 0.95);
 
         // ---- flight control system ----
@@ -485,26 +490,28 @@ impl FlightModel {
             let q = self.w.x;
             let cb = self.bank.cos().max(0.2);
             let kias = self.ias / KT;
-            let nz_max = if self.flaps_pos > 0.05 { 2.0 } else { 2.5 };
+            let nz_max = if self.flaps_pos > 0.05 { fbw::NZ_UP_FLAPS } else { fbw::NZ_UP_CLEAN };
             let mut q_cmd = (G / v) * (if pilot_pitch > 0.0 { pilot_pitch * (nz_max - 1.0) } else { pilot_pitch * 2.0 })
                 + (G * self.bank.tan() * self.bank.sin()) / v;
             let pitch_deg = self.pitch.to_degrees();
-            let p_lim = if self.flaps_pos > 0.9 { 25.0 } else { 30.0 };
+            let p_lim = if self.flaps_pos > 0.9 { fbw::PITCH_UP_FLAPS_DEG } else { fbw::PITCH_UP_CLEAN_DEG };
             if pitch_deg > p_lim && q_cmd > 0.0 {
                 q_cmd = -(pitch_deg - p_lim) * 0.04;
             }
-            if pitch_deg < -15.0 && q_cmd < 0.0 {
-                q_cmd = (-15.0 - pitch_deg) * 0.04;
+            if pitch_deg < fbw::PITCH_DOWN_DEG && q_cmd < 0.0 {
+                q_cmd = (fbw::PITCH_DOWN_DEG - pitch_deg) * 0.04;
             }
-            let a_prot = a_stall * 0.84;
-            let a_max = a_stall * 0.95;
+            let a_prot = a_stall * fbw::ALPHA_PROT_FRAC;
+            let a_max = a_stall * fbw::ALPHA_MAX_FRAC;
             if !self.wow && self.alpha > a_prot {
-                q_cmd = q_cmd.min(-(self.alpha - a_prot) * 2.5);
+                // alpha-protection: stick neutral holds alpha prot, full back stick commands alpha max (linear in between)
+                let a_dem = a_prot + (a_max - a_prot) * pilot_pitch.max(0.0);
+                q_cmd = q_cmd.min((a_dem - self.alpha) * 2.5);
             }
             if self.alpha > a_max {
                 q_cmd = q_cmd.min(-0.15);
             }
-            let ovsp = (kias - s.vne).max((self.mach - 0.82) * 300.0);
+            let ovsp = (kias - s.vne).max((self.mach - fbw::MMO) * 300.0);
             if ovsp > 0.0 {
                 q_cmd = q_cmd.max((ovsp * 0.004).min(0.1));
             }
@@ -519,12 +526,12 @@ impl FlightModel {
             elev_cmd = self.trim_auto + err * 1.6 + c.trim * 0.3;
             let bank_deg = self.bank.to_degrees();
             let mut p_cmd = pilot_roll * s.max_roll_rate;
-            if !c.ap_hold && pilot_roll.abs() < 0.03 && bank_deg.abs() < 33.0 {
+            if !c.ap_hold && pilot_roll.abs() < 0.03 && bank_deg.abs() < fbw::BANK_NEUTRAL_DEG {
                 p_cmd = -self.bank * 0.9;
             } else if !c.ap_hold && pilot_roll.abs() < 0.03 {
-                p_cmd = -(bank_deg - bank_deg.signum() * 33.0).to_radians() * 0.9;
+                p_cmd = -(bank_deg - bank_deg.signum() * fbw::BANK_NEUTRAL_DEG).to_radians() * 0.9;
             }
-            if bank_deg.abs() > 67.0 && pilot_roll.signum() == bank_deg.signum() {
+            if bank_deg.abs() > fbw::BANK_MAX_DEG && pilot_roll.signum() == bank_deg.signum() {
                 p_cmd = 0.0;
             }
             if self.alpha > a_max {
@@ -559,7 +566,10 @@ impl FlightModel {
         // ---- engines (real start-up sequence: OFF -> starter -> light-off -> idle -> running) ----
         let mut thrust = 0.0;
         let mut ff = 0.0;
-        let thr_base = if self.fuel > 0.0 { c.throttle } else { 0.0 };
+        // alpha-floor (normal law): near the stall the FADEC commands TOGA whatever the lever position
+        let alpha_floor = c.assist && !self.wow && self.airborne_time > 1.2 && self.alpha > a_stall * fbw::ALPHA_FLOOR_FRAC;
+        let thr_cmd = if alpha_floor { 1.0 } else { c.throttle };
+        let thr_base = if self.fuel > 0.0 { thr_cmd } else { 0.0 };
         let n_eng = s.engines;
         let mut any_out = false;
         for i in 0..n_eng {

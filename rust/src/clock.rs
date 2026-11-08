@@ -58,6 +58,22 @@ pub fn sun_position(unix: f64, lat: f64, lon: f64) -> (f64, f64) {
     (elev, az.rem_euclid(360.0))
 }
 
+/// Sub-solar point (latitude °, longitude °) at a unix time: where the sun is exactly overhead.
+/// Drives the day/night terminator of the pre-flight globe (same NOAA equations as [`sun_position`]).
+pub fn subsolar_point(unix: f64) -> (f64, f64) {
+    let (doy, ndays) = day_of_year(unix);
+    let hour = (unix.rem_euclid(86400.0)) / 3600.0;
+    let g = 2.0 * std::f64::consts::PI / ndays as f64 * (doy - 1.0 + (hour - 12.0) / 24.0);
+    let eqtime = 229.18 * (0.000075 + 0.001868 * g.cos() - 0.032077 * g.sin() - 0.014615 * (2.0 * g).cos() - 0.040849 * (2.0 * g).sin());
+    let decl = 0.006918 - 0.399912 * g.cos() + 0.070257 * g.sin() - 0.006758 * (2.0 * g).cos() + 0.000907 * (2.0 * g).sin()
+        - 0.002697 * (3.0 * g).cos()
+        + 0.00148 * (3.0 * g).sin();
+    // true solar time == 720 min when lon = -(hour*60 + eqtime - 720)/4
+    let lon = -(hour * 60.0 + eqtime - 720.0) / 4.0;
+    let lon = (lon + 180.0).rem_euclid(360.0) - 180.0;
+    (decl.to_degrees(), lon)
+}
+
 /// "HH:MM" UTC.
 pub fn hhmm(unix: f64) -> (u32, u32) {
     let s = unix.rem_euclid(86400.0) as u32;

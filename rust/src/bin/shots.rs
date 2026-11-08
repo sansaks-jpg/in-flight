@@ -59,8 +59,9 @@ fn main() {
             cloud_base: f.weather.cloud_base_m as f32,
             cloud_cover: f.weather.cloud_cover as f32,
             show_aircraft: third || menu.is_some(),
+            cockpit: view.is_interior() && menu.is_none(),
         };
-        let info = HudInfo { fps: 60.0, frame_ms: 16.6, sim_ms: 0.4, view, paused: false, help, time: t };
+        let info = HudInfo { fps: 60.0, frame_ms: 16.6, sim_ms: 0.4, view, paused: false, help, time: t, panels3d: view.is_interior() };
         let t0 = Instant::now();
         // two frames: the first builds the terrain rings / scatter, the second is the steady-state frame
         for _ in 0..2 {
@@ -127,6 +128,45 @@ fn main() {
             run_until(&mut f, 120.0, |f| f.status == Status::Landed);
             shot("06-landed-summary", &f, View::Cockpit, None, false);
         }
+    }
+    // 7. flight deck close-ups: panel view on the ramp and in cruise (live PFD / ND / E-WD / SD textures)
+    let f = Flight::new(&db, "KSFO", "KOAK", DAY).unwrap();
+    shot("07-panel-ground", &f, View::Panel, None, false);
+    let mut f = Flight::new(&db, "KLAX", "KSAN", DAY).unwrap();
+    f.apply(Action::ApAutoTakeoff);
+    run_until(&mut f, 400.0, |f| f.fm.pos.y > 4500.0 && f.ap.phase == inflight::autopilot::ApPhase::Climb);
+    shot("07b-panel-climb", &f, View::Panel, None, false);
+    shot("07c-wing-climb", &f, View::Wing, None, false);
+
+    // 8. weather: overcast + thunderstorm on final (volumetric clouds, rain streaks, lightning, wet runway)
+    {
+        use inflight::weather::Weather;
+        let storm = Weather { cloud_cover: 0.95, cloud_base_m: 900.0, precip: 0.85, thunder: true, vis_km: 4.5, cirrus: 0.5, wind_from_deg: 280.0, wind_kt: 14.0, ..Weather::calm() };
+        let mut f = Flight::new(&db, "KSFO", "KOAK", DAY).unwrap();
+        f.weather = storm;
+        f.fm.wetness = 0.85;
+        f.apply(Action::ApAutoTakeoff);
+        run_until(&mut f, 150.0, |f| f.fm.agl > 400.0);
+        shot("08-storm-climb-chase", &f, View::Chase, None, false);
+        shot("08b-storm-climb-cockpit", &f, View::Cockpit, None, false);
+        // find a lightning flash for the sky glow
+        let mut tt = 5.0;
+        while inflight::precip::lightning(&f.weather, tt).0 < 0.7 && tt < 400.0 {
+            tt += 0.05;
+        }
+        println!("lightning flash at t = {tt:.2} s");
+        // fair-weather cumulus seen from above and below
+        let mut f = Flight::new(&db, "KLAX", "KSAN", DAY).unwrap();
+        f.weather = Weather { cloud_cover: 0.62, cloud_base_m: 2200.0, cirrus: 0.35, ..Weather::calm() };
+        f.apply(Action::ApAutoTakeoff);
+        run_until(&mut f, 500.0, |f| f.fm.pos.y > 3600.0);
+        shot("09-cumulus-above-chase", &f, View::Chase, None, false);
+        shot("09b-cumulus-above-cockpit", &f, View::Cockpit, None, false);
+        let mut f = Flight::new(&db, "KSFO", "KOAK", DUSK).unwrap();
+        f.weather = Weather { cloud_cover: 0.55, cloud_base_m: 1800.0, cirrus: 0.6, ..Weather::calm() };
+        f.apply(Action::ApAutoTakeoff);
+        run_until(&mut f, 200.0, |f| f.fm.agl > 700.0);
+        shot("10-dusk-clouds-cockpit", &f, View::Cockpit, None, false);
     }
     println!("done -> {dir}/");
 }

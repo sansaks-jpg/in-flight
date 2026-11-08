@@ -103,7 +103,7 @@ pub struct Flight {
     last_wow_gs: f64,
 }
 
-fn seed_for(utc: f64, icao: &str) -> u64 {
+pub fn seed_for(utc: f64, icao: &str) -> u64 {
     let day = (utc / 86400.0).floor() as u64;
     icao.bytes().fold(day.wrapping_mul(0x9E37_79B9), |a, b| a.rotate_left(5) ^ (b as u64).wrapping_mul(0x100_0000_01B3))
 }
@@ -111,6 +111,12 @@ fn seed_for(utc: f64, icao: &str) -> u64 {
 impl Flight {
     /// Cold-start free-flight: aircraft on the departure runway, engines running, parking brake set.
     pub fn new(db: &AirportDb, dep_code: &str, arr_code: &str, utc: f64) -> Result<Self, String> {
+        Self::new_with_runways(db, dep_code, arr_code, utc, None, None, None)
+    }
+
+    /// Like [`Flight::new`] but lets the dispatcher (pre-flight planner) pick the runway ends and the cruise altitude
+    /// (metres) explicitly; `None` keeps the automatic into-the-wind choice / default FL360.
+    pub fn new_with_runways(db: &AirportDb, dep_code: &str, arr_code: &str, utc: f64, dep_rwy: Option<&str>, arr_rwy: Option<&str>, cruise_alt_m: Option<f64>) -> Result<Self, String> {
         let dep = db.find(dep_code).ok_or_else(|| format!("Unknown departure airport '{dep_code}'"))?.clone();
         let arr = db.find(arr_code).ok_or_else(|| format!("Unknown arrival airport '{arr_code}'"))?.clone();
         if dep.runways.is_empty() {
@@ -120,8 +126,8 @@ impl Flight {
             return Err(format!("{} has no runway data", arr.icao));
         }
         let weather = Weather::generate(seed_for(utc, &dep.icao));
-        let dep_end = dep.best_end(weather.wind_from_deg).ok_or("no departure runway")?;
-        let arr_end = arr.best_end(weather.wind_from_deg).ok_or("no arrival runway")?;
+        let dep_end = dep_rwy.and_then(|r| dep.find_end(r)).or_else(|| dep.best_end(weather.wind_from_deg)).ok_or("no departure runway")?;
+        let arr_end = arr_rwy.and_then(|r| arr.find_end(r)).or_else(|| arr.best_end(weather.wind_from_deg)).ok_or("no arrival runway")?;
         let proj = Projection::new(dep.lat, dep.lon);
         let mut terrain = Terrain::new((seed_for(0.0, "TERRAIN") & 0xffff) as u32);
         let dep_xz = (proj.x(dep.lon), proj.z(dep.lat));
@@ -130,7 +136,7 @@ impl Flight {
         if haversine(dep.lat, dep.lon, arr.lat, arr.lon) > 100.0 {
             terrain.add_airport(arr_xz.0, arr_xz.1, arr.elev);
         }
-        let plan = build_plan(&dep, &dep_end, &arr, &arr_end, 11000.0);
+        let plan = build_plan(&dep, &dep_end, &arr, &arr_end, cruise_alt_m.unwrap_or(11000.0));
         let mut fm = FlightModel::new(None);
         // fuel for the trip + reserves (the original loads trip fuel as well)
         let route = haversine(dep.lat, dep.lon, arr.lat, arr.lon);
@@ -142,6 +148,8 @@ impl Flight {
         fm.flaps_pos = fm.ctl.flaps_idx as f64 / fm.spec.flap_detents as f64;
         fm.air.d_t = weather.d_t;
         fm.air.qnh = weather.qnh;
+        // rain / snow wets the runway: lower braking friction (see FlightModel::wetness)
+        fm.wetness = crate::precip::state(&weather, 0.0, 0.0).wet as f64;
         let mut f = Self {
             proj,
             dep,
