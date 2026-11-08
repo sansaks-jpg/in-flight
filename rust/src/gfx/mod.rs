@@ -1,10 +1,12 @@
 //! wgpu renderer. Every GPU buffer is allocated once with a fixed capacity; per-frame work is `write_buffer` into those
 //! buffers, so frame time is flat and memory use is constant (no leaks by construction).
 
+pub mod deck_gpu;
 pub mod displays;
 pub mod fx;
 pub mod geom;
 pub mod ui;
+
 
 use crate::clock::sun_position;
 use crate::clouds::{self, Clouds};
@@ -13,6 +15,10 @@ use crate::game::Flight;
 use geom::*;
 use glam::{DVec3, Mat4, Quat, Vec3, Vec4};
 use std::time::Instant;
+use crate::tiles::globe_tiles::MAX_GLOBE_VERTS;
+use crate::tiles::gpu::{GlobeGpu, GlobeU, GroundGpu, TileAtlas};
+use crate::tiles::ground::GroundPlan;
+use crate::tiles::{styles, TileHub};
 use ui::{Ui, MAX_UI_VERTS};
 use wgpu::util::DeviceExt;
 
@@ -80,6 +86,8 @@ pub struct FrameParams<'a> {
 #[derive(Default, Clone, Copy, Debug)]
 pub struct FrameStats {
     pub terrain_ms: f32,
+    /// CPU time of the satellite-tile work on the render thread (GPU upload burst + page-table planning)
+    pub tile_ms: f32,
     pub scatter_ms: f32,
     pub ui_ms: f32,
     pub submit_ms: f32,
@@ -150,6 +158,18 @@ pub struct Renderer {
     ui_vb: wgpu::Buffer,
     pub stats: FrameStats,
     fx: fx::Fx,
+    tiles: Option<TileHub>,
+    atlas: Option<TileAtlas>,
+    ground_gpu: Option<GroundGpu>,
+    ground_plan: GroundPlan,
+    globe_gpu: Option<GlobeGpu>,
+}
+
+/// Device limits to request: the satellite atlas is a texture array and wants more than the 256-layer default.
+pub fn tile_limits(adapter: &wgpu::Adapter) -> wgpu::Limits {
+    let mut l = wgpu::Limits::default();
+    l.max_texture_array_layers = adapter.limits().max_texture_array_layers.min(crate::tiles::gpu::MAX_LAYERS).max(l.max_texture_array_layers);
+    l
 }
 
 fn buf_init(device: &wgpu::Device, label: &str, usage: wgpu::BufferUsages, size: usize) -> wgpu::Buffer {
@@ -320,6 +340,19 @@ impl Renderer {
         let depth_view = depth_view(&device, w, h);
         queue.write_buffer(&screen_buf, 0, bytemuck::bytes_of(&ScreenU { size: [w as f32, h as f32], pad: [0.0; 2] }));
         let fx = fx::Fx::new(&device, &queue, format, &globals_bgl, &model_bgl, &ui_bgl, &atlas_view, &sampler, &depth_view);
+        // ---- satellite tiles (INFLIGHT_NO_TILES=1 disables the whole subsystem) ----
+        let (tiles, tile_atlas, ground_gpu, globe_gpu) = if std::env::var_os("INFLIGHT_NO_TILES").is_some() {
+            (None, None, None, None)
+        } else {
+            let layers = TileAtlas::layers_for(&device.limits());
+            let tile_atlas = TileAtlas::new(&device, layers);
+            let hub = TileHub::new(layers as usize);
+            let gg = GroundGpu::new(&device, format, &tile_atlas, &globals_bgl, &model_bgl, std::mem::size_of::<TerrainV>());
+            let globe = GlobeGpu::new(&device, format, &tile_atlas);
+            (Some(hub), Some(tile_atlas), Some(gg), Some(globe))
+        };
+        let mut ui_state = Ui::new();
+        ui_state.tiles = tiles.clone();
         Self {
             device,
             queue,
@@ -361,12 +394,45 @@ impl Renderer {
             tree_cpu: Vec::with_capacity(MAX_TREES),
             bldg_cpu: Vec::with_capacity(MAX_BUILDINGS),
             scatter_center: None,
-            ui: Ui::new(),
+            ui: ui_state,
             ui_vb,
             stats: FrameStats::default(),
             fx,
+            tiles,
+            atlas: tile_atlas,
+            ground_gpu,
+            ground_plan: GroundPlan::new(),
+            globe_gpu,
         }
     }
+
+    /// Tile streaming hub (None when disabled with `INFLIGHT_NO_TILES`).
+    pub fn tiles(&self) -> Option<&TileHub> {
+        self.tiles.as_ref()
+    }
+
+    /// Worst CPU time (ms) one atlas upload burst has taken on the render thread.
+    pub fn tile_upload_worst_ms(&self) -> f32 {
+        self.atlas.as_ref().map_or(0.0, |a| a.worst_ms)
+    }
+
+    /// Upload the downloaded HD flight deck (see `deck::Deck::gpu_mesh`).
+    pub fn load_deck(&mut self, mesh: &crate::deck::GpuMesh, images: &[Option<crate::glb::Image>]) {
+        self.fx.load_deck(&self.device, &self.queue, mesh, images);
+    }
+
+    pub fn unload_deck(&mut self) {
+        self.fx.unload_deck();
+    }
+
+    pub fn deck_loaded(&self) -> bool {
+        self.fx.has_deck()
+    }
+
+    pub fn set_deck_slots(&self, slots: &[crate::deck::Slot]) {
+        self.fx.set_deck_slots(&self.queue, slots);
+    }
+
 
     pub fn resize(&mut self, w: u32, h: u32) {
         let (w, h) = (w.max(1), h.max(1));
@@ -381,7 +447,7 @@ impl Renderer {
 
     /// Rebuild the static airport meshes (runways, markings, lights, buildings) when the flight changes.
     pub fn ensure_airports(&mut self, f: &Flight) {
-        let key = format!("{}>{}", f.dep.icao, f.arr.icao);
+        let key = format!("{}>{}{}", f.dep.icao, f.arr.icao, if f.terrain.flat { "#sat" } else { "" });
         if key == self.static_key {
             return;
         }
@@ -438,7 +504,16 @@ impl Renderer {
         n as u32
     }
 
-    fn update_scatter(&mut self, f: &Flight, cam: DVec3) {
+    fn update_scatter(&mut self, f: &Flight, cam: DVec3, sat: bool) {
+        if sat {
+            // real imagery already shows the real forests and buildings: no procedural scatter on top of it
+            if !self.tree_cpu.is_empty() || !self.bldg_cpu.is_empty() {
+                self.tree_cpu.clear();
+                self.bldg_cpu.clear();
+            }
+            self.scatter_center = None;
+            return;
+        }
         let low = cam.y - f.fm.ground_h < 2500.0;
         let moved = self.scatter_center.map_or(true, |(x, z)| (cam.x - x).hypot(cam.z - z) > 110.0);
         if !moved {
@@ -460,6 +535,18 @@ impl Renderer {
     pub fn render(&mut self, target: &wgpu::TextureView, p: &FrameParams, build_ui: &mut dyn FnMut(&mut Ui)) {
         let mut st = FrameStats::default();
         let (w, h) = (self.size.0 as f32, self.size.1 as f32);
+        // ---- satellite tiles: bounded GPU uploads of whatever the loader threads finished (never blocks) ----
+        let t_tiles = Instant::now();
+        if let (Some(hub), Some(atlas)) = (&self.tiles, &mut self.atlas) {
+            hub.next_frame();
+            atlas.pump(&self.queue, hub);
+        }
+        st.tile_ms = t_tiles.elapsed().as_secs_f32() * 1000.0;
+        let sat = self.ground_gpu.is_some() && p.flight.is_some_and(|f| f.terrain.flat);
+        let water_y = match (sat, p.flight) {
+            (true, Some(f)) => f.terrain.height(p.cam.pos.x, p.cam.pos.z) as f32,
+            _ => 0.0,
+        };
         // ---- globals ----
         let (el, az) = sun_position(p.utc, p.lat, p.lon);
         let (elr, azr) = ((el as f32).to_radians(), (az as f32).to_radians());
@@ -500,7 +587,7 @@ impl Renderer {
             cloud0: [clouds.layers[0].base, clouds.layers[0].top, clouds.layers[0].cover, clouds.layers[0].sigma],
             cloud1: [clouds.layers[1].base, clouds.layers[1].top, clouds.layers[1].cover, clouds.layers[1].sigma],
             env: [drift.0, drift.1, pr.intensity, pr.snow as i32 as f32],
-            env2: [pr.bolt_az, in_cloud, pr.wet, 0.0],
+            env2: [pr.bolt_az, in_cloud, pr.wet, water_y],
         };
         self.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&g));
 
@@ -510,8 +597,15 @@ impl Renderer {
             self.ensure_airports(f);
             st.rings_rebuilt = self.update_terrain(f, p.cam.pos, 2);
             st.terrain_ms = t0.elapsed().as_secs_f32() * 1000.0;
+            if let (true, Some(hub), Some(gg)) = (sat, &self.tiles, &self.ground_gpu) {
+                let t = Instant::now();
+                let changed = self.ground_plan.update(hub, &f.proj, &self.ring_origin, (p.cam.pos.x, p.cam.pos.z), hub.now());
+                self.ground_plan.touch(hub);
+                gg.upload(&self.queue, &self.ground_plan, changed);
+                st.tile_ms += t.elapsed().as_secs_f32() * 1000.0;
+            }
             let t1 = Instant::now();
-            self.update_scatter(f, p.cam.pos);
+            self.update_scatter(f, p.cam.pos, sat);
             st.scatter_ms = t1.elapsed().as_secs_f32() * 1000.0;
             // aircraft model matrix (camera-relative)
             let q = f.fm.quat;
@@ -526,7 +620,18 @@ impl Renderer {
         let t2 = Instant::now();
         self.ui.begin(w, h);
         build_ui(&mut self.ui);
+        if let (true, Some(hub)) = (sat, &self.tiles) {
+            // provider attribution (licence requirement) while satellite ground is on screen
+            self.ui.text(8.0, h - (h / 60.0).clamp(11.0, 18.0) - 4.0, (h / 60.0).clamp(10.0, 16.0), [1.0, 1.0, 1.0, 0.55], styles::style(hub.style()).attribution);
+        }
         self.ui.end();
+        if let Some(gg) = &self.globe_gpu {
+            if !self.ui.gverts.is_empty() {
+                let n = self.ui.gverts.len().min(MAX_GLOBE_VERTS);
+                self.queue.write_buffer(&gg.vb, 0, bytemuck::cast_slice(&self.ui.gverts[..n]));
+                self.queue.write_buffer(&gg.uniform, 0, bytemuck::bytes_of(&GlobeU { size: [w, h], pad: [0.0; 2], sun: self.ui.globe_sun }));
+            }
+        }
         self.queue.write_buffer(&self.ui_vb, 0, bytemuck::cast_slice(&self.ui.verts));
         st.ui_ms = t2.elapsed().as_secs_f32() * 1000.0;
 
@@ -561,13 +666,20 @@ impl Renderer {
             if let Some(_f) = p.flight {
                 rp.set_bind_group(0, &self.globals_bg, &[]);
                 rp.set_bind_group(1, &self.model_bg, &[]);
-                rp.set_pipeline(&self.terrain_pipe);
+                match (sat, &self.ground_gpu) {
+                    (true, Some(gg)) => {
+                        rp.set_pipeline(&gg.pipe);
+                        rp.set_bind_group(2, &gg.bg, &[]);
+                    }
+                    _ => rp.set_pipeline(&self.terrain_pipe),
+                }
                 for l in 0..LEVELS {
                     if self.ring_origin[l].is_some() {
                         let k = if l == 0 { 0 } else { 1 };
                         rp.set_vertex_buffer(0, self.ring_vb[l].slice(..));
                         rp.set_index_buffer(self.ring_ib[k].slice(..), wgpu::IndexFormat::Uint32);
-                        rp.draw_indexed(0..self.ring_icount[k], 0, 0..1);
+                        // the instance index carries the clipmap level into the satellite shader (page-table row)
+                        rp.draw_indexed(0..self.ring_icount[k], 0, l as u32..l as u32 + 1);
                         st.draw_calls += 1;
                         st.triangles += self.ring_icount[k] / 3;
                     }
@@ -632,7 +744,33 @@ impl Renderer {
             rp.set_pipeline(&self.ui_pipe);
             rp.set_bind_group(0, &self.ui_bg, &[]);
             rp.set_vertex_buffer(0, self.ui_vb.slice(..));
+            let mut in_globe = false;
             for c in &self.ui.cmds {
+                if c.globe {
+                    // textured globe tiles: own pipeline / vertex buffer, same scissor, same draw order as the 2D batch
+                    let Some(gg) = &self.globe_gpu else { continue };
+                    if c.start as usize + c.count as usize > MAX_GLOBE_VERTS {
+                        continue;
+                    }
+                    if let Some([x, y, sw, sh]) = c.scissor {
+                        rp.set_scissor_rect(x.min(self.size.0 - 1), y.min(self.size.1 - 1), sw.min(self.size.0 - x.min(self.size.0 - 1)), sh.min(self.size.1 - y.min(self.size.1 - 1)));
+                    } else {
+                        rp.set_scissor_rect(0, 0, self.size.0, self.size.1);
+                    }
+                    rp.set_pipeline(&gg.pipe);
+                    rp.set_bind_group(0, &gg.bg, &[]);
+                    rp.set_vertex_buffer(0, gg.vb.slice(..));
+                    rp.draw(c.start..c.start + c.count, 0..1);
+                    st.draw_calls += 1;
+                    in_globe = true;
+                    continue;
+                }
+                if in_globe {
+                    rp.set_pipeline(&self.ui_pipe);
+                    rp.set_bind_group(0, &self.ui_bg, &[]);
+                    rp.set_vertex_buffer(0, self.ui_vb.slice(..));
+                    in_globe = false;
+                }
                 match c.scissor {
                     Some([x, y, sw, sh]) => rp.set_scissor_rect(x.min(self.size.0 - 1), y.min(self.size.1 - 1), sw.min(self.size.0 - x.min(self.size.0 - 1)), sh.min(self.size.1 - y.min(self.size.1 - 1))),
                     None => rp.set_scissor_rect(0, 0, self.size.0, self.size.1),
@@ -670,7 +808,7 @@ pub fn new_headless(w: u32, h: u32) -> Result<(Renderer, Offscreen, String), Str
     }))
     .map_err(|e| format!("no adapter: {e}"))?;
     let info = adapter.get_info();
-    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor { label: Some("headless"), ..Default::default() })).map_err(|e| format!("device: {e}"))?;
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor { label: Some("headless"), required_limits: tile_limits(&adapter), ..Default::default() })).map_err(|e| format!("device: {e}"))?;
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let renderer = Renderer::new(device, queue, format, w, h);
     let off = Offscreen::new(&renderer.device, format, w, h);

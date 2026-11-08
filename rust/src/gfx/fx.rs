@@ -1,6 +1,7 @@
 //! Extra GPU effects layered on the base renderer: volumetric cloud pass (depth-aware), rain / snow streaks, the 3D
 //! flight deck and the render-to-texture display units. Every buffer is allocated once at start-up (fixed capacity).
 
+use super::deck_gpu::{DeckGpu, DeckPipes};
 use super::geom::MeshBuilder;
 use super::ui::{self, Ui, MAX_UI_VERTS};
 use super::{buf_init, uniform_entry, ModelU, ScreenU, DEPTH_FORMAT};
@@ -31,6 +32,8 @@ pub struct Fx {
     disp_vb: wgpu::Buffer,
     disp_bg: wgpu::BindGroup,
     pub cloud_ms: f32,
+    deck_pipes: DeckPipes,
+    deck: Option<DeckGpu>,
 }
 
 fn depth_layout_entry() -> wgpu::BindGroupLayoutEntry {
@@ -192,6 +195,8 @@ impl Fx {
         let disp_vb = buf_init(device, "disp_vb", wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST, MAX_UI_VERTS * std::mem::size_of::<ui::UiV>());
         let _ = uniform_entry; // (kept for symmetry with the base renderer's layouts)
 
+        let deck_pipes = DeckPipes::new(device, format, DEPTH_FORMAT, globals_bgl, model_bgl, globals);
+
         Self {
             depth_bgl,
             depth_bg,
@@ -213,6 +218,27 @@ impl Fx {
             disp_vb,
             disp_bg,
             cloud_ms: 0.0,
+            deck_pipes,
+            deck: None,
+        }
+    }
+
+    /// Upload the downloaded HD flight deck (replaces the procedural interior while loaded).
+    pub fn load_deck(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, mesh: &crate::deck::GpuMesh, images: &[Option<crate::glb::Image>]) {
+        self.deck = Some(DeckGpu::new(device, queue, &self.deck_pipes, mesh, images));
+    }
+
+    pub fn unload_deck(&mut self) {
+        self.deck = None;
+    }
+
+    pub fn has_deck(&self) -> bool {
+        self.deck.is_some()
+    }
+
+    pub fn set_deck_slots(&self, queue: &wgpu::Queue, slots: &[crate::deck::Slot]) {
+        if let Some(d) = &self.deck {
+            d.update_slots(queue, slots);
         }
     }
 
@@ -252,7 +278,7 @@ impl Fx {
         rp.set_bind_group(0, &self.disp_bg, &[]);
         rp.set_vertex_buffer(0, self.disp_vb.slice(..));
         let n = ATLAS_SIZE;
-        for c in &self.disp_ui.cmds {
+        for c in self.disp_ui.cmds.iter().filter(|c| !c.globe) {
             match c.scissor {
                 Some([x, y, sw, sh]) => {
                     let (x, y) = (x.min(n - 1), y.min(n - 1));
@@ -266,6 +292,9 @@ impl Fx {
 
     /// Flight deck + display quads (inside the main pass, aircraft model matrix bound at group 1).
     pub fn draw_cockpit(&self, rp: &mut wgpu::RenderPass<'_>, model_pipe: &wgpu::RenderPipeline) -> u32 {
+        if let Some(d) = &self.deck {
+            return d.draw(rp, &self.deck_pipes, &self.panel_pipe, &self.panel_bg);
+        }
         rp.set_pipeline(model_pipe);
         rp.set_vertex_buffer(0, self.cp_vb.slice(..));
         rp.set_index_buffer(self.cp_ib.slice(..), wgpu::IndexFormat::Uint32);

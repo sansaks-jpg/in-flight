@@ -61,3 +61,18 @@ a native renderer and a cockpit HUD, not a 1:1 rewrite. In particular:
 ## Licence / credits
 
 Original project and `airports.json`: see `../reference/in-flight`. Font: DejaVu Sans Mono Bold (`assets/DEJAVU-LICENSE.txt`).
+
+## Satellite maps
+
+The pre-flight globe and the in-flight ground use real imagery streamed in the background (Esri World Imagery by default;
+Sentinel-2, OpenStreetMap, Topographic, NASA night lights and a dark chart can be picked on the globe, or cycled with `M`
+in flight). Tiles are cached on disk (`$INFLIGHT_TILE_CACHE`, default platform cache dir, 2 GiB LRU). Useful environment
+variables: `INFLIGHT_OFFLINE=1` (cache only), `INFLIGHT_NO_TILES=1` (procedural world, no network), `INFLIGHT_TILE_CACHE_MB`.
+Pre-download an area with `cargo run --release --bin tilecache -- KSFO`. See `TASK.md` section 4 for the architecture.
+
+## Interactive 3D Cockpit & Marketplace
+
+The A320 3D flight deck model (`cockpit.glb`, ~50.6 MB) can be downloaded via the in-game Marketplace:
+press **F2** or click the **ADD-ONS (F2)** button on the main menu to open the Marketplace and download.
+Once downloaded, the model is cached persistently on disk and loaded in the background with 596 interactive controls
+(raycast picking, press, drag, wheel) and 6 cockpit glass displays (PFD, ND, E/WD, SD). See `TASK.md` section 3 for details.

@@ -1,7 +1,9 @@
 //! Native window front-end (winit 0.30 `ApplicationHandler` + wgpu surface): menu, flight loop, input, camera rigs.
 
 use crate::airports::AirportDb;
+use crate::addons::State as AddonState;
 use crate::clock::unix_now;
+use crate::deckhost::DeckHost;
 use crate::game::{Action, Flight, PilotInput, Status};
 use crate::geo::*;
 use crate::ui::{self as pre_ui, screens, Input, Key, Outcome, PreFlight};
@@ -90,7 +92,14 @@ pub struct App {
     sim_ms: f32,
     frames: u64,
     last_log: Instant,
+    /// interactive HD flight deck (downloaded add-on) + A320 systems board
+    host: DeckHost,
+    prev_right: bool,
+    /// departure airport whose ground tiles were last queued for disk-cache warm-up
+    prefetched: String,
 }
+
+
 
 /// Maps a winit key to the UI key set (None for keys the pre-flight UI ignores).
 fn map_key(code: KeyCode) -> Option<Key> {
@@ -107,6 +116,7 @@ fn map_key(code: KeyCode) -> Option<Key> {
         KeyCode::PageUp => Key::PageUp,
         KeyCode::PageDown => Key::PageDown,
         KeyCode::F1 => Key::F(1),
+        KeyCode::F2 => Key::F(2),
         _ => return None,
     })
 }
@@ -144,8 +154,12 @@ impl App {
             sim_ms: 0.0,
             frames: 0,
             last_log: Instant::now(),
+            host: DeckHost::default(),
+            prev_right: false,
+            prefetched: String::new(),
         }
     }
+
 
     /// Queue a launch: the flight-loader scene is shown for a few frames, then the flight is built.
     fn begin_launch(&mut self, launch: Launch) {
@@ -166,6 +180,10 @@ impl App {
                 if self.opts.autostart {
                     f.apply(Action::ApAutoTakeoff);
                 }
+                // real imagery needs a flat reference surface: physics, GPWS and the renderer share it
+                f.terrain.flat = self.gpu.as_ref().is_some_and(|g| g.renderer.tiles().is_some());
+                self.host.reset_for_flight(&f);
+
                 self.flight = Some(f);
                 self.mode = Mode::Flight;
             }
@@ -175,6 +193,32 @@ impl App {
                 self.pre.goto(pre_ui::Screen::Planner);
             }
         }
+    }
+
+    /// Marketplace plumbing: preload the downloaded model on a worker thread, upload it to the GPU when parsed, drop it on removal.
+    fn service_addons(&mut self) {
+        let ev = std::mem::take(&mut self.pre.market_event);
+        if ev.started {
+            self.host.failed = false;
+        }
+        let Some(gpu) = self.gpu.as_mut() else { return };
+        if ev.removed || (ev.toggled && !self.pre.addons.enabled()) {
+            self.host.unload();
+            gpu.renderer.unload_deck();
+        }
+        if ev.toggled && self.pre.addons.enabled() {
+            self.host.failed = false;
+        }
+        if !self.host.ready() && !self.host.loading() && !self.host.failed && self.pre.addons.state() == AddonState::Installed {
+            if let Some((bytes, man)) = self.pre.addons.read_installed() {
+                self.host.start_load(bytes, man, crate::specs::A320.eye);
+            }
+        }
+        if let Some((mesh, images)) = self.host.poll() {
+            gpu.renderer.load_deck(&mesh, &images);
+            println!("{}", self.host.status);
+        }
+        self.pre.deck_ready = self.host.ready() && gpu.renderer.deck_loaded();
     }
 
     fn return_to_menu(&mut self) {
@@ -195,7 +239,7 @@ impl App {
         }))
         .expect("no suitable GPU adapter");
         let info = adapter.get_info();
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor { label: Some("in-flight"), ..Default::default() })).expect("device");
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor { label: Some("in-flight"), required_limits: crate::gfx::tile_limits(&adapter), ..Default::default() })).expect("device");
         let caps = surface.get_capabilities(&adapter);
         let format = caps.formats.iter().copied().find(|f| f.is_srgb()).unwrap_or(caps.formats[0]);
         let want = if self.opts.uncapped { [wgpu::PresentMode::Immediate, wgpu::PresentMode::Mailbox] } else { [wgpu::PresentMode::Fifo, wgpu::PresentMode::Fifo] };
@@ -249,7 +293,14 @@ impl App {
                         self.return_to_menu();
                     }
                     KeyCode::KeyP => self.paused = !self.paused,
+                    KeyCode::KeyM => {
+                        // cycle the map / ground imagery style (satellite, Sentinel-2, streets, terrain, night lights, dark)
+                        if let Some(h) = self.gpu.as_ref().and_then(|g| g.renderer.tiles()) {
+                            h.cycle_style(1);
+                        }
+                    }
                     KeyCode::F1 => self.help = !self.help,
+
                     KeyCode::KeyC => {
                         self.view = self.view.next();
                         self.cam.spot = None;
@@ -319,13 +370,28 @@ impl App {
         self.frame_ms += (dt as f32 * 1000.0 - self.frame_ms) * 0.05;
         self.fps = 1000.0 / self.frame_ms.max(0.01);
         self.update_input(dt);
+        self.service_addons();
+
+        // ---- warm the tile disk cache around a newly chosen departure airport (idle-priority, never blocks) ----
+        if matches!(self.mode, Mode::Pre) {
+            if self.prefetched.is_empty() {
+                self.prefetched = self.pre.planner.dep.clone(); // don't prefetch the default pick at start-up
+            } else if self.prefetched != self.pre.planner.dep {
+                self.prefetched = self.pre.planner.dep.clone();
+                if let (Some(h), Some(a)) = (self.gpu.as_ref().and_then(|g| g.renderer.tiles()), self.db.find(&self.prefetched)) {
+                    h.prefetch(crate::tiles::ground::prefetch_keys(h.style(), a.lat, a.lon));
+                }
+            }
+        }
 
         // ---- simulate ----
+
         let t_sim = Instant::now();
         if let (Mode::Flight, Some(f)) = (&self.mode, self.flight.as_mut()) {
             if !self.paused {
                 f.advance(dt, &self.input);
             }
+            self.host.update(if self.paused { 0.0 } else { dt }, f);
         }
         self.sim_ms += (t_sim.elapsed().as_secs_f32() * 1000.0 - self.sim_ms) * 0.05;
 
@@ -370,6 +436,32 @@ impl App {
         };
         let (utc, lat, lon, vis, cb, cc) = params_data;
 
+        // ---- interactive flight deck: cursor picking, press / drag / wheel, free-look on the right button ----
+        let interior = in_flight && self.view.is_interior();
+        let cam_copy = Camera { pos: cam.pos, fwd: cam.fwd, up: cam.up, fov_deg: cam.fov_deg, near: cam.near };
+        let deck_active = interior && self.host.ready();
+        if let (true, Some(f)) = (interior, self.flight.as_mut()) {
+            let right_pressed = self.inp.right_down && !self.prev_right;
+            let shift = self.keys.contains(&KeyCode::ShiftLeft) || self.keys.contains(&KeyCode::ShiftRight);
+            let size = gpu.config.width as f32;
+            let size = (size, gpu.config.height as f32);
+            let over = self.host.mouse(f, &cam_copy, self.inp.mouse, size, self.inp.pressed, self.inp.down, right_pressed, self.inp.delta, shift);
+            if self.inp.right_down && !self.host.captured && !(over && right_pressed) {
+                self.cam.head.apply(1.0, self.inp.delta[0] as f64 * 0.12, -(self.inp.delta[1] as f64) * 0.12, 0.0);
+            }
+            if self.host.wheel != 0.0 {
+                self.cam.head.apply(1.0, 0.0, 0.0, self.host.wheel as f64 * 0.12);
+                self.host.wheel = 0.0;
+            }
+            if self.host.ready() {
+                gpu.renderer.set_deck_slots(&self.host.slots);
+            }
+        } else {
+            self.host.hover = None;
+            self.host.captured = false;
+        }
+        self.prev_right = self.inp.right_down;
+
         // ---- acquire frame ----
         let frame = match gpu.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
@@ -386,6 +478,9 @@ impl App {
         let fps = self.fps;
         let help = self.help;
         let wall_utc = unix_now();
+        let host_ref = &self.host;
+        let mouse = self.inp.mouse;
+        let panels3d = in_flight && self.view.is_interior();
         let mut outcome = Outcome::None;
         {
             let pre = &mut self.pre;
@@ -407,6 +502,9 @@ impl App {
                 Mode::Flight => {
                     if let Some(f) = flight_ref {
                         ui::draw_hud(u, f, &info);
+                        if deck_active || (panels3d && !host_ref.ready()) {
+                            host_ref.draw_overlay(u, f, &cam_copy, mouse);
+                        }
                         if help {
                             let b = (u.h / 46.0).clamp(11.0, 26.0);
                             ui::draw_help(u, b);
@@ -533,6 +631,9 @@ impl ApplicationHandler for App {
                     MouseScrollDelta::PixelDelta(p) => p.y / 40.0,
                 };
                 if matches!(self.mode, Mode::Flight) {
+                    if self.view.is_interior() {
+                        self.host.wheel += y as f32;
+                    }
                     self.cam.dist = clamp(self.cam.dist * (1.0 - y * 0.08), 0.35, 6.0);
                 } else {
                     self.inp.wheel += y as f32;

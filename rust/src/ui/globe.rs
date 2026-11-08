@@ -6,7 +6,9 @@
 //! equations), airports glow as "city lights" on the night side. Dragging spins the globe with inertia, the wheel zooms,
 //! and [`Globe::fly_to`] performs the Google-Earth-style eased great-circle flight with a pull-back arc.
 
-use super::{Gui, ACCENT, AMBER, MAGENTA};
+use super::{Gui, ACCENT, AMBER, DIM, MAGENTA, MUTED};
+use crate::tiles::globe_tiles::{GlobeCam, GlobeTiles};
+use crate::tiles::styles;
 use crate::airports::{Airport, AirportDb};
 use crate::clock::subsolar_point;
 use crate::gfx::ui::Col;
@@ -217,6 +219,8 @@ pub struct Globe {
     row_b: Vec<Vtx>,
     /// number of cells emitted last frame (diagnostics / budget tests)
     pub last_cells: usize,
+    /// satellite / map tile LOD (textured on top of the procedural surface when a tile hub is attached)
+    pub tiles: GlobeTiles,
 }
 
 struct Basis {
@@ -262,6 +266,7 @@ impl Globe {
             row_a: Vec::with_capacity(512),
             row_b: Vec::with_capacity(512),
             last_cells: 0,
+            tiles: GlobeTiles::new(),
         }
     }
 
@@ -309,7 +314,9 @@ impl Globe {
 
         // ---------------- interaction
         let m = g.inp.mouse;
-        let in_clip = g.hover(view.clip[0], view.clip[1], view.clip[2], view.clip[3]);
+        let picker = Self::picker_rect(&view);
+        let on_picker = g.ui.tiles.is_some() && g.hover(picker[0], picker[1], picker[2], picker[3]);
+        let in_clip = g.hover(view.clip[0], view.clip[1], view.clip[2], view.clip[3]) && !on_picker;
         let in_disc = in_clip && ((m[0] - cx).powi(2) + (m[1] - cy).powi(2)) <= r * r;
         if interactive {
             if g.inp.pressed && in_clip {
@@ -343,7 +350,7 @@ impl Globe {
                 }
             }
             if in_clip && g.inp.wheel != 0.0 {
-                self.zoom = (self.zoom * (1.0 + g.inp.wheel as f64 * 0.16)).clamp(0.7, 60.0);
+                self.zoom = (self.zoom * (1.0 + g.inp.wheel as f64 * 0.16)).clamp(0.7, 220.0);
                 self.fly = None;
                 self.idle = 0.0;
             }
@@ -382,6 +389,7 @@ impl Globe {
         g.scissor(Some(clip));
         self.draw_atmosphere(g, cx, cy, r, &b, &sun);
         self.draw_surface(g, cx, cy, r, &b, &sun, &view);
+        self.draw_tiles(g, cx, cy, r, &sun, &view);
         if self.zoom < 3.5 {
             self.draw_graticule(g, cx, cy, r, &b);
         }
@@ -389,8 +397,54 @@ impl Globe {
         self.draw_airports(g, cx, cy, r, &b, &sun, db, marks);
         self.draw_route(g, cx, cy, r, &b, db, marks);
         self.draw_sun_marker(g, cx, cy, r, &b, &sun);
+        self.draw_layer_picker(g, &view);
         g.scissor(None);
         out
+    }
+
+    /// Streams + draws the satellite tile layer (GPU textured, day/night shaded). No-op without a tile hub.
+    fn draw_tiles(&mut self, g: &mut Gui, cx: f32, cy: f32, r: f32, sun: &[f64; 3], view: &GlobeView) {
+        let Some(hub) = g.ui.tiles.clone() else { return };
+        let s = g.s;
+        let cam = GlobeCam { lat: self.lat, lon: self.lon, cx, cy, r, clip: [view.clip[0] * s, view.clip[1] * s, view.clip[2] * s, view.clip[3] * s] };
+        g.ui.globe_sun = [sun[0] as f32, sun[1] as f32, sun[2] as f32, if styles::style(hub.style()).unlit { 1.0 } else { 0.0 }];
+        let start = g.ui.globe_begin();
+        self.tiles.draw(&hub, &cam, &mut g.ui.gverts);
+        g.ui.globe_end(start);
+    }
+
+    const PICK_W: f32 = 66.0;
+    const PICK_H: f32 = 20.0;
+    const PICK_GAP: f32 = 4.0;
+
+    /// Bottom-right corner of the globe area: [x, y, w, h] of the map-style chip row (virtual px).
+    fn picker_rect(view: &GlobeView) -> [f32; 4] {
+        let n = styles::STYLES.len() as f32;
+        let w = n * (Self::PICK_W + Self::PICK_GAP) - Self::PICK_GAP;
+        [view.clip[0] + view.clip[2] - 8.0 - w, view.clip[1] + view.clip[3] - 8.0 - Self::PICK_H, w, Self::PICK_H]
+    }
+
+    /// Map layer selector (satellite / Sentinel-2 / streets / terrain / night lights / dark) + attribution + load status.
+    fn draw_layer_picker(&mut self, g: &mut Gui, view: &GlobeView) {
+        let Some(hub) = g.ui.tiles.clone() else { return };
+        let [x0, y, w, _] = Self::picker_rect(view);
+        let cur = hub.style();
+        let right = x0 + w;
+        g.rect(x0 - 6.0, y - 24.0, w + 12.0, Self::PICK_H + 30.0, [0.0, 0.0, 0.0, 0.38]);
+        for (i, st) in styles::STYLES.iter().enumerate() {
+            if g.chip(x0 + i as f32 * (Self::PICK_W + Self::PICK_GAP), y, Self::PICK_W, Self::PICK_H, st.short, i as u8 == cur) {
+                hub.set_style(i as u8);
+            }
+        }
+        let st = styles::style(cur);
+        g.textf(right, y - 20.0, 9.0, DIM, 2, format_args!("MAP: {}", st.name.to_uppercase()));
+        let s = hub.stats();
+        if hub.busy() {
+            g.textf(x0, y - 20.0, 9.0, AMBER, 0, format_args!("LOADING {} TILES", s.queued + s.inflight + s.ready));
+        } else if s.net_fail > 0 && s.resident == 0 {
+            g.text(x0, y - 20.0, 9.0, AMBER, 0, "OFFLINE - CACHED TILES ONLY");
+        }
+        g.text(right, y - 10.0, 8.0, MUTED, 2, st.attribution);
     }
 
     /// Nearest drawn airport to a screen point (physical px), within ~14 px.

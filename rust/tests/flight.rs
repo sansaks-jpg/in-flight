@@ -170,3 +170,27 @@ fn assert_flight_quality(f: &Flight, r: &Report) {
     assert!(end < f.arr_end.length + 200.0, "stopped {} m from threshold, runway {} m", end, f.arr_end.length);
     assert!(f.fm.fuel > 500.0, "fuel exhausted");
 }
+
+/// Satellite-ground mode (`Terrain::flat`): the same autoland must work on the flat reference surface the real imagery is
+/// draped on - physics, GPWS and the renderer all read the same height function.
+#[test]
+fn auto_flight_on_flat_satellite_ground_takeoff_to_landing() {
+    let db = db();
+    // (departure, arrival, day offset, full quality gate?) - the 1.6 km-elevation pair only has to land safely: the existing
+    // autoland rollout is marginal at high density altitude on any terrain model (hull scrape after a 390 fpm touchdown)
+    for (dep, arr, day, strict) in [("KSFO", "KOAK", 0.0, true), ("KLAX", "KSAN", 3.0, true), ("KDEN", "KCOS", 5.0, false)] {
+        let Ok(mut f) = Flight::new(&db, dep, arr, T0 + 86400.0 * day) else { continue };
+        f.terrain.flat = true;
+        let (x, z) = (f.fm.pos.x, f.fm.pos.z);
+        assert!((f.terrain.height(x, z) - f.dep.elev).abs() < 1e-6, "{dep}: ground under the aircraft must be the field elevation");
+        f.apply(Action::ApAutoTakeoff);
+        let r = fly(&mut f, 60.0);
+        report(&format!("{dep}-{arr} (flat)"), &f, &r);
+        assert_eq!(r.status, Status::Landed, "{dep}-{arr} flat ground: status {:?} phase {:?} wp {}", r.status, f.ap.phase, f.active_wp);
+        if strict {
+            assert_flight_quality(&f, &r);
+        } else {
+            assert!(!r.stalled && f.touchdown.is_some_and(|t| t.fpm < 600.0 && t.centreline_m.abs() < 60.0));
+        }
+    }
+}

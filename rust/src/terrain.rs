@@ -19,6 +19,10 @@ pub struct Zone {
 pub struct Terrain {
     pub zones: Vec<Zone>,
     pub seed: u32,
+    /// Satellite-ground mode: the world is a flat surface at field elevation (blended between the departure and arrival
+    /// airports) so the real imagery draped over it is not distorted by procedural hills. Physics, GPWS and the
+    /// renderer all see the same flat surface.
+    pub flat: bool,
 }
 
 #[inline]
@@ -56,7 +60,7 @@ fn fbm(x: f64, z: f64, oct: u32, seed: u32) -> f64 {
 
 impl Terrain {
     pub fn new(seed: u32) -> Self {
-        Self { zones: Vec::new(), seed }
+        Self { zones: Vec::new(), seed, flat: false }
     }
 
     pub fn add_airport(&mut self, x: f64, z: f64, elev: f64) {
@@ -65,6 +69,9 @@ impl Terrain {
 
     /// Terrain height in metres MSL at world (x, z).
     pub fn height(&self, x: f64, z: f64) -> f64 {
+        if self.flat {
+            return self.flat_height(x, z);
+        }
         let n = fbm(x / 22000.0, z / 22000.0, 5, self.seed);
         let mut h = (n - 0.40) * 2200.0;
         let ridge = 1.0 - (2.0 * fbm(x / 7000.0, z / 7000.0, 4, self.seed ^ 0xA5A5) - 1.0).abs();
@@ -84,6 +91,28 @@ impl Terrain {
             if d < zn.r_blend {
                 let w = 1.0 - smoothstep(zn.r_flat, zn.r_blend, d);
                 h = lerp(h, zn.elev, w);
+            }
+        }
+        h
+    }
+
+    /// Flat ground: inverse-distance blend of the airport elevations (exactly the field elevation on every plateau).
+    fn flat_height(&self, x: f64, z: f64) -> f64 {
+        if self.zones.is_empty() {
+            return 0.0;
+        }
+        let (mut sum, mut wsum) = (0.0, 0.0);
+        for zn in &self.zones {
+            let d = ((x - zn.x).hypot(z - zn.z) - zn.r_flat).max(0.0) / 4000.0;
+            let w = 1.0 / (1.0 + d * d);
+            sum += zn.elev * w;
+            wsum += w;
+        }
+        let mut h = sum / wsum;
+        for zn in &self.zones {
+            let d = (x - zn.x).hypot(z - zn.z);
+            if d < zn.r_blend {
+                h = lerp(h, zn.elev, 1.0 - smoothstep(zn.r_flat, zn.r_blend, d));
             }
         }
         h
@@ -140,6 +169,32 @@ mod tests {
             let (x, z) = (1000.0 + a.cos() * 3000.0, -2000.0 + a.sin() * 3000.0);
             assert!((t.height(x, z) - 4.0).abs() < 1e-9);
         }
+    }
+
+    #[test]
+    fn flat_mode_is_level_at_both_fields_and_smooth_in_between() {
+        let mut t = Terrain::new(7);
+        t.add_airport(0.0, 0.0, 4.0);
+        t.add_airport(400_000.0, 0.0, 1600.0);
+        t.flat = true;
+        assert!((t.height(1200.0, -900.0) - 4.0).abs() < 1e-9, "departure plateau");
+        assert!((t.height(400_000.0 + 800.0, 300.0) - 1600.0).abs() < 1e-9, "arrival plateau");
+        let mut prev = t.height(0.0, 0.0);
+        let mut x = 0.0;
+        while x < 400_000.0 {
+            let h = t.height(x, 50_000.0);
+            assert!((h - prev).abs() < 60.0, "step at {x}: {prev} -> {h}");
+            assert!(h >= 3.99 && h <= 1600.01);
+            prev = h;
+            x += 500.0;
+        }
+        // procedural mode is untouched
+        t.flat = false;
+        assert!((t.height(30_000.0, 80_000.0) - Terrain { flat: true, ..t.clone() }.height(30_000.0, 80_000.0)).abs() > 1.0);
+        assert!((Terrain::new(1).height(5.0, 5.0)).is_finite());
+        let mut z = Terrain::new(1);
+        z.flat = true;
+        assert_eq!(z.height(1.0, 2.0), 0.0);
     }
 
     #[test]

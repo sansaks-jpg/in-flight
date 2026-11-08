@@ -195,7 +195,7 @@ const CATEGORIES: [(&str, &str); 5] = [
     ("Captions", "On-screen text for every spoken line, in the style of film subtitles."),
 ];
 
-fn window(g: &mut Gui, w: f32, h: f32, title: &str, close: &mut bool) -> (f32, f32) {
+pub(super) fn window(g: &mut Gui, w: f32, h: f32, title: &str, close: &mut bool) -> (f32, f32) {
     let (vw, vh) = (g.vw, g.vh);
     g.rect(0.0, 0.0, vw, vh, [0.0, 0.005, 0.015, 0.72]);
     let (x, y) = ((vw - w) * 0.5, (vh - h) * 0.5);
@@ -460,6 +460,7 @@ pub fn draw_modal(g: &mut Gui, kind: super::ModalKind, s: &mut Settings, tab: &m
         super::ModalKind::Settings => settings_window(g, s, tab, close, changed),
         super::ModalKind::Controls => controls_window(g, close),
         super::ModalKind::Logbook => logbook_window(g, log, scroll, close),
+        super::ModalKind::Marketplace => {} // drawn by `PreFlight::frame` (needs the add-on manager)
     }
     let _ = (DIM, PANEL);
 }

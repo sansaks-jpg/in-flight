@@ -237,6 +237,7 @@ pub enum MenuAction {
     Settings,
     Logbook,
     Controls,
+    Marketplace,
     Quit,
 }
 
@@ -417,6 +418,9 @@ pub fn draw_menu(g: &mut Gui, globe: &mut Globe, db: &AirportDb, utc: f64, dt: f
     // ---------------- bottom bar
     let by = h - 28.0;
     g.line([0.0, by - 6.0], [w, by - 6.0], 1.0, [1.0, 1.0, 1.0, 0.06]);
+    if g.btn(w - 150.0, by - 2.0, 130.0, 24.0, "ADD-ONS (F2)", super::BtnKind::Secondary) {
+        act = MenuAction::Marketplace;
+    }
     g.text(24.0, by + 2.0, 10.5, MUTED, 0, "Drag the globe - Wheel zoom - Enter: Flight Planner - F1: controls - Esc: quit");
     let (sl, so) = subsolar_point(utc);
     g.textf(w - 24.0, by + 2.0, 10.5, DIM, 2, format_args!("SUN OVERHEAD {:.1}{} {:.1}{}", sl.abs(), if sl >= 0.0 { "N" } else { "S" }, so.abs(), if so >= 0.0 { "E" } else { "W" }));

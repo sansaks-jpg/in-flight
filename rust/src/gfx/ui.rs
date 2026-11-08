@@ -7,6 +7,8 @@ use crate::geo::*;
 use crate::gpws::Alert;
 use crate::nav::PATH_TAN_DEG;
 use ab_glyph::{point, Font, FontRef, PxScale, ScaleFont};
+use crate::tiles::globe_tiles::GlobeV;
+use crate::tiles::TileHub;
 use bytemuck::{Pod, Zeroable};
 use std::fmt::Write;
 
@@ -72,10 +74,18 @@ pub struct DrawCmd {
     pub start: u32,
     pub count: u32,
     pub scissor: Option<[u32; 4]>,
+    /// true: `start..start+count` indexes `Ui::gverts` (textured globe tiles) instead of `Ui::verts`
+    pub globe: bool,
 }
 
 pub struct Ui {
     pub verts: Vec<UiV>,
+    /// textured globe-tile triangles (separate buffer + pipeline; ordered against `verts` through `cmds`)
+    pub gverts: Vec<GlobeV>,
+    /// sub-solar unit vector (xyz) + emissive flag (w) for the globe tile shader
+    pub globe_sun: [f32; 4],
+    /// handle to the tile streaming hub (None in GPU-less tests / screenshots => procedural globe only)
+    pub tiles: Option<TileHub>,
     pub cmds: Vec<DrawCmd>,
     cur_scissor: Option<[u32; 4]>,
     cmd_start: u32,
@@ -88,11 +98,12 @@ pub const MAX_UI_VERTS: usize = 240_000;
 
 impl Ui {
     pub fn new() -> Self {
-        Self { verts: Vec::with_capacity(MAX_UI_VERTS), cmds: Vec::with_capacity(64), cur_scissor: None, cmd_start: 0, buf: String::with_capacity(256), w: 1280.0, h: 720.0 }
+        Self { verts: Vec::with_capacity(MAX_UI_VERTS), gverts: Vec::new(), globe_sun: [1.0, 0.0, 0.0, 0.0], tiles: None, cmds: Vec::with_capacity(64), cur_scissor: None, cmd_start: 0, buf: String::with_capacity(256), w: 1280.0, h: 720.0 }
     }
 
     pub fn begin(&mut self, w: f32, h: f32) {
         self.verts.clear();
+        self.gverts.clear();
         self.cmds.clear();
         self.cur_scissor = None;
         self.cmd_start = 0;
@@ -103,13 +114,27 @@ impl Ui {
     fn flush(&mut self) {
         let n = self.verts.len() as u32;
         if n > self.cmd_start {
-            self.cmds.push(DrawCmd { start: self.cmd_start, count: n - self.cmd_start, scissor: self.cur_scissor });
+            self.cmds.push(DrawCmd { start: self.cmd_start, count: n - self.cmd_start, scissor: self.cur_scissor, globe: false });
         }
         self.cmd_start = n;
     }
 
     pub fn end(&mut self) {
         self.flush();
+    }
+
+    /// Starts a textured-globe batch: pending 2D geometry is flushed first so draw order is preserved. Push the tile
+    /// vertices into `gverts`, then call [`Ui::globe_end`] with the index returned here.
+    pub fn globe_begin(&mut self) -> usize {
+        self.flush();
+        self.gverts.len()
+    }
+
+    pub fn globe_end(&mut self, start: usize) {
+        let n = self.gverts.len();
+        if n > start {
+            self.cmds.push(DrawCmd { start: start as u32, count: (n - start) as u32, scissor: self.cur_scissor, globe: true });
+        }
     }
 
     pub fn scissor(&mut self, r: Option<[f32; 4]>) {

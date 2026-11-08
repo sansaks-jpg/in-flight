@@ -40,6 +40,9 @@ impl Raster {
     /// Draws everything recorded in `ui` (call after `ui.end()`).
     pub fn draw(&mut self, ui: &Ui) {
         for c in &ui.cmds {
+            if c.globe {
+                continue; // textured globe tiles are GPU-only; the procedural underlay is rasterised instead
+            }
             let sc = c.scissor.unwrap_or([0, 0, self.w as u32, self.h as u32]);
             let (sx0, sy0, sx1, sy1) = (sc[0] as i32, sc[1] as i32, (sc[0] + sc[2]).min(self.w as u32) as i32, (sc[1] + sc[3]).min(self.h as u32) as i32);
             let verts = &ui.verts[c.start as usize..(c.start + c.count) as usize];

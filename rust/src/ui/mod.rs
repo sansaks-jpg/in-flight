@@ -19,6 +19,7 @@ pub mod a320;
 pub mod dispatch;
 pub mod globe;
 pub mod map;
+pub mod market;
 pub mod modals;
 pub mod planner;
 pub mod raster;
@@ -309,6 +310,8 @@ pub enum ModalKind {
     Settings,
     Controls,
     Logbook,
+    /// add-on downloader (`market.rs`)
+    Marketplace,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -332,6 +335,12 @@ pub struct PreFlight {
     pub fade: f32,
     pub time: f64,
     pub started: bool,
+    /// add-on manager behind the Marketplace window (persistent cache + background downloads)
+    pub addons: crate::addons::AddonManager,
+    /// the HD flight deck is parsed and uploaded (set by the app, shown in the Marketplace)
+    pub deck_ready: bool,
+    /// last Marketplace interaction (the app consumes it: preload / unload the model)
+    pub market_event: market::MarketEvent,
 }
 
 impl PreFlight {
@@ -349,6 +358,9 @@ impl PreFlight {
             fade: 0.0,
             time: 0.0,
             started: false,
+            addons: crate::addons::AddonManager::new(),
+            deck_ready: false,
+            market_event: market::MarketEvent::default(),
         }
     }
 
@@ -392,6 +404,10 @@ impl PreFlight {
             self.modal = if self.modal == Some(ModalKind::Controls) { None } else { Some(ModalKind::Controls) };
         }
 
+        if inp.key(Key::F(2)) && self.screen != Screen::Boot {
+            self.modal = if self.modal == Some(ModalKind::Marketplace) { None } else { Some(ModalKind::Marketplace) };
+        }
+
         let had_modal = self.modal.is_some();
         g.block = had_modal;
         match self.screen {
@@ -412,6 +428,7 @@ impl PreFlight {
                     screens::MenuAction::Settings => self.modal = Some(ModalKind::Settings),
                     screens::MenuAction::Logbook => self.modal = Some(ModalKind::Logbook),
                     screens::MenuAction::Controls => self.modal = Some(ModalKind::Controls),
+                    screens::MenuAction::Marketplace => self.modal = Some(ModalKind::Marketplace),
                     screens::MenuAction::Quit => out = Outcome::Quit,
                 }
             }
@@ -439,7 +456,14 @@ impl PreFlight {
             // the click that just opened the window must not also act inside it (e.g. close it as a backdrop click)
             g.mute_click = !had_modal;
             let (mut close, mut settings_changed) = (false, false);
-            modals::draw_modal(&mut g, kind, &mut self.settings, &mut self.settings_tab, &mut self.logbook, &mut self.logbook_scroll, &mut close, &mut settings_changed);
+            if kind == ModalKind::Marketplace {
+                let ev = market::draw_marketplace(&mut g, &mut self.addons, self.deck_ready, &mut close);
+                self.market_event.started |= ev.started;
+                self.market_event.toggled |= ev.toggled;
+                self.market_event.removed |= ev.removed;
+            } else {
+                modals::draw_modal(&mut g, kind, &mut self.settings, &mut self.settings_tab, &mut self.logbook, &mut self.logbook_scroll, &mut close, &mut settings_changed);
+            }
             if settings_changed {
                 self.settings.save();
             }

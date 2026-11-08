@@ -61,10 +61,10 @@ struct WOut { @builtin(position) clip: vec4<f32>, @location(0) world: vec3<f32>,
 @vertex fn vs_water(@builtin(vertex_index) vi: u32) -> WOut {
     var c = array<vec2<f32>, 6>(vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0, 1.0), vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, 1.0), vec2<f32>(-1.0, 1.0));
     let k = c[vi] * 400000.0;
-    let rel = vec3<f32>(k.x, -g.cam_pos.y, k.y);
+    let rel = vec3<f32>(k.x, g.env2.w - g.cam_pos.y, k.y);
     var o: WOut;
     o.clip = g.view_proj * vec4<f32>(rel, 1.0);
-    o.world = vec3<f32>(g.cam_pos.x + k.x, 0.0, g.cam_pos.z + k.y);
+    o.world = vec3<f32>(g.cam_pos.x + k.x, g.env2.w, g.cam_pos.z + k.y);
     o.dist = length(rel);
     return o;
 }
