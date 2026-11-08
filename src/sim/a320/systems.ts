@@ -224,8 +224,9 @@ export class A320Systems {
       // Flaps / slats: Blue + Green hydraulic motors – with both lost the surfaces stay where they are
       if (hy.green < 1500 && hy.blue < 1500) { if (this.flapHold < 0) this.flapHold = c.flapsIdx; if (c.flapsIdx !== this.flapHold) { c.flapsIdx = this.flapHold; warn('FLAPS / SLATS INOP – GREEN + BLUE HYD LOST'); } } else this.flapHold = -1;
       // Landing gear: retraction needs Green; extension falls back to gravity (GRVTY GEAR EXTN)
-      if (hy.green < 1500) { if (!c.gearDown && this.gearHold) { c.gearDown = true; warn('GEAR RETRACTION INOP – GREEN HYD LOST'); } } else this.gearHold = c.gearDown;
-      if (hy.green >= 1500) this.gearHold = c.gearDown; else this.gearHold = true;
+      if (hy.green < 1500) { if (!c.gearDown && this.gearHold) { c.gearDown = true; warn('GEAR RETRACTION INOP – GREEN HYD LOST'); } }
+      // Track the handle while Green is healthy; once it is lost the gear is held down (and gravity-extends if it was up).
+      this.gearHold = hy.green >= 1500 ? c.gearDown : true;
       // Spoilers / speedbrakes: each of G / B / Y drives two surfaces per wing
       const sources = (hy.green > 1500 ? 1 : 0) + (hy.blue > 1500 ? 1 : 0) + (hy.yellow > 1500 ? 1 : 0);
       c.speedbrake = Math.min(c.speedbrake, sources / 3 + 0.001);

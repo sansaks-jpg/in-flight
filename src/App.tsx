@@ -311,20 +311,19 @@ export default function App() {
           hideGlobe
           bgMode={menuBgMode}
           onToggleBgMode={() => {
-            setMenuBgMode((prev) => {
-              const next = prev === 'globe' ? 'airport' : 'globe';
-              const gInst = gameRef.current;
-              if (gInst) {
-                if (next === 'airport') {
-                  gInst.suspended = false;
-                  gInst.load(cfgOf(settingsRef.current), 'attract');
-                } else {
-                  gInst.suspended = true;
-                  gInst.stopRadio();
-                }
+            // Side effects stay out of the setState updater: StrictMode invokes updaters twice, which loaded the scene twice.
+            const next = menuBgMode === 'globe' ? 'airport' : 'globe';
+            const gInst = gameRef.current;
+            if (gInst) {
+              if (next === 'airport') {
+                gInst.suspended = false;
+                void gInst.load(cfgOf(settingsRef.current), 'attract');
+              } else {
+                gInst.suspended = true;
+                gInst.stopRadio();
               }
-              return next;
-            });
+            }
+            setMenuBgMode(next);
           }}
         />
       )}

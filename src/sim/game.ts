@@ -14,11 +14,12 @@ import { Projection, haversine, bearing, wrap180, wrap360, D2R, R2D, clamp, M_PE
 import { World, Threshold, TimeOfDay } from './world';
 import { AircraftVisual, loadAircraftVisual } from './aircraftModel';
 import { Cockpit, CockpitPreset, CockpitHost, COCKPIT_FOCUS } from './cockpit';
+import type { CockpitInputs, CockpitUi } from './a320/proceduralCockpit';
 import type { EfbInfo } from './a320/efb';
 import { probeRenderCaps } from './a320/cockpitRender';
 import { PanelData } from './instruments';
 import { Autopilot, IlsData, minSpeedKt } from './autopilot';
-import { advanceWaypoint, cruiseLevelM, PATH_TAN, planDistanceM } from './lnav';
+import { advanceWaypoint, cruiseLevelM, PATH_TAN, planCruiseAltM, planDistanceM } from './lnav';
 import { AudioEngine, WarnSound } from './audio';
 import { CommsDirector, type CommsSnap, type CommsCtx } from './comms';
 import type { Caption, CaptionKind } from './speech';
@@ -280,6 +281,27 @@ export function buildFlightPlan(
   return wps;
 }
 
+type VoiceCue = readonly [string, string, number];
+const VC_STALL: VoiceCue = ['Stall', 'stall', 2.4];
+const VC_OS: VoiceCue = ['Overspeed', 'os', 3];
+const VC_PU: VoiceCue = ['Terrain. Pull up!', 'pu', 1.6];
+const VC_TR: VoiceCue = ['Terrain, terrain', 'tr', 4];
+const VC_SR: VoiceCue = ['Sink rate', 'sr', 3];
+const VC_TLG: VoiceCue = ['Too low, gear', 'tlg', 2.5];
+const VC_BA: VoiceCue = ['Bank angle', 'ba', 3];
+const VC_PB: VoiceCue = ['Parking brake', 'pb', 3];
+const VC_CF: VoiceCue = ['Flaps. Takeoff configuration', 'cf', 4];
+const VC_EF: VoiceCue = ['Engine failure', 'ef', 8];
+const RADIO_ALT_CALLS = [{ h: 500, text: 'Five hundred', id: 'c500' }, { h: 100, text: 'One hundred', id: 'c100' }, { h: 50, text: 'Fifty', id: 'c50' }, { h: 30, text: 'Thirty', id: 'c30' }, { h: 20, text: 'Twenty', id: 'c20' }, { h: 10, text: 'Ten', id: 'c10' }];
+
+const expo = (x: number) => x * 0.65 + x * x * x * 0.35;
+const padDeadzone = (v: number) => (Math.abs(v) < 0.12 ? 0 : v);
+/** Moves a keyboard-driven axis toward its target: fast when pushing away from centre / reversing, slower when releasing. */
+function slewAxis(cur: number, tgt: number, up: number, down: number, dt: number) {
+  const rate = Math.abs(tgt) > Math.abs(cur) || Math.sign(tgt) !== Math.sign(cur) ? up : down;
+  return cur + clamp(tgt - cur, -rate * dt, rate * dt);
+}
+
 export class Game {
   renderer: THREE.WebGLRenderer; camera = new THREE.PerspectiveCamera(65, 1, 2, 220000);
   audio = new AudioEngine();
@@ -365,6 +387,10 @@ export class Game {
   // Checklist state
   checklistItems: ChecklistItem[] = DEFAULT_CHECKLIST_ITEMS.map((item) => ({ ...item }));
 
+  // Named so dispose() can detach them (a discarded Game must stop receiving input, e.g. across StrictMode remounts).
+  private onContextMenu = (e: Event) => e.preventDefault();
+  private onVisPause = () => { if (document.hidden && this.phase === 'playing') this.pause(); };
+  private onVisVoice = () => { if (typeof document !== 'undefined') this.syncVoice(); };
   constructor(public canvas: HTMLCanvasElement, hooks: Hooks) {
     this.hooks = hooks;
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, stencil: true, powerPreference: 'high-performance', logarithmicDepthBuffer: false }); // stencil: flight-deck occlusion mask (see render())
@@ -374,12 +400,12 @@ export class Game {
     window.addEventListener('resize', this.resize);
     window.addEventListener('keydown', this.onKeyDown); window.addEventListener('keyup', this.onKeyUp); window.addEventListener('blur', this.onBlur); document.documentElement.addEventListener('pointerleave', this.onPointerLeaveDoc);
     canvas.addEventListener('pointerdown', this.onPointerDown); window.addEventListener('pointermove', this.onPointerMove); window.addEventListener('pointerup', this.onPointerUp); window.addEventListener('pointercancel', this.onPointerUp);
-    canvas.addEventListener('wheel', this.onWheel, { passive: true }); canvas.addEventListener('contextmenu', (e) => e.preventDefault());
-    document.addEventListener('visibilitychange', () => { if (document.hidden && this.phase === 'playing') this.pause(); });
+    canvas.addEventListener('wheel', this.onWheel, { passive: true }); canvas.addEventListener('contextmenu', this.onContextMenu);
+    document.addEventListener('visibilitychange', this.onVisPause);
     this.last = performance.now(); this.raf = requestAnimationFrame(this.loop);
     // A hidden tab stops the RAF loop, so the per-frame radio gate would never run again: pause the
     // frequency the moment the tab is hidden, and re-gate it when the tab comes back.
-    document.addEventListener('visibilitychange', () => { if (typeof document !== 'undefined') this.syncVoice(); });
+    document.addEventListener('visibilitychange', this.onVisVoice);
     // Every voice line (ATC, crew, PA, GPWS) is logged and captioned from one place: the voice bus.
     this.audio.hooks.onLog = (c) => this.logCaption(c);
     this.audio.hooks.onLive = (c) => { this.atcLive = c ? this.captionMessage(c) : null; };
@@ -411,7 +437,10 @@ export class Game {
   // =====================================================================================
   //  Scenario management
   // =====================================================================================
+  /** Incremented by every load(): a load that finds a newer one started while it was awaiting abandons its work instead of writing into the newer scenario. */
+  private loadSeq = 0;
   async load(cfg: ScenarioConfig, mode: 'attract' | 'play', startMode: 'runway' | 'cruise' | 'final' = 'runway') {
+    const token = ++this.loadSeq, superseded = () => token !== this.loadSeq;
     this.disposeScenario();
     this.cfg = cfg; this.mode = mode; this.spec = specById(cfg.aircraftId);
     this.dprScale = 1; this.emaFrameMs = 16.6; this.dprCooldown = 1.0;
@@ -443,15 +472,19 @@ export class Game {
     // lightning → procedural thunder with the real speed-of-sound delay (~343 m/s) and distance
     // falloff; only in play mode so the airport-background menu never rumbles
     if (mode === 'play') this.world.lightning.onStrike = (distM) => this.audio.thunder(clamp(1 - distM / 15000, 0.06, 1), distM / 343);
-    this.visual = await loadAircraftVisual(this.spec); this.world.scene.add(this.visual.root);
+    const world = this.world, visual = await loadAircraftVisual(this.spec);
+    if (superseded()) return;
+    this.visual = visual; world.scene.add(visual.root);
     loadState.stage('deck');
-    this.cockpit = new Cockpit(this.spec, this.quality); this.cockpit.host = this.makeCockpitHost(); await this.cockpit.ready;
+    const cockpit = new Cockpit(this.spec, this.quality); cockpit.host = this.makeCockpitHost(); this.cockpit = cockpit; await cockpit.ready;
+    if (superseded()) { cockpit.dispose(); return; } // the newer load() already disposed what it found, but this deck finished loading afterwards
     for (const cam of [this.cockpit.camera, this.cockpit.activeCamera]) { cam.aspect = this.camera.aspect; cam.updateProjectionMatrix(); }
     this.audio.voiceOn = s.voice; this.audio.setVolume(s.volume); this.audio.setMuted(s.muted);
     loadState.stage('weather');
     // REAL weather: METAR + model data for the departure airfield (no presets). Never blocks the sim for more than a few seconds.
     let wx: LiveWx = OFFLINE_WX;
     try { wx = await Promise.race([fetchLiveWeather(from.lat, from.lon, from.icao), new Promise<LiveWx>((_, rej) => setTimeout(() => rej(new Error('timeout')), 7000))]); } catch { wx = { ...OFFLINE_WX, lat: from.lat, lon: from.lon, elevM: from.elev }; }
+    if (superseded()) return;
     this.wxPoint = [from.lat, from.lon];
     this.applyLiveWx(wx, from.elev);
     this.world.rebuildAirports(from.lat, from.lon);
@@ -464,7 +497,7 @@ export class Game {
     this.world.scene.add(this.navAssistsGroup);
 
     this.resetFlight(startMode);
-    this.camera.fov = 65; this.setView(mode === 'attract' ? 'chase' : s.startMode === 'runway' ? 'cockpit' : 'cockpit');
+    this.camera.fov = 65; this.setView(mode === 'attract' ? 'chase' : 'cockpit');
     this.world.update(this.camera, this.fm.pos, 1, 0);
     this.resize();
     loadState.stage('terrain'); // from here on the loading screen follows the terrain tile streaming
@@ -504,6 +537,8 @@ export class Game {
     this.wxBusy = false;
   }
 
+  /** Start mode actually used by the last resetFlight() (a 'final' request degrades to 'cruise' when the destination has no runway). */
+  private effStartMode: 'runway' | 'cruise' | 'final' = 'runway';
   /** Re-spawn the aircraft (instant restart – terrain stays loaded). */
   resetFlight(startMode: 'runway' | 'cruise' | 'final') {
     const w = this.world!, cfg = this.cfg, spec = this.spec, from = cfg.from, to = cfg.to;
@@ -520,6 +555,8 @@ export class Game {
     this.depRwy = dep ? dep.ident : '';
     this.world!.rebuildAirports(from.lat, from.lon);
     const arr = this.bestApproach(to, from);
+    if (startMode === 'final' && !arr) startMode = 'cruise'; // no runway data at the destination: a final-approach start is impossible
+    this.effStartMode = startMode;
     const wantArr = cfg.arrRwy && w.thresholds(to).find((t) => t.ident === cfg.arrRwy);
     if (wantArr) { this.apprKey = wantArr.ident; this.apprLocked = true; }
     else if (!this.apprLocked) this.apprKey = arr ? arr.ident : '';
@@ -536,7 +573,7 @@ export class Game {
       this.fm.placeAirborne(w.proj.x(lo), alt, w.proj.z(la), brg, spec.cruiseKt * 0.9, 0, false);
       this.fm.ctl.throttle = 0.6; this.ap.engage(this.fm); this.ap.nav = true; this.fm.ctl.apHold = true; this.usedAp = true;
     } else {
-      const th = this.bestApproach(to, from) ;
+      const th = arr!; // startMode === 'final' implies arr (checked above)
       const d0 = 14000, h = th.hdg * D2R;
       const x = th.x - Math.sin(h) * d0, z = th.z + Math.cos(h) * d0, alt = to.elev + 15 + Math.tan(3 * D2R) * d0 + 60;
       this.fm.placeAirborne(x, alt, z, th.hdg, spec.vapp * 1.35, 0, false);
@@ -559,7 +596,7 @@ export class Game {
     } else if (startMode === 'final') {
       this.addAtc('TOWER', `${this.callsign.callsign}, ${to.icao} Tower. Established final approach runway ${this.apprKey || '27'}, cleared to land.`, true);
     } else {
-      this.addAtc('ENROUTE', `${this.callsign.callsign}, radar contact at ${Math.round(spec.cruiseAlt / 0.3048)} ft, cleared enroute ${to.icao}.`, false);
+      this.addAtc('ENROUTE', `${this.callsign.callsign}, radar contact at ${this.ftRound(this.fm.pos.y, 100).toLocaleString('en-US')} ft, cleared enroute ${to.icao}.`, false);
     }
     this.lastLL = [this.lat(), this.lon()]; this.bestRem = dist; this.chaseInit = false; this.shakeImpulse = 0; this.lookYaw = this.lookPitch = 0; this.zoom = 1;
     this.effects?.update(0);
@@ -579,7 +616,7 @@ export class Game {
       this.activeWpIdx = idx >= 0 ? idx : Math.min(previousIdx, this.flightPlan.length - 1);
     } else if (this.cfg.settings.startMode === 'runway' && !this.takeoffDone) {
       this.activeWpIdx = 0;
-    } else if (this.cfg.settings.startMode === 'final') {
+    } else if (this.effStartMode === 'final') {
       const fafIdx = this.flightPlan.findIndex((w) => w.type === 'faf');
       this.activeWpIdx = fafIdx >= 0 ? fafIdx : Math.max(0, this.flightPlan.length - 2);
     } else {
@@ -754,8 +791,10 @@ export class Game {
     }
     return best;
   }
-  private bestApproach(to: Airport, from: Airport): Threshold {
+  /** Best arrival runway, or null when the airport has no usable runway threshold. */
+  private bestApproach(to: Airport, from: Airport): Threshold | null {
     const ths = this.world!.thresholds(to), p = this.world!.proj;
+    if (!ths.length) return null;
     const fx = p.x(from.lon), fz = p.z(from.lat);
     const maxLen = Math.max(...ths.map((t) => t.len));
     let best = ths[0], bs = -1e9;
@@ -964,8 +1003,11 @@ export class Game {
     }
   }
   dispose() {
-    cancelAnimationFrame(this.raf); this.disposeScenario(); this.stopRadio();
+    cancelAnimationFrame(this.raf); this.disposeScenario(); this.stopRadio(); this.audio.close();
     window.removeEventListener('resize', this.resize); window.removeEventListener('keydown', this.onKeyDown); window.removeEventListener('keyup', this.onKeyUp); window.removeEventListener('blur', this.onBlur); document.documentElement.removeEventListener('pointerleave', this.onPointerLeaveDoc); window.clearTimeout(this.hoverTimer);
+    this.canvas.removeEventListener('pointerdown', this.onPointerDown); window.removeEventListener('pointermove', this.onPointerMove); window.removeEventListener('pointerup', this.onPointerUp); window.removeEventListener('pointercancel', this.onPointerUp);
+    this.canvas.removeEventListener('wheel', this.onWheel); this.canvas.removeEventListener('contextmenu', this.onContextMenu);
+    document.removeEventListener('visibilitychange', this.onVisPause); document.removeEventListener('visibilitychange', this.onVisVoice);
     this.renderer.dispose();
     if ((window as any).sim === this) delete (window as any).sim;
   }
@@ -1043,7 +1085,7 @@ export class Game {
   restart() {
     if (!this.world) return;
     const sm = this.cfg.settings.startMode;
-    this.resetFlight(sm); this.setView(this.cfg.settings.startMode === 'final' ? 'cockpit' : 'cockpit');
+    this.resetFlight(sm); this.setView('cockpit');
     this.effects?.update(0.1); this.setPhase('playing'); this.last = performance.now(); this.audio.start();
     this.toast('Flight restarted', 'info');
   }
@@ -1615,34 +1657,30 @@ export class Game {
     this.visual!.root.position.copy(fm.pos); this.visual!.root.quaternion.copy(fm.quat); this.visual!.setInterior(false); this.visual!.update(fm, dt, t, { ...this.lights, land: true, strobe: true });
   }
 
+  /** Gamepad button edge detector (press only); previous states live in a fixed array instead of dynamic `_gpN` properties. */
+  private padPrev: boolean[] = [];
+  private padEdge(gp: Gamepad, i: number, id: string) { const p = !!gp.buttons[i]?.pressed; if (p && !this.padPrev[i]) this.action(id); this.padPrev[i] = p; }
   private applyControls(dt: number) {
     const fm = this.fm, c = fm.ctl, s = this.spec, set = this.cfg.settings;
     const k = this.keys; const inv = set.invertPitch ? -1 : 1;
-    const raw = {
-      pitch: ((k.has('s') || k.has('ArrowDown') ? 1 : 0) - (k.has('w') || k.has('ArrowUp') ? 1 : 0)) * inv,
-      roll: (k.has('d') || k.has('ArrowRight') ? 1 : 0) - (k.has('a') || k.has('ArrowLeft') ? 1 : 0),
-      yaw: (k.has('e') ? 1 : 0) - (k.has('q') ? 1 : 0),
-    };
+    const rawPitch = ((k.has('s') || k.has('ArrowDown') ? 1 : 0) - (k.has('w') || k.has('ArrowUp') ? 1 : 0)) * inv;
+    const rawRoll = (k.has('d') || k.has('ArrowRight') ? 1 : 0) - (k.has('a') || k.has('ArrowLeft') ? 1 : 0);
+    const rawYaw = (k.has('e') ? 1 : 0) - (k.has('q') ? 1 : 0);
     // Gentler, finer keyboard slews (full deflection in ~0.55 s, centre in ~0.2 s) – the old 0.3 s ramp made precise flying impossible.
     const upBase = 1.8 * set.sens, down = 5;
-    for (const ax of ['pitch', 'roll', 'yaw'] as const) {
-      const up = ax === 'yaw' ? upBase * 1.5 : upBase;
-      const cur = this.axes[ax], tgt = raw[ax]; const rate = Math.abs(tgt) > Math.abs(cur) || Math.sign(tgt) !== Math.sign(cur) ? up : down;
-      this.axes[ax] = cur + clamp(tgt - cur, -rate * dt, rate * dt);
-    }
+    this.axes.pitch = slewAxis(this.axes.pitch, rawPitch, upBase, down, dt);
+    this.axes.roll = slewAxis(this.axes.roll, rawRoll, upBase, down, dt);
+    this.axes.yaw = slewAxis(this.axes.yaw, rawYaw, upBase * 1.5, down, dt);
     // gamepad
     const gp = navigator.getGamepads ? navigator.getGamepads()[0] : null;
     if (gp) {
-      const dz = (v: number) => (Math.abs(v) < 0.12 ? 0 : v);
-      this.pad = { roll: dz(gp.axes[0] || 0), pitch: dz(gp.axes[1] || 0) * inv, yaw: dz(gp.axes[2] || 0) };
+      this.pad.roll = padDeadzone(gp.axes[0] || 0); this.pad.pitch = padDeadzone(gp.axes[1] || 0) * inv; this.pad.yaw = padDeadzone(gp.axes[2] || 0);
       const rt = gp.buttons[7]?.value || 0, lt = gp.buttons[6]?.value || 0; c.throttle = clamp(c.throttle + (rt - lt) * 0.5 * dt, 0, 1);
-      const edge = (i: number, id: string) => { const p = !!gp.buttons[i]?.pressed; if (p && !(this as any)['_gp' + i]) this.action(id); (this as any)['_gp' + i] = p; };
-      edge(0, 'gear'); edge(1, 'park'); edge(4, 'flaps-'); edge(5, 'flaps+'); edge(3, 'pa'); edge(2, 'ap');
+      this.padEdge(gp, 0, 'gear'); this.padEdge(gp, 1, 'park'); this.padEdge(gp, 4, 'flaps-'); this.padEdge(gp, 5, 'flaps+'); this.padEdge(gp, 3, 'pa'); this.padEdge(gp, 2, 'ap');
       // D-pad for ATC quick responses: 12: Up -> atc1, 13: Down -> atc2, 14: Left -> atc3, 15: Right -> atc4
-      edge(12, 'atc1'); edge(13, 'atc2'); edge(14, 'atc3'); edge(15, 'atc4');
-      edge(8, 'hudMode'); edge(9, 'pause');
+      this.padEdge(gp, 12, 'atc1'); this.padEdge(gp, 13, 'atc2'); this.padEdge(gp, 14, 'atc3'); this.padEdge(gp, 15, 'atc4');
+      this.padEdge(gp, 8, 'hudMode'); this.padEdge(gp, 9, 'pause');
     }
-    const expo = (x: number) => x * 0.65 + x * x * x * 0.35;
     let pitch = clamp(expo(this.axes.pitch) + this.touch.pitch * inv + this.pad.pitch + (this.yokeDrag ? this.yokeDrag.pitch : 0), -1, 1);
     let roll = clamp(expo(this.axes.roll) + this.touch.roll + this.pad.roll + (this.yokeDrag ? this.yokeDrag.roll : 0), -1, 1);
     let yaw = clamp(this.axes.yaw + this.touch.yaw + this.pad.yaw, -1, 1);
@@ -1851,52 +1889,77 @@ export class Game {
   //  Warnings (audible + visual): stall, overspeed, GPWS (terrain/sink/pull-up), gear, bank, config, fuel
   // =====================================================================================
   private updateWarnings(dt: number) {
-    const fm = this.fm, s = this.spec, c = fm.ctl, L = fm.limits(), list: { text: string; level: 'caution' | 'warning'; sound: WarnSound }[] = [];
+    const fm = this.fm, s = this.spec, c = fm.ctl, L = fm.limits(this.limScratch), list = this.warnState; list.length = 0;
     const kias = L.kias; const aglM = fm.agl, vs = fm.vs;
     const inFlight = !fm.wow && fm.airborneTime > 1;
-    let voice: [string, string, number] | null = null;
-    if (inFlight && (fm.stalled || (fm.stallWarn && fm.alpha > fm.alphaStall * 0.97))) { list.push({ text: 'STALL', level: 'warning', sound: 'stall' }); voice = ['Stall', 'stall', 2.4]; if (!this.wasStalled) { this.penalize('stall', 'Stall', 60, 10); this.comfort -= 6; this.shakeImpulse = 0.4; } this.wasStalled = true; } else this.wasStalled = false;
-    if (L.overspeed) { list.push({ text: 'OVERSPEED', level: 'warning', sound: 'overspeed' }); this.overspeedT += dt; this.penalize('os', 'Overspeed', 40, 5); voice = voice || ['Overspeed', 'os', 3]; } else this.overspeedT = 0;
+    let voice: VoiceCue | null = null;
+    if (inFlight && (fm.stalled || (fm.stallWarn && fm.alpha > fm.alphaStall * 0.97))) { this.pushWarn(list, 'STALL', 'warning', 'stall'); voice = VC_STALL; if (!this.wasStalled) { this.penalize('stall', 'Stall', 60, 10); this.comfort -= 6; this.shakeImpulse = 0.4; } this.wasStalled = true; } else this.wasStalled = false;
+    if (L.overspeed) { this.pushWarn(list, 'OVERSPEED', 'warning', 'overspeed'); this.overspeedT += dt; this.penalize('os', 'Overspeed', 40, 5); voice = voice || VC_OS; } else this.overspeedT = 0;
     // terrain look-ahead (GPWS)
     if (inFlight) {
       const w = this.world!, v = fm.vel; let danger = 0;
       const landingCfg = c.gearDown && fm.gearPos > 0.9 && c.flapsIdx >= 1;
-      const nearRwy = this.nearAirport(9000) && landingCfg;
+      const nearRwy = landingCfg && this.nearAirport(9000);
       for (let t = 2; t <= 12 && !danger; t += 1.5) {
         const px = fm.pos.x + v.x * t, pz = fm.pos.z + v.z * t, py = fm.pos.y + v.y * t - (this.spec.gear[1].pos[1] * -1);
         const clear = py - w.terrain.heightAt(px, pz);
         if (clear < 35 && t <= 6) danger = 2; else if (clear < 110 && t <= 12) danger = 1;
       }
-      if (danger && !nearRwy && aglM < 1500) { if (danger === 2) { list.push({ text: 'PULL UP', level: 'warning', sound: 'pullup' }); voice = ['Terrain. Pull up!', 'pu', 1.6]; this.penalize('gpws', 'Terrain warning (GPWS)', 75, 8); this.comfort -= 0.05; } else { list.push({ text: 'TERRAIN', level: 'caution', sound: 'terrain' }); voice = voice || ['Terrain, terrain', 'tr', 4]; } }
-      if (aglM < 450 && vs < -(2.6 + aglM / 55) && !(nearRwy && aglM < 60)) { list.push({ text: 'SINK RATE', level: 'warning', sound: 'sink' }); voice = voice || ['Sink rate', 'sr', 3]; this.penalize('sink', 'Excessive sink rate', 30, 8); }
-      if (!c.gearDown && fm.gearPos < 0.9 && aglM < 120 && vs < -0.5 && c.throttle < 0.7 && kias < s.vle * 1.6) { list.push({ text: 'TOO LOW – GEAR', level: 'warning', sound: 'gear' }); voice = ['Too low, gear', 'tlg', 2.5]; this.penalize('gear', 'Gear-up approach warning', 60, 10); }
-      else if (!c.gearDown && c.flapsIdx >= Math.max(1, s.flapDetents - 1) && aglM < 450 && fm.gearPos < 0.9) { list.push({ text: 'CHECK GEAR', level: 'caution', sound: 'gear' }); }
-      if (Math.abs(fm.bank * R2D) > 45) { list.push({ text: 'BANK ANGLE', level: 'caution', sound: 'bank' }); voice = voice || ['Bank angle', 'ba', 3]; this.penalize('bank', 'Excessive bank', 10, 8); this.comfort -= dt * 1.5; }
+      if (danger && !nearRwy && aglM < 1500) { if (danger === 2) { this.pushWarn(list, 'PULL UP', 'warning', 'pullup'); voice = VC_PU; this.penalize('gpws', 'Terrain warning (GPWS)', 75, 8); this.comfort -= 0.05; } else { this.pushWarn(list, 'TERRAIN', 'caution', 'terrain'); voice = voice || VC_TR; } }
+      if (aglM < 450 && vs < -(2.6 + aglM / 55) && !(nearRwy && aglM < 60)) { this.pushWarn(list, 'SINK RATE', 'warning', 'sink'); voice = voice || VC_SR; this.penalize('sink', 'Excessive sink rate', 30, 8); }
+      if (!c.gearDown && fm.gearPos < 0.9 && aglM < 120 && vs < -0.5 && c.throttle < 0.7 && kias < s.vle * 1.6) { this.pushWarn(list, 'TOO LOW – GEAR', 'warning', 'gear'); voice = VC_TLG; this.penalize('gear', 'Gear-up approach warning', 60, 10); }
+      else if (!c.gearDown && c.flapsIdx >= Math.max(1, s.flapDetents - 1) && aglM < 450 && fm.gearPos < 0.9) { this.pushWarn(list, 'CHECK GEAR', 'caution', 'gear'); }
+      if (Math.abs(fm.bank * R2D) > 45) { this.pushWarn(list, 'BANK ANGLE', 'caution', 'bank'); voice = voice || VC_BA; this.penalize('bank', 'Excessive bank', 10, 8); this.comfort -= dt * 1.5; }
     }
-    if (L.gearOver) { list.push({ text: 'GEAR OVERSPEED', level: 'caution', sound: 'overspeed' }); this.penalize('go', 'Gear overspeed', 20, 6); }
-    if (L.flapOver && fm.flapsPos > 0.05) { list.push({ text: 'FLAPS OVERSPEED', level: 'caution', sound: 'overspeed' }); this.penalize('fo', 'Flap overspeed', 20, 6); fm.damage += dt * 2; }
-    if (fm.wow && c.throttle > 0.82 && c.parking) { list.push({ text: 'PARK BRAKE', level: 'warning', sound: 'config' }); voice = voice || ['Parking brake', 'pb', 3]; }
-    else if (fm.wow && c.throttle > 0.85 && fm.gs < 40 && s.kind !== 'piston' && c.flapsIdx === 0) { list.push({ text: 'CONFIG FLAPS', level: 'warning', sound: 'config' }); voice = voice || ['Flaps. Takeoff configuration', 'cf', 4]; }
-    if (fm.fuelFrac < 0.1 && fm.fuel > 0) list.push({ text: 'LOW FUEL', level: 'caution', sound: 'fuel' });
-    if (fm.fuel <= 0) { list.push({ text: 'ENGINE FLAMEOUT', level: 'warning', sound: 'fuel' }); voice = voice || ['Engine failure', 'ef', 8]; }
-    if (!this.seatbelt && this.turb > 0.3 && this.takeoffDone) list.push({ text: 'SEATBELT SIGN', level: 'caution', sound: null });
+    if (L.gearOver) { this.pushWarn(list, 'GEAR OVERSPEED', 'caution', 'overspeed'); this.penalize('go', 'Gear overspeed', 20, 6); }
+    if (L.flapOver && fm.flapsPos > 0.05) { this.pushWarn(list, 'FLAPS OVERSPEED', 'caution', 'overspeed'); this.penalize('fo', 'Flap overspeed', 20, 6); fm.damage += dt * 2; }
+    if (fm.wow && c.throttle > 0.82 && c.parking) { this.pushWarn(list, 'PARK BRAKE', 'warning', 'config'); voice = voice || VC_PB; }
+    else if (fm.wow && c.throttle > 0.85 && fm.gs < 40 && s.kind !== 'piston' && c.flapsIdx === 0) { this.pushWarn(list, 'CONFIG FLAPS', 'warning', 'config'); voice = voice || VC_CF; }
+    if (fm.fuelFrac < 0.1 && fm.fuel > 0) this.pushWarn(list, 'LOW FUEL', 'caution', 'fuel');
+    if (fm.fuel <= 0) { this.pushWarn(list, 'ENGINE FLAMEOUT', 'warning', 'fuel'); voice = voice || VC_EF; }
+    if (!this.seatbelt && this.turb > 0.3 && this.takeoffDone) this.pushWarn(list, 'SEATBELT SIGN', 'caution', null);
     // altitude callouts on approach
-    if (inFlight && c.gearDown && vs < -1 && !this.ap.on || (inFlight && c.gearDown && vs < -1)) {
-      const ft = aglM / 0.3048; const calls: [number, string][] = [[500, 'Five hundred'], [100, 'One hundred'], [50, 'Fifty'], [30, 'Thirty'], [20, 'Twenty'], [10, 'Ten']];
-      for (const [h, t] of calls) if (this.prevAgl / 0.3048 > h && ft <= h && (h >= 100 || s.kind === 'jet' || h === 50)) this.audio.speak(t, 'c' + h, 0.5, 1.15, 0.85);
+    if (inFlight && c.gearDown && vs < -1) {
+      const ft = aglM / 0.3048;
+      for (let ci = 0; ci < RADIO_ALT_CALLS.length; ci++) { const h = RADIO_ALT_CALLS[ci].h; if (this.prevAgl / 0.3048 > h && ft <= h && (h >= 100 || s.kind === 'jet' || h === 50)) this.audio.speak(RADIO_ALT_CALLS[ci].text, RADIO_ALT_CALLS[ci].id, 0.5, 1.15, 0.85); }
       if (this.ap.appr && this.prevAgl / 0.3048 > 20 && ft <= 20 && s.kind === 'jet') this.audio.speak('Retard', 'ret', 3);
     }
     this.prevAgl = aglM;
-    this.warnState = list;
-    const top = list.find((x) => x.sound) || null;
-    this.curSound = top ? top.sound : null;
+    let top: WarnSound = null;
+    for (let i = 0; i < list.length; i++) if (list[i].sound) { top = list[i].sound; break; }
+    this.curSound = top;
     this.audio.setWarningVoice(voice?.[1] ?? null);
     if (voice) this.audio.speak(voice[0], voice[1], voice[2]);
-    // new warning chirps
-    const sig = list.map((l) => l.text).join('|'); if (sig !== this.warnSig) { if (list.some((l) => l.level === 'caution') && !list.some((l) => l.level === 'warning') && list.length > this.warnLen) this.audio.chime(); this.warnSig = sig; this.warnLen = list.length; }
+    // new warning chirps: only when the set of active texts changed (compared in place, no joined signature string)
+    let changed = list.length !== this.warnPrevTexts.length, hasCaution = false, hasWarning = false;
+    for (let i = 0; i < list.length; i++) {
+      if (!changed && this.warnPrevTexts[i] !== list[i].text) changed = true;
+      if (list[i].level === 'caution') hasCaution = true; else hasWarning = true;
+    }
+    if (changed) {
+      if (hasCaution && !hasWarning && list.length > this.warnLen) this.audio.chime();
+      this.warnPrevTexts.length = list.length; for (let i = 0; i < list.length; i++) this.warnPrevTexts[i] = list[i].text;
+      this.warnLen = list.length;
+    }
   }
-  private curSound: WarnSound = null; private warnSig = ''; private warnLen = 0;
-  private nearAirport(r: number) { return airportsNear(this.lat(), this.lon(), r).some((a) => a.runways.length > 0); }
+  private limScratch = { kias: 0, overspeed: false, flapOver: false, gearOver: false, flapLim: 0 };
+  /** Reused argument objects for Cockpit.update (called every frame while the deck is visible). */
+  private cockInputs: CockpitInputs = { pitch: 0, roll: 0, yaw: 0, throttle: 0, flapsIdx: 0, gearDown: true, speedbrake: 0 };
+  private cockUi: CockpitUi = { battery: true, lights: { nav: false, strobe: false, land: false, beacon: false }, seatbelt: true, parking: true, reverse: false, apOn: false, apNav: false, apAppr: false, apHdg: 0, apAlt: 0, apSpd: 0, mood: 1, shake: 0 };
+  private warnPool: { text: string; level: 'caution' | 'warning'; sound: WarnSound }[] = []; private warnPrevTexts: string[] = [];
+  /** Appends a warning using a pooled entry (the list is rebuilt every frame; entries are never reallocated). */
+  private pushWarn(list: { text: string; level: 'caution' | 'warning'; sound: WarnSound }[], text: string, level: 'caution' | 'warning', sound: WarnSound) {
+    const i = list.length; let e = this.warnPool[i];
+    if (!e) e = this.warnPool[i] = { text, level, sound }; else { e.text = text; e.level = level; e.sound = sound; }
+    list.push(e);
+  }
+  private curSound: WarnSound = null; private warnLen = 0;
+  /** Any airport with a runway within `r` m. Looked up at most once per second (airportsNear builds an array). */
+  private nearAptT = -1e9; private nearAptV = false;
+  private nearAirport(r: number) {
+    if (this.time - this.nearAptT > 1 || this.time < this.nearAptT) { this.nearAptT = this.time; this.nearAptV = airportsNear(this.lat(), this.lon(), r).some((a) => a.runways.length > 0); }
+    return this.nearAptV;
+  }
 
   // =====================================================================================
   //  Passengers
@@ -2018,7 +2081,13 @@ export class Game {
     const interior = this.isInterior() && this.mode === 'play';
     if (this.cockpit) this.cockpit.daylight = clamp((w.sunElevation + 8) / 20, 0.12, 1);
     if (interior && this.cockpit) this.cockpit.perfLoad = this.emaFrameMs > 22 ? 1.8 : this.emaFrameMs > 18 ? 1.35 : 1;
-    if (interior && this.cockpit) this.cockpit.update(dt, this.time, this.panelDataCached(), { pitch: fm.ctl.pitch, roll: fm.ctl.roll, yaw: fm.ctl.yaw, throttle: fm.ctl.throttle, flapsIdx: fm.ctl.flapsIdx, gearDown: fm.ctl.gearDown, speedbrake: fm.ctl.speedbrake }, { battery: fm.ctl.battery, lights: this.lights, seatbelt: this.seatbelt, parking: fm.ctl.parking, reverse: fm.ctl.reverse, apOn: this.ap.on, apNav: this.ap.nav, apAppr: this.ap.appr, apHdg: this.magHdg(this.ap.hdg), apAlt: this.ap.altFt, apSpd: this.ap.spd, mood: this.comfort / 100, shake: clamp(this.turb * 1.6 + this.shakeImpulse, 0, 1.6) }, true);
+    if (interior && this.cockpit) {
+      const ci = this.cockInputs, cu = this.cockUi, fc = fm.ctl;
+      ci.pitch = fc.pitch; ci.roll = fc.roll; ci.yaw = fc.yaw; ci.throttle = fc.throttle; ci.flapsIdx = fc.flapsIdx; ci.gearDown = fc.gearDown; ci.speedbrake = fc.speedbrake;
+      cu.battery = fc.battery; cu.lights = this.lights; cu.seatbelt = this.seatbelt; cu.parking = fc.parking; cu.reverse = fc.reverse; cu.apOn = this.ap.on; cu.apNav = this.ap.nav; cu.apAppr = this.ap.appr;
+      cu.apHdg = this.magHdg(this.ap.hdg); cu.apAlt = this.ap.altFt; cu.apSpd = this.ap.spd; cu.mood = this.comfort / 100; cu.shake = clamp(this.turb * 1.6 + this.shakeImpulse, 0, 1.6);
+      this.cockpit.update(dt, this.time, this.panelDataCached(), ci, cu, true);
+    }
     v.setInterior(interior);
     if (this.phase === 'playing') {
       this.updateChecklist();
@@ -2049,13 +2118,17 @@ export class Game {
     const sx = amp * (Math.sin(t * 23.1) + Math.sin(t * 41.7 + 1.3)), sy = amp * (Math.sin(t * 19.3 + 2) + Math.sin(t * 37.9)), sr = amp * 0.6 * Math.sin(t * 29.1);
     const gOff = flying ? clamp(-(fm.nz - 1) * 0.025, -0.06, 0.06) : 0;
     if (this.isInterior() && this.mode === 'play') {
-      cam.near = 0.25; // world camera: nothing exists inside 25 cm of the eye point – a 12x larger near plane gives the 24-bit depth buffer far more range (less z-fighting, cheaper rasterisation)
+      // World camera: nothing exists inside the eye point's first metres, and the 24-bit depth buffer's resolution is d^2 / (near * 2^24), so the near plane grows
+      // with the height above ground (0.5 m on the stand, 12 m at 100 m AGL, 40 m up high). 0.25 m at 5 km was a 6 m depth step: terrain, runway paint, trees and roofs z-fought.
+      cam.near = clamp(fm.agl * 0.12, 0.5, 40);
       const vw = this.cockpit!.smooth(dt);
       const lk = 1 / this.cockpit!.zoom; // camera shake is scaled with the zoom so magnified details stay steady
       tmpE.set(vw.pitch + sx * lk, vw.yaw + sy * lk, sr, 'YXZ');
       const local = tmpQ.setFromEuler(tmpE); // scratch — no per-frame clone
       tmpV3.copy(vw.pos); tmpV3.y += gOff;  // head position in body frame (scratch)
-      for (const cq of [this.cockpit!.camera, this.cockpit!.activeCamera]) { cq.position.copy(tmpV3); cq.quaternion.copy(local); cq.fov = this.fovFor(vw.fov); cq.updateProjectionMatrix(); } const cq = this.cockpit!.camera;
+      const cq = this.cockpit!.camera, fovC = this.fovFor(vw.fov);
+      cq.position.copy(tmpV3); cq.quaternion.copy(local); cq.fov = fovC; cq.updateProjectionMatrix();
+      const ca = this.cockpit!.activeCamera; ca.position.copy(tmpV3); ca.quaternion.copy(local); ca.fov = fovC; ca.updateProjectionMatrix();
       tmpV3.applyQuaternion(fm.quat);
       cam.position.copy(fm.pos).add(tmpV3); cam.quaternion.copy(fm.quat).multiply(local); cam.fov = cq.fov; cam.updateProjectionMatrix();
     } else if (view === 'spotter' && this.mode === 'play') {
@@ -2066,7 +2139,7 @@ export class Game {
         this.spotAnchor = fm.pos.clone().addScaledVector(vdir, 700 + fm.gs * 4).addScaledVector(side, 70 + L * 2);
         const gh = this.world!.terrain.heightAt(this.spotAnchor.x, this.spotAnchor.z); this.spotAnchor.y = Math.max(gh + 6, Math.min(fm.pos.y, gh + 150));
       }
-      cam.near = clamp(d * 0.02, 0.5, 10);
+      cam.near = clamp(Math.min(d * 0.15, fm.agl * 0.12 + 0.5), 0.5, 40);
       cam.position.copy(this.spotAnchor); cam.lookAt(fm.pos); cam.fov = clamp(2 * Math.atan(L * 1.6 / Math.max(60, d)) * R2D, 8, 50); cam.updateProjectionMatrix();
     } else {
       // chase (all scratch — the per-frame loop may not allocate)
@@ -2082,13 +2155,14 @@ export class Game {
       cam.position.copy(fm.pos).add(off);
       const gh = this.world!.terrain.heightAt(cam.position.x, cam.position.z); if (cam.position.y < gh + 2.5) cam.position.y = gh + 2.5;
       const camDist = off.length();
-      cam.near = clamp(Math.min(0.5, (camDist - L * 0.4) * 0.4), 0.1, 1.5);
+      cam.near = clamp(Math.min((camDist - L * 0.4) * 0.5, fm.agl * 0.12 + 0.5), 0.3, 40);
       cam.up.set(0, 1, 0).applyQuaternion(tmpQ2.setFromEuler(tmpE2.set(0, 0, ezz)));
       cam.lookAt(fm.pos.x, fm.pos.y + L * 0.03, fm.pos.z);
       cam.rotateX(sx); cam.rotateY(sy); cam.fov = this.fovFor(60 + Math.min(10, fm.gs / 40)); cam.updateProjectionMatrix();
     }
     if (this.phase === 'crashed') { cam.lookAt(this.crashPos); }
     cam.updateMatrixWorld();
+    this.world!.terrain.setDepthNear(cam.near);
   }
   private spotAnchor: THREE.Vector3 | null = null;
 
@@ -2151,6 +2225,14 @@ export class Game {
     return '';
   }
 
+  /** Cruise level (m, MSL) the flight plan / VNAV actually fly (see `cruiseLevelM()` in lnav.ts); the aircraft ceiling only when the plan has no cruise leg. */
+  get cruiseLevelM(): number {
+    return planCruiseAltM(this.flightPlan) ?? this.spec.cruiseAlt;
+  }
+  /** Altitude (ft MSL) of the approach descent clearance: 3,500 ft, or 3,000 ft above the field at high-elevation airports (never below terrain). */
+  private approachClearanceFt() { return Math.max(3500, this.ftRound(this.cfg.to.elev + 3000 * 0.3048, 500)); }
+  private ftRound(m: number, step = 100) { return Math.round(m / 0.3048 / step) * step; }
+
   computeFlightPhase(): FlightPhase {
     return computeFlightPhaseState(this as unknown as FlightPhaseContext);
   }
@@ -2177,13 +2259,13 @@ export class Game {
         if (this.depStage < 5) { this.addAtc('TOWER', `${this.callsign.callsign}, ${fromIcao} Tower${this.atcFreq(this.cfg.from, 'TWR')}. Runway ${depRwy}, wind ${wind}, cleared for takeoff.`, true); this.audio.chirp(); this.depStage = 5; }
         break;
       case 'climb':
-        this.addAtc('DEPARTURE', `${this.callsign.callsign}, airborne, radar contact. Climb and maintain ${Math.round(this.spec.cruiseAlt / 0.3048)} ft, contact Departure${this.atcFreq(this.cfg.from, 'DEP') || this.atcFreq(this.cfg.from, 'APP')}.`, false);
+        this.addAtc('DEPARTURE', `${this.callsign.callsign}, airborne, radar contact. Climb and maintain ${this.ftRound(this.cruiseLevelM, 1000).toLocaleString('en-US')} ft, contact Departure${this.atcFreq(this.cfg.from, 'DEP') || this.atcFreq(this.cfg.from, 'APP')}.`, false);
         break;
       case 'cruise':
         this.addAtc('ENROUTE', `${this.callsign.callsign}, reaching cruise altitude. Traffic clear, monitor ${this.atcFreq(this.cfg.to, 'APP').trim() || 'enroute frequency'}.`, false);
         break;
       case 'descent':
-        this.addAtc('APPROACH', `${this.callsign.callsign}, ${toIcao} Approach. Descend and maintain 3,500 ft, ${this.qnh(this.cfg.to)}. Expect ILS runway ${arrRwy}.`, true);
+        this.addAtc('APPROACH', `${this.callsign.callsign}, ${toIcao} Approach. Descend and maintain ${this.approachClearanceFt().toLocaleString('en-US')} ft, ${this.qnh(this.cfg.to)}. Expect ILS runway ${arrRwy}.`, true);
         this.audio.chime();
         break;
       case 'final':

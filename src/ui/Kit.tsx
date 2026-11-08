@@ -68,8 +68,10 @@ export function Segmented<T extends string | number>({ value, options, onChange,
   return <div className="if-seg" role="radiogroup" aria-label={label} data-block={block} onKeyDown={(e) => {
     if (!['ArrowLeft', 'ArrowRight'].includes(e.key)) return;
     const i = options.findIndex(([v]) => v === value), n = options[(i + (e.key === 'ArrowRight' ? 1 : -1) + options.length) % options.length];
+    // React clears `currentTarget` once the handler returns, so capture the element first.
+    const root = e.currentTarget;
     e.preventDefault(); onChange(n[0]);
-    requestAnimationFrame(() => (e.currentTarget.querySelector('[aria-checked="true"]') as HTMLElement | null)?.focus());
+    requestAnimationFrame(() => (root.querySelector('[aria-checked="true"]') as HTMLElement | null)?.focus());
   }}>
     {options.map(([v, text]) => <button key={String(v)} type="button" role="radio" aria-checked={v === value} tabIndex={v === value ? 0 : -1} disabled={disabled} onClick={() => onChange(v)}>{text}</button>)}
   </div>;

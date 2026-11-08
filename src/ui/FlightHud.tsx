@@ -257,12 +257,13 @@ export function Hud({ game, hud, toasts, settings, setSettings, onMap, mapOpen, 
   const activeTool = TOOLS.find((t) => t.id === tool);
   const pendingRadio = hud.atcLog.some((m) => m.needsAck);
   const metric = settings.units === 'metric';
-  const pfd = false;
+  // "Full instrument panel" (Display tool): the glass PFD on top of the external-view dials. Interior views already have the real deck.
+  const pfd = fullInstruments && !interior;
   // External camera: show the round edge instruments (speed dial, altitude dial, engine bars).
   const edgeInstruments = !interior && !viewport.touch;
   const miniMap = !interior && (!tool || (workspace.minimized && !compactNav));
   // Telemetry (the top-left compact airspeed/altitude block) is hidden when round edge instruments are shown.
-  const telemetry = false;
+  const telemetry = !interior && !edgeInstruments && !pfd && !narrow;
 
 
   const reveal = () => {

@@ -8,7 +8,7 @@
 //  * VNAV climbs to the plan's cruise level at the speed schedule, holds it, and starts a 3° path descent at the TOD fix.
 //  * Jet/turboprop speed schedule: <= 250 KIAS below 10,000 ft MSL (FAR 91.117).
 //  * A minimum safe altitude is enforced outside the approach so a bad target can never drive the aircraft into terrain.
-import { FlightModel, atmosphere } from './physics';
+import { FlightModel, atmosphere, type Atmosphere } from './physics';
 import { clamp, wrap180, wrap360, D2R, destination, crossTrack, bearing, haversine, FlightWaypoint } from './geo';
 import { legGuidance, interceptAngleDeg, planCruiseAltM, planDistanceM } from './lnav';
 
@@ -60,8 +60,9 @@ export function stallRefKt(fm: FlightModel): number { return fm.flapsPos > 0.3 ?
 /** Lowest speed the autopilot will ever select: VLS ≈ 1.23 Vs of the CURRENT configuration (clean ≈ green dot, flaps FULL ≈ Vref). */
 export function minSpeedKt(fm: FlightModel): number { return stallRefKt(fm) * 1.23; }
 /** KIAS that corresponds to the cruise Mach (jets) at an altitude, capped at the 300 kt climb / descent speed. */
+const _apAtm: Atmosphere = { T: 0, rho: 0, p: 0, a: 0, sigma: 0 }, _apAtm2: Atmosphere = { T: 0, rho: 0, p: 0, a: 0, sigma: 0 };
 function managedJetKias(machCruise: number, alt: number): number {
-  const a = atmosphere(alt);
+  const a = atmosphere(alt, _apAtm);
   return Math.min(300, (machCruise * a.a * Math.sqrt(a.sigma)) / KT);
 }
 interface ApproachStage { kt: number; flaps: number; gear: boolean }
@@ -70,14 +71,19 @@ interface ApproachStage { kt: number; flaps: number; gear: boolean }
  * CONF 2, gear + CONF 3 about 5 NM out, CONF FULL stabilised at ~3 NM, Vapp + 3 over the threshold). Speeds are
  * Vapp-relative so they stay valid for every aircraft; every stage stays below the flap placard (checked in step()).
  */
+const APPROACH_SPEED_ADD: readonly (readonly [number, number])[] = [[1500, 3], [5000, 12], [9000, 30], [13000, 45], [18500, 60], [30000, 115]];
+const _stage: ApproachStage = { kt: 0, flaps: 0, gear: false }; // shared result: callers read it immediately (no allocation per frame)
+/** Plan waypoint of a type (allocation-free replacement for plan.find / findIndex with a closure). */
+function indexOfType(plan: FlightWaypoint[], type: FlightWaypoint['type']): number { for (let i = 0; i < plan.length; i++) if (plan[i].type === type) return i; return -1; }
 function approachStage(s: { vapp: number; flapDetents: number }, D: number): ApproachStage {
   const k = s.vapp / 135, full = s.flapDetents;
-  const knots: [number, number][] = [[1500, 3], [5000, 12], [9000, 30], [13000, 45], [18500, 60], [30000, 115]];
+  const knots = APPROACH_SPEED_ADD;
   let add = knots[knots.length - 1][1];
   if (D <= knots[0][0]) add = knots[0][1];
   else for (let i = 1; i < knots.length; i++) if (D <= knots[i][0]) { const f = (D - knots[i - 1][0]) / (knots[i][0] - knots[i - 1][0]); add = knots[i - 1][1] + f * (knots[i][1] - knots[i - 1][1]); break; }
   const step = D < 6500 ? full : D < 10500 ? Math.max(1, full - 1) : D < 14500 ? Math.min(2, full) : D < 20000 ? 1 : 0;
-  return { kt: s.vapp + add * k, flaps: Math.min(step, full), gear: D < 10500 };
+  _stage.kt = s.vapp + add * k; _stage.flaps = Math.min(step, full); _stage.gear = D < 10500;
+  return _stage;
 }
 
 export class Autopilot {
@@ -235,7 +241,7 @@ export class Autopilot {
     // 2. LNAV (leg guidance) + VNAV (altitude path / speed profile)
     // -------------------------------------------------------------
     const landingLeg = !!wp && (wp.type === 'faf' || wp.type === 'touchdown' || wp.type === 'rollout');
-    const tdIdx = plan.findIndex((w) => w.type === 'touchdown');
+    const tdIdx = indexOfType(plan, 'touchdown');
     const arrWp: FlightWaypoint | undefined = tdIdx >= 0 ? plan[tdIdx] : undefined;
     let distToArr = Infinity; // signed: > 0 while the threshold is still ahead
     let pathOn = false;       // VNAV is flying the 3° path to the threshold
@@ -263,8 +269,8 @@ export class Autopilot {
           if (pathAlt < cruiseAlt) {
             // VNAV path descent: the target is the 3° path itself. Below it (still climbing, or engaged low) the aircraft climbs to
             // meet it - the path law below only takes over once the path is reached, so it never flies parallel underneath it.
-            const iaf = plan.find((w) => w.type === 'iaf');
-            clearedAlt = iaf ? iaf.altM : arrWp.altM;
+            const iafIdx = indexOfType(plan, 'iaf');
+            clearedAlt = iafIdx >= 0 ? plan[iafIdx].altM : arrWp.altM;
             managedAlt = pathAlt;
             pathOn = alt >= pathAlt - 40;
           }
@@ -275,7 +281,7 @@ export class Autopilot {
         }
         altTarget = managedAlt;
         // Jets: managed speed is Mach-based (cruiseKt is a TAS at the cruise level) -> the KIAS that corresponds to it, <= 300.
-        const managedSpd = s.kind === 'jet' ? managedJetKias(s.cruiseKt * KT / atmosphere(s.cruiseAlt).a, alt) : (wp.speedKt > 0 ? wp.speedKt : spdT);
+        const managedSpd = s.kind === 'jet' ? managedJetKias(s.cruiseKt * KT / atmosphere(s.cruiseAlt, _apAtm2).a, alt) : (wp.speedKt > 0 ? wp.speedKt : spdT);
         spdT = stage ? Math.min(managedSpd, stage.kt) : managedSpd;
         if (this.altSelected) altTarget = this.altFt * FT; else this.altFt = Math.round(clearedAlt / FT);
         if (this.spdSelected) spdT = this.spd; else this.spd = Math.round(spdT);
@@ -367,7 +373,7 @@ export class Autopilot {
       }
 
       // Keep aircraft centered on runway heading
-      const arrHdg = plan.find((w) => w.type === 'touchdown')?.hdg;
+      const arrIdx = indexOfType(plan, 'touchdown'), arrHdg = arrIdx >= 0 ? plan[arrIdx].hdg : undefined;
       const rolloutHdg = ils ? ils.course : (arrHdg ?? this.takeoffHdg);
       const rwyError = wrap180(rolloutHdg - fm.heading);
       yawCmd = clamp(rwyError * 0.08, -1, 1);
@@ -474,17 +480,19 @@ export class Autopilot {
       this.phase = pathOn || e < -90 ? 'descent' : e > 90 ? 'climb' : 'cruise';
     }
 
-    return {
-      pitch: isFinite(pitchIn) ? pitchIn : 0,
-      roll: isFinite(pRate) ? clamp(pRate / s.maxRollRate, -1, 1) : 0,
-      throttle: isFinite(thrCmd) ? thrCmd : 0.5,
-      yaw: isFinite(yawCmd) ? yawCmd : 0,
-      gearDown: gearCmd,
-      flapsIdx: flapsCmd,
-      brake: isFinite(brakeCmd) ? brakeCmd : 0,
-      parking: parkingCmd,
-      reverse: reverseCmd,
-      speedbrake: isFinite(speedbrakeCmd) ? speedbrakeCmd : 0,
-    };
+    const out = this.cmdOut;
+    out.pitch = isFinite(pitchIn) ? pitchIn : 0;
+    out.roll = isFinite(pRate) ? clamp(pRate / s.maxRollRate, -1, 1) : 0;
+    out.throttle = isFinite(thrCmd) ? thrCmd : 0.5;
+    out.yaw = isFinite(yawCmd) ? yawCmd : 0;
+    out.gearDown = gearCmd;
+    out.flapsIdx = flapsCmd;
+    out.brake = isFinite(brakeCmd) ? brakeCmd : 0;
+    out.parking = parkingCmd;
+    out.reverse = reverseCmd;
+    out.speedbrake = isFinite(speedbrakeCmd) ? speedbrakeCmd : 0;
+    return out;
   }
+  /** Result of step(): one object reused every call (read it before the next step). */
+  private cmdOut: ApCmd = { pitch: 0, roll: 0, throttle: null, yaw: 0 };
 }

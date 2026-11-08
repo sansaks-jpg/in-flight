@@ -182,9 +182,10 @@ export class Mcdu {
 }
 
 // =============================================================== ISIS / FCU / clock
+// ISIS horizon: bank > 0 = right wing down → the horizon turns counter-clockwise, i.e. rotate(-bank), exactly like the PFD.
 export function drawISIS(g: G, W: number, H: number, c: Ctx) {
   const d = c.d; g.setTransform(W / 400, 0, 0, H / 400, 0, 0); g.fillStyle = '#000'; g.fillRect(0, 0, 400, 400); if (!c.sys.dc) return;
-  g.save(); g.translate(200, 200); g.rotate(d.bank); const o = d.pitch * 5; g.fillStyle = '#2a73c9'; g.fillRect(-300, -400 + o, 600, 400); g.fillStyle = '#7a4a1c'; g.fillRect(-300, o, 600, 400); line(g, -300, o, 300, o, '#fff', 3); g.restore();
+  g.save(); g.translate(200, 200); g.rotate(-d.bank); const o = d.pitch * 5; g.fillStyle = '#2a73c9'; g.fillRect(-300, -400 + o, 600, 400); g.fillStyle = '#7a4a1c'; g.fillRect(-300, o, 600, 400); line(g, -300, o, 300, o, '#fff', 3); g.restore();
   g.fillStyle = '#000'; g.fillRect(0, 0, 70, 400); g.fillRect(330, 0, 70, 400); T(g, Math.round(d.kias), 35, 200, 34, C.white); T(g, Math.round(d.altFt / 10) * 10, 365, 200, 30, C.white); T(g, 'SPD', 35, 40, 20, C.amber); T(g, 'ALT', 365, 40, 20, C.amber);
   g.strokeStyle = C.amber; g.lineWidth = 5; g.beginPath(); g.moveTo(130, 200); g.lineTo(190, 200); g.moveTo(210, 200); g.lineTo(270, 200); g.stroke(); T(g, c.sys.isis.std ? 'STD' : Math.round(c.sys.isis.hpa), 365, 370, 24, C.cyan);
 }

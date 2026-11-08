@@ -119,8 +119,9 @@ export function SettingsPanel({ s, set }: { s: Settings; set: (p: Partial<Settin
     <nav className="if-settings-nav" role="tablist" aria-label="Settings categories" aria-orientation="vertical" onKeyDown={(e) => {
       if (!['ArrowDown', 'ArrowUp', 'ArrowLeft', 'ArrowRight'].includes(e.key)) return;
       const i = CATEGORIES.findIndex((c) => c.id === cat), d = e.key === 'ArrowDown' || e.key === 'ArrowRight' ? 1 : -1;
+      const nav = e.currentTarget; // React clears currentTarget after the handler returns
       e.preventDefault(); setCat(CATEGORIES[(i + d + CATEGORIES.length) % CATEGORIES.length].id);
-      requestAnimationFrame(() => (e.currentTarget.querySelector('[aria-selected="true"]') as HTMLElement | null)?.focus());
+      requestAnimationFrame(() => (nav.querySelector('[aria-selected="true"]') as HTMLElement | null)?.focus());
     }}>
       {CATEGORIES.map((c) => <button key={c.id} type="button" role="tab" id={`tab-${c.id}`} aria-selected={cat === c.id} aria-controls="settings-pane" tabIndex={cat === c.id ? 0 : -1} onClick={() => setCat(c.id)}>
         <FlightIcon name={c.icon} size={17} />{c.label}</button>)}

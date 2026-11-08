@@ -524,7 +524,7 @@ export class World {
     this.sky.renderOrder = -10;
     this.scene.add(this.sky);
 
-    this.clouds = new VolumetricClouds(opts.quality, QUALITY[opts.quality]?.clouds ?? 36);
+    this.clouds = new VolumetricClouds(opts.quality, QUALITY[opts.quality]?.cloudSteps ?? 64);
     this.lightning = new LightningSystem(this.scene);
     this.updateSunFromClock(true);
   }
@@ -535,7 +535,7 @@ export class World {
     this.terrain.setQuality(q);
     this.structures.setQuality(q);
     this.structures.setNight(this.nightAmount);
-    this.clouds.setQuality(q, QUALITY[q].clouds);
+    this.clouds.setQuality(q, QUALITY[q].cloudSteps);
     // Terminal detail / airport count is preset-specific. Rebuild the (small) airport set
     // around aircraft current position immediately so a quality change doesn't leave heavy meshes.
     const lat = this.lastAcLat || this.proj.lat(0);
@@ -639,7 +639,18 @@ export class World {
   }
 
   // ---- geometry helpers ----
+  /** Runway thresholds of an airport. Cached: ILS / approach logic asks every frame. The entry is rebuilt when the projection is rebased or when the live OSM refinement moves a runway (numeric signature, no allocation). */
   thresholds(ap: Airport): Threshold[] {
+    let sig = 0;
+    for (let i = 0; i < ap.runways.length; i++) { const r = ap.runways[i]; sig += r.leLat + r.leLon * 3 + r.heLat * 7 + r.heLon * 11 + r.dispLe * 13 + r.dispHe * 17 + r.width * 19; }
+    const hit = this.thCache.get(ap.id);
+    if (hit && hit.proj === this.proj && hit.sig === sig && hit.n === ap.runways.length) return hit.ths;
+    const ths = this.buildThresholds(ap);
+    this.thCache.set(ap.id, { proj: this.proj, sig, n: ap.runways.length, ths });
+    return ths;
+  }
+  private thCache = new Map<string, { proj: Projection; sig: number; n: number; ths: Threshold[] }>();
+  private buildThresholds(ap: Airport): Threshold[] {
     const out: Threshold[] = [];
     for (const rw of ap.runways) {
       const g = this.runwayGeom(ap, rw);
@@ -1023,11 +1034,18 @@ export class World {
 
   private removeAirport(id: string, sc: AirportScene) {
     this.scene.remove(sc.group);
+    // Materials are created per airport (runways, taxiways, buildings…), so they are released with it. The PAPI / strobe
+    // materials are long-lived and shared by every airport: they belong to the World, not to the scene being removed.
+    const shared = [this.papiOn, this.papiOff, this.strobeOn, this.strobeOff];
     sc.group.traverse((o) => {
       const m = o as THREE.Mesh;
       if (m.geometry) m.geometry.dispose();
-      const mt = m.material as THREE.MeshLambertMaterial;
-      if (mt && mt.map) mt.map.dispose();
+      const mats = Array.isArray(m.material) ? m.material : m.material ? [m.material] : [];
+      for (const mt of mats) {
+        if (shared.includes(mt as THREE.MeshBasicMaterial)) continue;
+        (mt as THREE.MeshLambertMaterial).map?.dispose();
+        mt.dispose();
+      }
     });
     this.airports.delete(id);
   }

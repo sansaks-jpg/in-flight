@@ -4,11 +4,15 @@ export interface FlightPhaseContext {
   fm?: {
     ias: number;
     agl: number;
+    /** Optional MSL position (m): cruise levels are altitudes above sea level, not above the terrain below. */
+    pos?: { y: number };
     vs: number;
     wow: boolean;
     ctl: { throttle: number };
   } | null;
   spec: { cruiseAlt: number };
+  /** Planned cruise level (m, MSL) of the active route; falls back to the aircraft ceiling `spec.cruiseAlt`. */
+  cruiseLevelM?: number;
   landing?: object | null;
   takeoffDone: boolean;
   currentFlightPhase: FlightPhase;
@@ -65,8 +69,10 @@ export function computeFlightPhaseState(ctx: FlightPhaseContext): FlightPhase {
     // A genuine positive climb (especially a go-around) is not a new landing clearance.
     // Use a lower hold threshold than descent's 500 fpm climb-entry threshold.
     if (vsFpm > 350) return 'climb';
-    const cruiseAltFt = ctx.spec.cruiseAlt / 0.3048;
-    const reachedCruise = aglFt > cruiseAltFt * 0.85 || (aglFt > 2000 && vsFpm < 150);
+    // MSL altitude against the MSL cruise level (comparing AGL would never reach cruise over high ground).
+    const altFt = fm.pos ? fm.pos.y / 0.3048 : aglFt;
+    const cruiseAltFt = (ctx.cruiseLevelM ?? ctx.spec.cruiseAlt) / 0.3048;
+    const reachedCruise = altFt > cruiseAltFt * 0.85 || (aglFt > 2000 && vsFpm < 150);
     if (reachedCruise && remNm > 15) {
       return 'cruise';
     }

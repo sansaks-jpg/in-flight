@@ -393,7 +393,8 @@ export class AtcRadio {
   }
   private say(l: RadioLine, gen: number, ambient: boolean, done: () => void) {
     const pilot = l.who === 'PILOT', atis = l.who === 'ATIS';
-    this.h.bus.say({
+    // A rejected line (duplicate key, bus full…) never fires onEnd: treat it as finished or `busy` would stay true for the rest of the flight.
+    const accepted = this.h.bus.say({
       key: `atc:${l.id}`, speech: l.speech, priority: ambient ? 0 : 1, ttl: ambient ? 25 : 60, replay: !ambient, holdWhenSterile: ambient,
       persona: pilot ? 'pilot' : atis ? 'atis' : ['TOWER', 'ENROUTE'].includes(l.who) ? 'controllerF' : 'controller',
       rate: atis ? 0.95 : pilot ? 1.08 : 1.14, pitch: pilot ? 1.12 : atis ? 0.9 : 0.82, volume: 1,
@@ -401,5 +402,6 @@ export class AtcRadio {
       onStart: (first) => { if (gen === this.gen) this.h.key(); void first; },
       onEnd: () => { if (gen !== this.gen) return; this.h.key(); done(); },
     });
+    if (!accepted && gen === this.gen) done();
   }
 }

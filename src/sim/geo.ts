@@ -54,33 +54,37 @@ export function greatCircle(lat1: number, lon1: number, lat2: number, lon2: numb
   return out;
 }
 /** Point a fraction f (0..1) of the way along the great circle from point 1 to point 2. */
-export function gcPoint(lat1: number, lon1: number, lat2: number, lon2: number, f: number): [number, number] {
+/** Point at fraction `f` along the great circle. Per-frame callers pass `out` to avoid allocating the result tuple. */
+export function gcPoint(lat1: number, lon1: number, lat2: number, lon2: number, f: number, out: [number, number] = [0, 0]): [number, number] {
   const d = haversine(lat1, lon1, lat2, lon2) / R_EARTH;
-  if (d < 1e-9) return [lat1, lon1];
+  if (d < 1e-9) { out[0] = lat1; out[1] = lon1; return out; }
   const p1 = lat1 * D2R, l1 = lon1 * D2R, p2 = lat2 * D2R, l2 = lon2 * D2R;
   const A = Math.sin((1 - f) * d) / Math.sin(d), B = Math.sin(f * d) / Math.sin(d);
   const x = A * Math.cos(p1) * Math.cos(l1) + B * Math.cos(p2) * Math.cos(l2);
   const y = A * Math.cos(p1) * Math.sin(l1) + B * Math.cos(p2) * Math.sin(l2);
   const z = A * Math.sin(p1) + B * Math.sin(p2);
-  return [Math.atan2(z, Math.hypot(x, y)) * R2D, Math.atan2(y, x) * R2D];
+  out[0] = Math.atan2(z, Math.hypot(x, y)) * R2D; out[1] = Math.atan2(y, x) * R2D;
+  return out;
 }
-export function destination(lat: number, lon: number, hdg: number, dist: number): [number, number] {
+/** Destination point; per-frame callers pass `out` to avoid allocating the result tuple. */
+export function destination(lat: number, lon: number, hdg: number, dist: number, out: [number, number] = [0, 0]): [number, number] {
   const p1 = lat * D2R, l1 = lon * D2R, th = hdg * D2R, dl = dist / R_EARTH;
   const p2 = Math.asin(Math.sin(p1) * Math.cos(dl) + Math.cos(p1) * Math.sin(dl) * Math.cos(th));
   const l2 = l1 + Math.atan2(Math.sin(th) * Math.sin(dl) * Math.cos(p1), Math.cos(dl) - Math.sin(p1) * Math.sin(p2));
-  return [p2 * R2D, ((l2 * R2D + 540) % 360) - 180];
+  out[0] = p2 * R2D; out[1] = ((l2 * R2D + 540) % 360) - 180;
+  return out;
 }
 
 /**
  * Spherical cross-track distance from a great-circle path (lat1,lon1 -> lat2,lon2) to a point (lat,lon).
  * Positive = right of course, Negative = left of course. Returns [crossTrackMeters, alongTrackMeters].
  */
-export function crossTrack(lat: number, lon: number, lat1: number, lon1: number, lat2: number, lon2: number): [number, number] {
+export function crossTrack(lat: number, lon: number, lat1: number, lon1: number, lat2: number, lon2: number, out: [number, number] = [0, 0]): [number, number] {
   if (!isFinite(lat) || !isFinite(lon) || !isFinite(lat1) || !isFinite(lon1) || !isFinite(lat2) || !isFinite(lon2)) {
-    return [0, 0];
+    out[0] = 0; out[1] = 0; return out;
   }
   const d = haversine(lat1, lon1, lat2, lon2);
-  if (d < 10) return [0, 0];
+  if (d < 10) { out[0] = 0; out[1] = 0; return out; }
   const d13 = haversine(lat1, lon1, lat, lon) / R_EARTH;
   const th13 = bearing(lat1, lon1, lat, lon) * D2R;
   const th12 = bearing(lat1, lon1, lat2, lon2) * D2R;
@@ -90,7 +94,8 @@ export function crossTrack(lat: number, lon: number, lat1: number, lon1: number,
   const cosXt = Math.cos(xtAng);
   const atAng = Math.abs(cosXt) > 1e-6 ? Math.acos(clamp(Math.cos(d13) / cosXt, -1, 1)) : 0;
   const isForward = Math.cos(th13 - th12) >= 0;
-  return [isFinite(xtM) ? xtM : 0, isFinite(atAng) ? (isForward ? atAng * R_EARTH : -atAng * R_EARTH) : 0];
+  out[0] = isFinite(xtM) ? xtM : 0; out[1] = isFinite(atAng) ? (isForward ? atAng * R_EARTH : -atAng * R_EARTH) : 0;
+  return out;
 }
 
 export interface FlightWaypoint {

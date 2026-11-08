@@ -9,7 +9,9 @@ export const G = 9.80665;
  * that applies at the aircraft's position. Density altitude, true airspeed, Mach and engine lapse all follow from these.
  */
 export const airState = { dT: 0, qnh: 1013.25 };
-export function atmosphere(h: number) {
+export interface Atmosphere { T: number; rho: number; p: number; a: number; sigma: number; }
+/** ISA + live deviation. Pass `out` from per-frame code to avoid allocating the result object. */
+export function atmosphere(h: number, out: Atmosphere = { T: 0, rho: 0, p: 0, a: 0, sigma: 0 }): Atmosphere {
   const hh = Math.max(-300, h);
   const Tisa = hh < 11000 ? 288.15 - 0.0065 * hh : 216.65;
   const T = Tisa + airState.dT * (hh < 11000 ? 1 - hh / 22000 : 0.5);
@@ -17,7 +19,8 @@ export function atmosphere(h: number) {
   // a sea-level pressure anomaly decays with height (roughly follows the column mass)
   const p = pIsa * (1 + (airState.qnh / 1013.25 - 1) * Math.exp(-hh / 9000));
   const rho = p / (287.05 * T);
-  return { T, rho, p, a: Math.sqrt(1.4 * 287.05 * T), sigma: rho / 1.225 };
+  out.T = T; out.rho = rho; out.p = p; out.a = Math.sqrt(1.4 * 287.05 * T); out.sigma = rho / 1.225;
+  return out;
 }
 
 export interface Controls {
@@ -46,6 +49,11 @@ export interface ContactEvent { kind: 'touchdown' | 'hull' | 'gearbreak'; vs: nu
 
 const _v = new Vector3(), _v2 = new Vector3(), _v3 = new Vector3(), _q = new Quaternion(), _qi = new Quaternion();
 const UP = new Vector3(0, 1, 0);
+// Scratch objects for step() / helpers: the flight model runs ~120 times a second, so nothing may be allocated inside it (AGENTS.md §2C).
+const _vb = new Vector3(), _dirV = new Vector3(), _Fb = new Vector3(), _lDir = new Vector3(), _tauB = new Vector3(), _torqueW = new Vector3();
+const _rW = new Vector3(), _pw = new Vector3(), _velP = new Vector3(), _wv = new Vector3(), _latW = new Vector3(), _F = new Vector3(), _cr = new Vector3();
+const _hv = new Vector3(), _f2 = new Vector3(), _acc = new Vector3(), _sf = new Vector3(), _atm: Atmosphere = { T: 0, rho: 0, p: 0, a: 0, sigma: 0 };
+const AUTOBRAKE_DECEL = [0, 1.7, 3.0, 4.0];
 
 export class FlightModel {
   pos = new Vector3(); vel = new Vector3(); quat = new Quaternion(); w = new Vector3(); // w: body angular velocity rad/s
@@ -71,7 +79,7 @@ export class FlightModel {
   agl = 0; groundH = 0;
   events: ContactEvent[] = [];
   crashed = false; crashReason = '';
-  private t = 0; private lastVsAir = 0; private prevAccel = new Vector3();
+  private t = 0; private lastVsAir = 0;
   private gforce = new Vector3();
 
   constructor(public spec: AircraftSpec, public groundAt: (x: number, z: number) => number, fuelKg?: number) {
@@ -100,8 +108,8 @@ export class FlightModel {
     e.state = 1; e.t = 0; return '';
   }
   stopEngine(i: number) { const e = this.eng[i]; if (e) { e.state = 0; e.t = 0; } }
-  get enginesRunning() { return this.eng.slice(0, this.spec.engines).every((e) => e.state === 2); }
-  get anyEngineRunning() { return this.eng.slice(0, this.spec.engines).some((e) => e.state === 2); }
+  get enginesRunning() { for (let i = 0; i < this.spec.engines; i++) if (this.eng[i].state !== 2) return false; return true; }
+  get anyEngineRunning() { for (let i = 0; i < this.spec.engines; i++) if (this.eng[i].state === 2) return true; return false; }
   /** Place on ground (runway threshold / stand), heading in degrees true. `coldDark` = engines off, battery off, parking brake set. */
   placeOnRunway(x: number, z: number, hdg: number, groundY: number, coldDark = false) {
     const s = this.spec;
@@ -137,7 +145,7 @@ export class FlightModel {
   step(dt: number) {
     const s = this.spec, c = this.ctl;
     this.t += dt;
-    const atm = atmosphere(this.pos.y);
+    const atm = atmosphere(this.pos.y, _atm);
     this.rho = atm.rho;
 
     // ---- config actuators ----
@@ -154,7 +162,7 @@ export class FlightModel {
     const windNow = _v3.copy(this.wind).add(this.gust);
     const va = _v.copy(this.vel).sub(windNow);
     _qi.copy(this.quat).invert();
-    const vb = va.clone().applyQuaternion(_qi);
+    const vb = _vb.copy(va).applyQuaternion(_qi);
     const V = Math.max(0.1, vb.length());
     const u = -vb.z;
     this.alpha = Math.atan2(-vb.y, Math.max(0.5, u));
@@ -170,7 +178,7 @@ export class FlightModel {
     const rightW = _v2.set(1, 0, 0).applyQuaternion(this.quat);
     const upW = _v3.set(0, 1, 0).applyQuaternion(this.quat);
     this.bank = Math.atan2(-rightW.y, upW.y); // + = right wing down
-    const f2 = this.forward(new Vector3());
+    const f2 = this.forward(_f2);
     this.heading = ((Math.atan2(f2.x, -f2.z) * 180 / Math.PI) + 360) % 360;
     this.track = this.gs > 1 ? ((Math.atan2(this.vel.x, -this.vel.z) * 180 / Math.PI) + 360) % 360 : this.heading;
 
@@ -283,7 +291,7 @@ export class FlightModel {
           const lapse = Math.pow(atm.sigma, 0.78) * (1 - 0.32 * Math.min(this.mach, 1)) ;
           const idleT = 0.05;
           T = (s.thrust / nEng) * lapse * (idleT + (1 - idleT) * Math.pow(pf, 1.25));
-          if (c.reverse && this.wow) T = -(s.thrust / nEng) * 0.38 * Math.pow(pf, 1.2) * lapse - 0;
+          if (c.reverse && this.wow) T = -(s.thrust / nEng) * 0.38 * Math.pow(pf, 1.2) * lapse;
         } else {
           const pw = (s.power / nEng) * (s.kind === 'piston' ? Math.max(0.1, (atm.sigma - 0.12) / 0.88) * clamp(0.35 + c.mixture * 0.65, 0.35, 1) : Math.pow(atm.sigma, 0.7)) * (0.06 + 0.94 * Math.pow(pf, 1.1));
           const Vp = Math.max(0, u);
@@ -302,7 +310,7 @@ export class FlightModel {
     const inv = mass / (spec_ref_mass(s));
 
     // ---- aerodynamics (body frame) ----
-    const dirV = vb.clone().divideScalar(V);
+    const dirV = _dirV.copy(vb).divideScalar(V);
     // lift coefficient with post-stall blending
     let CLlin = CL0 + s.CLa * this.alpha;
     let CL: number;
@@ -325,12 +333,11 @@ export class FlightModel {
     if (s.kind === 'jet' && this.mach > 0.78) CD += 0.12 * (this.mach - 0.78) ** 1.5 * 12;
     CD += (this.damage / 100) * 0.02;
     const qS = this.qbar * s.S;
-    const Fb = new Vector3();
+    const Fb = _Fb.set(0, 0, 0);
     // drag along -dirV
     Fb.addScaledVector(dirV, -qS * CD);
     // lift perpendicular to velocity, in plane of body-up
-    const up = new Vector3(0, 1, 0);
-    const lDir = up.clone().addScaledVector(dirV, -up.dot(dirV));
+    const lDir = _lDir.copy(UP).addScaledVector(dirV, -UP.dot(dirV));
     if (lDir.lengthSq() > 1e-6) { lDir.normalize(); Fb.addScaledVector(lDir, qS * CL); }
     // side force
     Fb.x += -qS * 0.9 * this.beta;
@@ -346,16 +353,16 @@ export class FlightModel {
     const pHat = p * s.b / (2 * Vm), qHat = qrate * s.c / (2 * Vm), rHat = r * s.b / (2 * Vm);
     const Mpitch = qS * s.c * (s.Cm0 + s.Cma * this.alphaMoment(aStall) + s.Cmq * qHat) + qCtl * s.S * s.c * s.Cmde * this.surf.el * effK;
     const stallBuff = this.stalled ? Math.sin(this.t * 31) * 0.02 : 0;
-    const Mroll = qS * s.b * (s.Clb * this.beta + s.Clp * pHat + 0.05 * rHat * 0 + 0.02 * rHat) + qCtl * s.S * s.b * s.Clda * this.surf.ail * effK * (this.stalled ? 0.35 : 1);
+    const Mroll = qS * s.b * (s.Clb * this.beta + s.Clp * pHat + 0.02 * rHat) + qCtl * s.S * s.b * s.Clda * this.surf.ail * effK * (this.stalled ? 0.35 : 1);
     const Myaw = qS * s.b * (s.Cnb * this.beta + s.Cnr * rHat) + qCtl * s.S * s.b * s.Cndr * this.surf.rud * effK * 0.9;
     // propeller torque / p-factor
     const pf = s.propTorque * (s.kind === 'jet' ? 0 : 1) * (this.n[0] - s.idle) * Math.max(0, 1 - V / 70) * (s.power / nEng) / 1000 * 0.35;
     // moments in body torque vector: x pitch-up+, z roll-right negative, y yaw-left positive
-    const tau = new Vector3(Mpitch + stallBuff * qS * s.c, -(Myaw) + pf * 0.2, -(Mroll) + pf * 0.15);
+    const tau = _tauB.set(Mpitch + stallBuff * qS * s.c, -(Myaw) + pf * 0.2, -(Mroll) + pf * 0.15);
 
     // ---- world-frame force accumulation ----
     const Fw = Fb.applyQuaternion(this.quat);
-    const torqueW = new Vector3(); // from gear, in world frame
+    const torqueW = _torqueW.set(0, 0, 0); // from gear, in world frame
     Fw.y -= mass * G;
     // turbulence/gust updated externally into this.gust
 
@@ -368,23 +375,22 @@ export class FlightModel {
     // autobrake: decel target LO 1.7 / MED 3.0 / MAX 4.0 m/s² once the ground spoilers are out; pedals above 30 % disarm it
     let abBrake = 0;
     if (c.autobrake > 0 && this.wow && this.autoSb > 0 && this.gs > 6 && c.brake < 0.3) {
-      const tgt = [0, 1.7, 3.0, 4.0][Math.min(3, c.autobrake)];
+      const tgt = AUTOBRAKE_DECEL[Math.min(3, c.autobrake)];
       this.autoBrk = clamp(this.autoBrk + (tgt - (-this.nx * G)) * 0.22 * dt, 0, 1);
       abBrake = this.autoBrk;
     } else { this.autoBrk = 0; if (c.brake >= 0.3) c.autobrake = 0; }
     const brakeIn = c.parking ? 1 : Math.max(c.brake, abBrake) * c.brakePress; // no Yellow pressure / accumulator -> no wheel braking (parking brake still holds)
     const gearActive = this.gearPos > 0.9;
-    s.gear.forEach((g, i) => {
-      const st = this.gear[i];
+    for (let i = 0; i < s.gear.length; i++) {
+      const g = s.gear[i], st = this.gear[i];
       st.contact = false; st.fn = 0;
-      if (!gearActive) { st.comp = 0; return; }
-      const rLocal = _v2.set(g.pos[0], g.pos[1], g.pos[2]);
-      const rW = rLocal.clone().applyQuaternion(this.quat);
-      const pw = this.pos.clone().add(rW);
+      if (!gearActive) { st.comp = 0; continue; }
+      const rW = _rW.set(g.pos[0], g.pos[1], g.pos[2]).applyQuaternion(this.quat);
+      const pw = _pw.copy(this.pos).add(rW);
       const gh = this.groundAt(pw.x, pw.z);
       const pen = gh - pw.y;
-      if (pen <= 0) { st.comp = lerp(st.comp, 0, 0.3); return; }
-      const velP = this.vel.clone().add(new Vector3().copy(this.w).applyQuaternion(this.quat).cross(rW));
+      if (pen <= 0) { st.comp = lerp(st.comp, 0, 0.3); continue; }
+      const velP = _velP.copy(this.vel).add(_wv.copy(this.w).applyQuaternion(this.quat).cross(rW));
       const staticComp = Math.max(0.06, s.gearTravel * 0.45); // static oleo / spring deflection
       const gsh = this.share[i];
       const kSpring = (mass * G * gsh) / staticComp;
@@ -399,7 +405,7 @@ export class FlightModel {
       // tyre friction
       const fwdW = _v.set(0, 0, -1).applyQuaternion(this.quat); fwdW.y = 0; if (fwdW.lengthSq() < 1e-4) fwdW.set(0, 0, -1); fwdW.normalize();
       if (g.nose && steer) fwdW.applyAxisAngle(UP, -steer);
-      const latW = new Vector3().crossVectors(UP, fwdW).multiplyScalar(-1); // right-ish
+      const latW = _latW.crossVectors(UP, fwdW).multiplyScalar(-1); // right-ish
       const vl = velP.dot(fwdW), vt = velP.dot(latW);
       const brk = g.nose ? 0 : clamp(brakeIn + (g.pos[0] > 0 ? c.brakeR : c.brakeL), 0, 1);
       const rollRes = 0.015 + Math.min(0.012, 0.0008 * Math.abs(vl)) + brk * 0.45 * this.friction * (1 - 0.5 * this.wetness);
@@ -408,28 +414,29 @@ export class FlightModel {
       let FT = -Fn * (g.nose ? 0.9 : 1.0) * Math.tanh(vt * 2.2);
       FT = clamp(FT, -lim, lim);
       st.skid = Math.abs(vt) > 3 ? 1 : 0;
-      const F = new Vector3(0, Fn, 0).addScaledVector(fwdW, FL).addScaledVector(latW, FT);
+      const F = _F.set(0, Fn, 0).addScaledVector(fwdW, FL).addScaledVector(latW, FT);
       Fw.add(F);
-      torqueW.add(new Vector3().crossVectors(rW, F));
+      torqueW.add(_cr.crossVectors(rW, F));
       // touchdown event
       if (!this.wow && this.airborneTime > 1.5 && !this._tdFlag) {
         this._tdFlag = true;
-        this.events.push({ kind: 'touchdown', vs: this.lastVsAir, speed: this.gs, bank: this.bank, pitch: this.pitch, point: pw, severity: Math.abs(this.lastVsAir) / s.maxSink });
-        if (-this.lastVsAir > s.maxSink * 2.6 && this.gearPos > 0.9) { this.events.push({ kind: 'gearbreak', vs: this.lastVsAir, speed: this.gs, bank: this.bank, pitch: this.pitch, point: pw, severity: 2 }); }
+        this.events.push({ kind: 'touchdown', vs: this.lastVsAir, speed: this.gs, bank: this.bank, pitch: this.pitch, point: pw.clone(), severity: Math.abs(this.lastVsAir) / s.maxSink });
+        if (-this.lastVsAir > s.maxSink * 2.6 && this.gearPos > 0.9) { this.events.push({ kind: 'gearbreak', vs: this.lastVsAir, speed: this.gs, bank: this.bank, pitch: this.pitch, point: pw.clone(), severity: 2 }); }
       }
-    });
+    }
     this.wow = anyContact;
     if (!anyContact) { this.airborneTime += dt; this.lastVsAir = this.vel.y; if (this.agl > 2) this._tdFlag = false; }
     else if (this.wow) { this.airborneTime = 0; }
     // parking brake stiction
-    if (this.wow && c.parking && this.gs < 1.2 && thrust < s.thrust * 0.3 + s.power * 0.00002 + 1e9 * 0 && Math.abs(c.throttle) < 0.45) {
+    if (this.wow && c.parking && this.gs < 1.2 && thrust < s.thrust * 0.3 + s.power * 0.00002 && Math.abs(c.throttle) < 0.45) {
       this.vel.x *= 0.9; this.vel.z *= 0.9;
     }
 
     // ---- hull contacts (belly, tail, wing tips...) ----
-    for (const hp of s.hull) {
-      const rW = _v2.set(hp[0], hp[1], hp[2]).applyQuaternion(this.quat);
-      const pw = this.pos.clone().add(rW);
+    for (let hi = 0; hi < s.hull.length; hi++) {
+      const hp = s.hull[hi];
+      const rW = _rW.set(hp[0], hp[1], hp[2]).applyQuaternion(this.quat);
+      const pw = _pw.copy(this.pos).add(rW);
       const gh = this.groundAt(pw.x, pw.z);
       const pen = gh - pw.y;
       if (pen > 0) {
@@ -437,32 +444,32 @@ export class FlightModel {
         const vN = -this.vel.y;
         // scrape: strong friction + normal push
         const Fn = clamp(pen * mass * 12 + Math.max(0, vN) * mass * 6, 0, mass * G * 3);
-        const F = new Vector3(0, Fn, 0);
-        const hv = new Vector3(this.vel.x, 0, this.vel.z);
+        const F = _F.set(0, Fn, 0);
+        const hv = _hv.set(this.vel.x, 0, this.vel.z);
         F.addScaledVector(hv.normalize(), -Math.min(Fn * 0.6, mass * 6));
-        Fw.add(F); torqueW.add(new Vector3().crossVectors(rW, F));
+        Fw.add(F); torqueW.add(_cr.crossVectors(rW, F));
         const sev = Math.max(vN, 0) + sp * 0.05;
         this.damage += dt * (sp > 3 ? 20 + sp : 0) + Math.max(0, vN - 2) * 12;
-        this.events.push({ kind: 'hull', vs: -vN, speed: sp, bank: this.bank, pitch: this.pitch, point: pw, severity: sev });
+        this.events.push({ kind: 'hull', vs: -vN, speed: sp, bank: this.bank, pitch: this.pitch, point: pw.clone(), severity: sev });
         if ((vN > 9 || sp > 55 && vN > 5 || this.damage >= 100) && !this.crashed) { this.crashed = true; this.crashReason = vN > 9 || sp > 55 ? 'Impact with terrain' : 'Aircraft destroyed by ground contact'; }
       }
     }
 
     // ---- integrate ----
-    const acc = Fw.clone().divideScalar(mass);
+    const acc = _acc.copy(Fw).divideScalar(mass);
     this.gforce.copy(acc); this.gforce.y += G; // specific force (world)
-    const sf = this.gforce.clone().applyQuaternion(_qi.copy(this.quat).invert());
+    const sf = _sf.copy(this.gforce).applyQuaternion(_qi.copy(this.quat).invert());
     this.nz = sf.y / G; this.nx = -sf.z / G; this.ny = sf.x / G;
     this.vel.addScaledVector(acc, dt);
     // torque -> body
     const tB = torqueW.applyQuaternion(_qi.copy(this.quat).invert()).add(tau);
     // I axis mapping: body X = pitch axis (Iyy), Y = yaw axis (Izz), Z = roll axis (Ixx)
-    const Ib = new Vector3(s.Iyy * inv, s.Izz * inv, s.Ixx * inv);
-    const Iw = new Vector3(Ib.x * this.w.x, Ib.y * this.w.y, Ib.z * this.w.z);
-    const gyro = new Vector3().crossVectors(this.w, Iw);
-    this.w.x += ((tB.x - gyro.x) / Ib.x) * dt;
-    this.w.y += ((tB.y - gyro.y) / Ib.y) * dt;
-    this.w.z += ((tB.z - gyro.z) / Ib.z) * dt;
+    const ibx = s.Iyy * inv, iby = s.Izz * inv, ibz = s.Ixx * inv;
+    const iwx = ibx * this.w.x, iwy = iby * this.w.y, iwz = ibz * this.w.z;
+    const gyx = this.w.y * iwz - this.w.z * iwy, gyy = this.w.z * iwx - this.w.x * iwz, gyz = this.w.x * iwy - this.w.y * iwx; // w × (I·w)
+    this.w.x += ((tB.x - gyx) / ibx) * dt;
+    this.w.y += ((tB.y - gyy) / iby) * dt;
+    this.w.z += ((tB.z - gyz) / ibz) * dt;
     // ground damping to avoid numeric jitter at rest
     if (this.wow && this.gs < 2) this.w.multiplyScalar(1 - Math.min(0.5, dt * 3));
     this.w.clampLength(0, 6);
@@ -471,7 +478,6 @@ export class FlightModel {
     this.quat.normalize();
     this.pos.addScaledVector(this.vel, dt);
     if (this.vel.lengthSq() > 450 * 450) this.vel.setLength(450);
-    this.prevAccel.copy(acc);
     // harsh failure: ground collision destruction at huge speed handled above
   }
   _tdFlag = false; autoSb = 0; autoBrk = 0;
@@ -484,11 +490,15 @@ export class FlightModel {
   }
 
   /** Remaining headroom to V-speeds etc. used by warnings. */
-  limits() {
+  limits(out: { kias: number; overspeed: boolean; flapOver: boolean; gearOver: boolean; flapLim: number } = { kias: 0, overspeed: false, flapOver: false, gearOver: false, flapLim: 0 }) {
     const s = this.spec;
     const kias = this.ias / 0.514444;
-    const flapLim = s.vfe[Math.min(s.vfe.length - 1, this.ctl.flapsIdx)];
-    return { kias, overspeed: kias > s.vne || (s.kind === 'jet' && this.mach > 0.82), flapOver: this.flapsPos > 0.05 && kias > s.vfe[Math.min(s.vfe.length - 1, Math.max(1, Math.ceil(this.flapsPos * s.flapDetents)))] + 6, gearOver: this.gearPos > 0.02 && kias > s.vle + 5 && !this.wow, flapLim };
+    out.kias = kias;
+    out.flapLim = s.vfe[Math.min(s.vfe.length - 1, this.ctl.flapsIdx)];
+    out.overspeed = kias > s.vne || (s.kind === 'jet' && this.mach > 0.82);
+    out.flapOver = this.flapsPos > 0.05 && kias > s.vfe[Math.min(s.vfe.length - 1, Math.max(1, Math.ceil(this.flapsPos * s.flapDetents)))] + 6;
+    out.gearOver = this.gearPos > 0.02 && kias > s.vle + 5 && !this.wow;
+    return out;
   }
 }
 function spec_ref_mass(s: AircraftSpec) { return s.emptyMass + s.payload + s.fuelCap * 0.6; }

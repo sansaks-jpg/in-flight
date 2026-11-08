@@ -55,6 +55,8 @@ interface Tile {
   dist: number;
   /** performance.now()/1000 when the tile was last inside the streamed rings (drives the short eviction grace period). */
   lastSeen?: number;
+  /** performance.now()/1000 at creation: a tile whose imagery never arrives is shown (flat tint) after a grace period. */
+  born?: number;
 }
 
 export interface SatSample {
@@ -77,6 +79,8 @@ interface TerrainUniforms {
   uSkyColor: { value: THREE.Color };
   uWaterColor: { value: THREE.Color };
   uNoise: { value: THREE.Texture };
+  uLodBias: { value: number };
+  uDepthRes: { value: number };
 }
 
 
@@ -159,6 +163,8 @@ function patchTerrainMaterial(mat: THREE.MeshLambertMaterial, uni: TerrainUnifor
     Object.assign(sh.uniforms, uni);
     sh.vertexShader = sh.vertexShader
       .replace('#include <common>', `#include <common>
+        uniform float uLodBias;
+        uniform float uDepthRes;
         attribute float aShade;
         attribute float aWater;
         varying float vShade;
@@ -172,6 +178,12 @@ function patchTerrainMaterial(mat: THREE.MeshLambertMaterial, uni: TerrainUnifor
         vWater = aWater;
         vElevation = transformed.y;
         vTileUv = uv;
+        // Layering of the stacked LOD rings is done with a bias that follows the depth buffer's resolution at this distance
+        // (d^2 / (near * 2^24)); a fixed polygonOffset cannot, so coarse rings used to z-fight through the fine ones as ripples.
+        {
+          vec2 dxz = (modelMatrix * vec4(transformed, 1.0)).xz - cameraPosition.xz;
+          transformed.y -= uLodBias * (1.0 + 4.0 * dot(dxz, dxz) / uDepthRes);
+        }
         vWPos = (modelMatrix * vec4(transformed, 1.0)).xyz;
         vWorldNormal = normalize((modelMatrix * vec4(normal, 0.0)).xyz);`);
     sh.fragmentShader = sh.fragmentShader
@@ -283,9 +295,17 @@ function getIndexAttribute(N: number): THREE.BufferAttribute {
   return cached;
 }
 
+const TILE_HEIGHTS = (t: Tile) => t.heights;
+const TILE_WATER = (t: Tile) => t.water;
+
 export class Terrain {
   group = new THREE.Group();
   tiles = new Map<string, Tile>();
+  private tileIdx = new Map<number, Tile>();
+  private tileAt(z: number, x: number, y: number): Tile | undefined {
+    if (x < 0 || y < 0 || x >= 4194304 || y >= 4194304) return undefined;
+    return this.tileIdx.get((z * 4194304 + x) * 4194304 + y);
+  }
   lods: LodCfg[];
   holeUniforms: { uHole: { value: THREE.Vector4 } }[];
   ringReady: boolean[] = [];
@@ -300,6 +320,8 @@ export class Terrain {
   private emptyTex = makeEmptyTexture();
   private noiseTex: THREE.Texture;
   private timeU = { value: 0 };
+  private depthResU = { value: 1e7 };
+  private ringT = 0; private ringSig = -1; private ringDirty = true;
   private sunU = { value: new THREE.Vector3(0.45, 0.8, 0.3).normalize() };
   private skyU = { value: new THREE.Color(0.62, 0.76, 0.9) };
   private waterU = { value: new THREE.Color(0.035, 0.10, 0.17) };
@@ -333,6 +355,12 @@ export class Terrain {
     this.ringReady = [];
   }
 
+  /** The world camera's near plane sets the depth-buffer resolution the ring bias has to beat. */
+  setDepthNear(near: number) { this.depthResU.value = Math.max(0.05, near) * 16777216; }
+
+  /** Coarsest ring first: the base layer from horizon to horizon must exist before any finer tile is fetched or built (no voids / skirt walls). */
+  private prioOf(t: Tile) { return (this.lods.length - 1 - t.lod) * 10 + t.dist; }
+
   /** Lighting/time-of-day feedback used by the water and satellite shading. */
   setEnvironment(sky: THREE.Color, sunDir: THREE.Vector3) {
     this.skyU.value.copy(sky);
@@ -346,7 +374,7 @@ export class Terrain {
     for (let l = 0; l < this.lods.length; l++) {
       const cfg = this.lods[l], S = tileSizeMerc(cfg.z);
       const tx = Math.floor((mx + Math.PI * R_MERC) / S), ty = Math.floor((Math.PI * R_MERC - my) / S);
-      const t = this.tiles.get(`${cfg.z}/${tx}/${ty}`);
+      const t = this.tileAt(cfg.z, tx, ty);
       const H = t ? field(t) : null;
       if (t && H) {
         const N = cfg.N;
@@ -362,11 +390,11 @@ export class Terrain {
     return null;
   }
   /** Terrain elevation (metres MSL) from the loaded DEM mesh. */
-  heightAt(x: number, z: number): number { return this.sampleField(x, z, (t) => t.heights) ?? this.fallbackH; }
+  heightAt(x: number, z: number): number { return this.sampleField(x, z, TILE_HEIGHTS) ?? this.fallbackH; }
   /** 0..1 water mask matching the rendered coastline (1 = sea or lake). */
-  waterAt(x: number, z: number): number { return this.sampleField(x, z, (t) => t.water) ?? 0; }
+  waterAt(x: number, z: number): number { return this.sampleField(x, z, TILE_WATER) ?? 0; }
   /** True once real DEM heights (not the airport fallback) are available here. */
-  heightReady(x: number, z: number): boolean { return this.sampleField(x, z, (t) => t.heights) !== null; }
+  heightReady(x: number, z: number): boolean { return this.sampleField(x, z, TILE_HEIGHTS) !== null; }
   /** True once 1:1 satellite pixel samples are ready under this world coordinate. */
   satReady(x: number, z: number): boolean { return this.sampleSatellite(x, z) !== null; }
 
@@ -379,7 +407,7 @@ export class Terrain {
     for (let l = 0; l < this.lods.length; l++) {
       const cfg = this.lods[l], S = tileSizeMerc(cfg.z);
       const tx = Math.floor((mx + Math.PI * R_MERC) / S), ty = Math.floor((Math.PI * R_MERC - my) / S);
-      const t = this.tiles.get(`${cfg.z}/${tx}/${ty}`);
+      const t = this.tileAt(cfg.z, tx, ty);
       if (t && t.satGrid) {
         const u = clamp((mx + Math.PI * R_MERC) / S - tx, 0, 0.9999);
         const v = clamp((Math.PI * R_MERC - my) / S - ty, 0, 0.9999);
@@ -429,50 +457,72 @@ export class Terrain {
     if (sunDir) this.sunU.value.copy(sunDir);
     const nowS = performance.now() / 1000;
     const mx = camX / this.proj.k + this.proj.ox, my = -camZ / this.proj.k + this.proj.oy;
-    const wanted = this.wantedKeys; wanted.clear();
-    this.lods.forEach((cfg, l) => {
-      const S = tileSizeMerc(cfg.z), n = 2 ** cfg.z;
-      const cx = Math.floor((mx + Math.PI * R_MERC) / S), cy = Math.floor((Math.PI * R_MERC - my) / S);
-      for (let dy = -cfg.r; dy <= cfg.r; dy++) for (let dx = -cfg.r; dx <= cfg.r; dx++) {
-        const ty = cy + dy; if (ty < 0 || ty >= n) continue;
-        const tx = cx + dx;
-        const key = `${cfg.z}/${tx}/${ty}`;
-        wanted.add(key);
-        const t = this.tiles.get(key);
-        if (t) {
-          t.lastSeen = nowS;
-          if (t.mesh) t.mesh.visible = true;
-        } else {
-          this.createTile(key, l, cfg.z, tx, ty, Math.hypot(dx, dy));
+    const lods = this.lods, last = lods.length - 1;
+
+    // Ring bookkeeping (string keys, Set / Map walks) is the expensive part of this method and only changes when the aircraft crosses a tile
+    // border of some ring or a tile finishes building: it runs at most 4x per second instead of every rendered frame.
+    let sig = 0;
+    for (let l = 0; l < lods.length; l++) {
+      const S = tileSizeMerc(lods[l].z);
+      sig = (sig * 1000003 + Math.floor((mx + Math.PI * R_MERC) / S) * 4099 + Math.floor((Math.PI * R_MERC - my) / S)) % 1e15;
+    }
+    const due = sig !== this.ringSig || this.ringDirty || nowS - this.ringT > 0.25;
+    if (due) {
+      this.ringSig = sig; this.ringT = nowS; this.ringDirty = false;
+      const wanted = this.wantedKeys; wanted.clear();
+      lods.forEach((cfg, l) => {
+        const S = tileSizeMerc(cfg.z), n = 2 ** cfg.z;
+        const cx = Math.floor((mx + Math.PI * R_MERC) / S), cy = Math.floor((Math.PI * R_MERC - my) / S);
+        for (let dy = -cfg.r; dy <= cfg.r; dy++) for (let dx = -cfg.r; dx <= cfg.r; dx++) {
+          const ty = cy + dy; if (ty < 0 || ty >= n) continue;
+          const tx = cx + dx;
+          const key = `${cfg.z}/${tx}/${ty}`;
+          wanted.add(key);
+          const t = this.tiles.get(key);
+          if (t) {
+            t.lastSeen = nowS;
+            // A fine tile without its imagery would show a flat tint on top of the textured coarse ring: keep it hidden until it is dressed
+            // (or until a grace period shows that the imagery is not coming).
+            if (t.mesh) t.mesh.visible = !!t.tex || l >= last - 1 || nowS - (t.born ?? 0) > 12;
+          } else {
+            this.createTile(key, l, cfg.z, tx, ty, Math.hypot(dx, dy));
+          }
         }
+      });
+      // Tiles that just left the rings (the aircraft crossed a tile border) stay for a few seconds so a jittering border cannot thrash fetch/build.
+      for (const [k, t] of this.tiles) {
+        if (wanted.has(k)) continue;
+        if (nowS - (t.lastSeen ?? 0) > 6) this.disposeTile(t, k);
       }
-    });
-    // Tiles that just left the rings (the aircraft crossed a tile border) stay for a few seconds so a jittering border cannot thrash fetch/build.
-    for (const [k, t] of this.tiles) {
-      if (wanted.has(k)) continue;
-      if (nowS - (t.lastSeen ?? 0) > 6) this.disposeTile(t, k);
     }
-    // build at most 1-2 meshes per frame within a strict 2.2 ms frame budget
-    let built = 0;
+    // Build meshes coarsest-first (the horizon-to-horizon base layer before any detail), at least one per frame, within a ~3 ms budget.
+    const q = this.buildQueue;
     const t0 = performance.now();
-    while (this.buildQueue.length && built < 2 && performance.now() - t0 < 2.2) {
-      const it = this.buildQueue.shift()!;
-      if (!it.tile.disposed) { this.buildMesh(it.tile, it.img); built++; }
+    let built = 0;
+    while (q.length && (built === 0 || (built < 3 && performance.now() - t0 < 3))) {
+      let bi = 0;
+      for (let i = 1; i < q.length; i++) {
+        const a = q[i].tile, b = q[bi].tile;
+        if (a.lod > b.lod || (a.lod === b.lod && a.dist < b.dist)) bi = i;
+      }
+      const it = q.splice(bi, 1)[0];
+      if (!it.tile.disposed) { this.buildMesh(it.tile, it.img); built++; this.ringDirty = true; }
     }
-    // hole uniforms: hide coarser tiles under finer ring when that ring is entirely built
-    this.lods.forEach((cfg, l) => {
+    if (!due && !this.ringDirty) return;
+    // hole uniforms: hide coarser tiles under a finer ring once that ring is entirely built AND dressed with imagery
+    lods.forEach((cfg, l) => {
       let all = true, minX = 1e18, maxX = -1e18, minZ = 1e18, maxZ = -1e18;
       const S = tileSizeMerc(cfg.z), n = 2 ** cfg.z;
       const cx = Math.floor((mx + Math.PI * R_MERC) / S), cy = Math.floor((Math.PI * R_MERC - my) / S);
       for (let dy = -cfg.r; dy <= cfg.r; dy++) for (let dx = -cfg.r; dx <= cfg.r; dx++) {
         const ty = cy + dy; if (ty < 0 || ty >= n) continue;
-        const t = this.tiles.get(`${cfg.z}/${cx + dx}/${ty}`);
-        if (!t || !t.mesh) { all = false; continue; }
+        const t = this.tileAt(cfg.z, cx + dx, ty);
+        if (!t || !t.mesh || !(t.tex || nowS - (t.born ?? 0) > 12)) { all = false; continue; }
         minX = Math.min(minX, t.mesh.position.x - S * this.proj.k / 2); maxX = Math.max(maxX, t.mesh.position.x + S * this.proj.k / 2);
         minZ = Math.min(minZ, t.mesh.position.z - S * this.proj.k / 2); maxZ = Math.max(maxZ, t.mesh.position.z + S * this.proj.k / 2);
       }
       this.ringReady[l] = all;
-      if (l + 1 < this.lods.length) {
+      if (l + 1 < lods.length) {
         const u = this.holeUniforms[l + 1].uHole.value;
         if (all) u.set(minX + 350, maxX - 350, minZ + 350, maxZ - 350); else u.set(0, 0, 0, 0);
       }
@@ -500,14 +550,15 @@ export class Terrain {
   private placeMesh(t: Tile) {
     const S = tileSizeMerc(t.z), p = this.proj;
     const cmx = -Math.PI * R_MERC + (t.x + 0.5) * S, cmy = Math.PI * R_MERC - (t.y + 0.5) * S;
-    t.mesh!.position.set((cmx - p.ox) * p.k, -this.lods[t.lod].drop, -(cmy - p.oy) * p.k);
+    t.mesh!.position.set((cmx - p.ox) * p.k, -Math.min(3, this.lods[t.lod].drop), -(cmy - p.oy) * p.k);
     t.mesh!.scale.set(p.k, 1, p.k);
   }
 
   private createTile(key: string, lod: number, z: number, x: number, y: number, dist: number) {
     const t: Tile = { key, lod, z, x, y, mesh: null, heights: null, water: null, satGrid: null, demDone: false, texDone: false, tex: null, overlayTex: null, disposed: false, synthetic: false, dist, lastSeen: performance.now() / 1000 };
-    this.tiles.set(key, t);
-    const prio = lod * 10 + dist;
+    this.tiles.set(key, t); this.tileIdx.set((z * 4194304 + x) * 4194304 + y, t);
+    t.born = performance.now() / 1000;
+    const prio = this.prioOf(t);
     loadImage(tileUrl(ELEVATION_URL, z, x, y), prio).then((img) => {
       if (t.disposed) return;
       if (img) this.demOk++; else { this.demFailures++; this.retryElevation(t, 1, prio); }
@@ -580,13 +631,13 @@ export class Terrain {
       const cz = t.z + lv, cx0 = t.x * f, cy0 = t.y * f;
       const urls: string[] = [];
       for (let dy = 0; dy < f; dy++) for (let dx = 0; dx < f; dx++) urls.push(tileUrl(st.url, cz, cx0 + dx, cy0 + dy));
-      Promise.all(urls.map((u, i) => loadImage(u, 1 + i * 0.05))).then((imgs) => {
+      Promise.all(urls.map((u, i) => loadImage(u, this.prioOf(t) + 1 + i * 0.01))).then((imgs) => {
         if (t.disposed || style !== this.styleId) return;
         t.texDone = true;
         const got = imgs.filter(Boolean) as HTMLImageElement[];
         if (got.length === urls.length) { this.setStitchedTexture(t, got, f); return; }
         // Partial grid: fall back to the plain tile so the texture stays aligned to the mesh.
-        loadImage(tileUrl(st.url, t.z, t.x, t.y), 1).then((img) => {
+        loadImage(tileUrl(st.url, t.z, t.x, t.y), this.prioOf(t) + 1).then((img) => {
           if (t.disposed || style !== this.styleId) return;
           if (img) this.setBaseTexture(t, img);
           else if (st.fallbackUrl) {
@@ -598,12 +649,12 @@ export class Terrain {
         });
       });
     } else {
-      loadImage(tileUrl(st.url, t.z, t.x, t.y), t.lod * 10 + 1).then((img) => {
+      loadImage(tileUrl(st.url, t.z, t.x, t.y), this.prioOf(t) + 1).then((img) => {
         if (t.disposed || style !== this.styleId) return;
         t.texDone = true;
         if (img) this.setBaseTexture(t, img);
         else if (st.fallbackUrl) {
-          loadImage(tileUrl(st.fallbackUrl, Math.min(t.z, 19), t.x, t.y), t.lod * 10 + 6).then((fb) => {
+          loadImage(tileUrl(st.fallbackUrl, Math.min(t.z, 19), t.x, t.y), this.prioOf(t) + 6).then((fb) => {
             if (t.disposed || style !== this.styleId || !fb) return;
             this.setBaseTexture(t, fb);
           });
@@ -614,7 +665,7 @@ export class Terrain {
     if (st.overlayUrl && st.terrainOverlay) {
       const oz = Math.min(t.z, st.overlayMaxZoom ?? st.maxZoom);
       if (oz === t.z) {
-        loadImage(tileUrl(st.overlayUrl, t.z, t.x, t.y), t.lod * 10 + 2).then((img) => {
+        loadImage(tileUrl(st.overlayUrl, t.z, t.x, t.y), this.prioOf(t) + 2).then((img) => {
           if (t.disposed || style !== this.styleId || !img) return;
           const tex = new THREE.Texture(img);
           tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = this.maxAniso; tex.generateMipmaps = true;
@@ -667,6 +718,7 @@ export class Terrain {
     if (!t.mesh || !t.tex) return;
     const m = t.mesh.material as THREE.MeshLambertMaterial;
     m.map = t.tex; m.vertexColors = false; m.color.set(0xffffff); m.needsUpdate = true;
+    this.ringDirty = true;
   }
   private applyOverlay(t: Tile) {
     if (!t.mesh) return;
@@ -681,7 +733,7 @@ export class Terrain {
   }
 
   private disposeTile(t: Tile, key: string) {
-    t.disposed = true; this.tiles.delete(key);
+    t.disposed = true; this.tiles.delete(key); this.tileIdx.delete((t.z * 4194304 + t.x) * 4194304 + t.y);
     if (t.mesh) { this.group.remove(t.mesh); t.mesh.geometry.dispose(); (t.mesh.material as THREE.Material).dispose(); }
     if (t.tex) t.tex.dispose();
     if (t.overlayTex) t.overlayTex.dispose();
@@ -822,9 +874,6 @@ export class Terrain {
     const mat = new THREE.MeshLambertMaterial({
       vertexColors: true,
       side: THREE.DoubleSide,
-      polygonOffset: t.lod > 0,
-      polygonOffsetFactor: t.lod,
-      polygonOffsetUnits: t.lod * 2.0,
     });
     const hole = this.holeUniforms[t.lod] ?? { uHole: { value: new THREE.Vector4(0, 0, 0, 0) } };
     const uni: TerrainUniforms = {
@@ -837,11 +886,14 @@ export class Terrain {
       uSkyColor: this.skyU,
       uWaterColor: this.waterU,
       uNoise: { value: this.noiseTex },
+      uLodBias: { value: t.lod },
+      uDepthRes: this.depthResU,
     };
     (mat.userData as { uni: TerrainUniforms }).uni = uni;
     patchTerrainMaterial(mat, uni);
     const mesh = new THREE.Mesh(geo, mat);
     mesh.matrixAutoUpdate = true; mesh.frustumCulled = true;
+    mesh.visible = !!t.tex || t.lod >= this.lods.length - 2; // fine tiles stay hidden until their imagery is applied (see update())
     t.mesh = mesh; this.placeMesh(t);
     this.group.add(mesh);
     if (t.tex) this.applyTexture(t);

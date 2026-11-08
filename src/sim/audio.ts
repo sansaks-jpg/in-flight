@@ -177,6 +177,12 @@ export class AudioEngine {
     this.halted = true; this.quiet();
     if (this.ctx && this.ctx.state === 'running') void this.ctx.suspend().catch(() => undefined);
   }
+  /** Permanently releases the AudioContext (browsers allow only a handful per page). `start()` builds a fresh one if called again. */
+  close() {
+    this.silence();
+    const c = this.ctx; this.ctx = null; this.eng = null;
+    if (c && c.state !== 'closed') void c.close().catch(() => undefined);
+  }
   /** Total silence (new flight, menu, crash): forgets all queued speech too. */
   silence() { this.voice.clear(); this.quiet(); }
   private quiet() {

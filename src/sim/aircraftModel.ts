@@ -69,6 +69,7 @@ export function buildAircraftModel(spec: AircraftSpec): AircraftVisual {
   const accent = std(spec.accent, 0.38, 0.15), dark = std(0x1a1e23, 0.55, 0.3), metal = std(0x9aa3ab, 0.32, 0.85), rubber = std(0x101112, 0.95, 0), steel = std(0x5d646b, 0.4, 0.8);
   const glass = std(0x0a141d, 0.06, 0.85, { transparent: true, opacity: 0.9 }), panelMat = std(0xe3e7ea, 0.4, 0.2), wingMat = std(0xeef1f3, 0.36, 0.15);
   const mesh = (g: THREE.BufferGeometry, m: THREE.Material, p?: V3, parent: THREE.Object3D = root) => { const o = new THREE.Mesh(g, m); if (p) o.position.set(...p); parent.add(o); return o; };
+  const spoilerMat = std(0xaab1b6, 0.5, 0.2, { side: THREE.DoubleSide }); // wing-coloured like the real thing (a black material read as ragged holes when raised)
   const flaps: Panel[] = [], ailerons: Panel[] = [], spoilers: Panel[] = [], elevators: Panel[] = [], rudders: Panel[] = [];
   const navs: THREE.Mesh[] = [], strobes: THREE.Mesh[] = [];
   const bulb = (c: number, r: number, p: V3, parent: THREE.Object3D = root, list?: THREE.Mesh[]) => { const m = new THREE.Mesh(new THREE.SphereGeometry(r, 8, 6), new THREE.MeshBasicMaterial({ color: c })); m.position.set(...p); parent.add(m); list?.push(m); return m; };
@@ -119,9 +120,16 @@ export function buildAircraftModel(spec: AircraftSpec): AircraftVisual {
     for (const sd of sides) { const gp = new THREE.Group(); gp.scale.x = sd; root.add(gp); mesh(geo, mat, undefined, gp); groups.push(gp); }
     return groups;
   };
+  // Control-surface panels are laid ON the wing skin (same plane): without a depth offset they z-fight with it and show up as dark/white streaks.
+  const offsetMats = new Map<THREE.Material, THREE.Material>();
+  const panelOffset = (m: THREE.Material) => {
+    let c = offsetMats.get(m);
+    if (!c) { c = m.clone(); c.polygonOffset = true; c.polygonOffsetFactor = -2; c.polygonOffsetUnits = -4; offsetMats.set(m, c); }
+    return c;
+  };
   const addPanel = (w: Wing, gp: THREE.Group, s0: number, s1: number, h: number, mat: THREE.Material, list: Panel[], side: number) => {
     const sf = w.surface(s0, s1, h); const pivot = new THREE.Group(); pivot.position.copy(sf.origin); gp.add(pivot);
-    mesh(sf.geo, mat, undefined, pivot); (pivot as any).userData = { side }; list.push({ pivot, axis: sf.axis }); return pivot;
+    mesh(sf.geo, panelOffset(mat), undefined, pivot); (pivot as any).userData = { side }; list.push({ pivot, axis: sf.axis }); return pivot;
   };
   let wingW: Wing, fin: Wing, stab: Wing;
   if (jet) {
@@ -130,7 +138,7 @@ export function buildAircraftModel(spec: AircraftSpec): AircraftVisual {
     const span = (y: number) => (y - 1.6) / 15.45, wg = addWing(wingW, wingMat, { segs: 22 });
     wg.forEach((gp, i) => { const sd = i ? -1 : 1;
       addPanel(wingW, gp, span(2.7), span(5.25), 0.72, panelMat, flaps, sd); addPanel(wingW, gp, span(6.45), span(10.6), 0.72, panelMat, flaps, sd); addPanel(wingW, gp, span(12.0), span(16.3), 0.78, panelMat, ailerons, sd);
-      addPanel(wingW, gp, span(3.0), span(10.4), 0.66, dark, spoilers, sd); bulb(sd > 0 ? 0x00ff55 : 0xff2200, 0.1, [wingW.pt(1, 0.5).x, wingW.pt(1, 0.5).y, wingW.pt(1, 1).z + 0.05], gp, navs);
+      addPanel(wingW, gp, span(3.0), span(10.4), 0.66, spoilerMat, spoilers, sd); bulb(sd > 0 ? 0x00ff55 : 0xff2200, 0.1, [wingW.pt(1, 0.5).x, wingW.pt(1, 0.5).y, wingW.pt(1, 1).z + 0.05], gp, navs);
     });
     // wingtip: small raked fence
     fin = new Wing([{ y: 1.7, le: 11.4, chord: 6.05, t: 0.1 }, { y: 4.5, le: 13.1, chord: 3.7, t: 0.09 }, { y: 8.46, le: 15.9, chord: 2.2, t: 0.075 }], [0, 0, 0], 0.1, 0, true);

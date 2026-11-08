@@ -965,7 +965,8 @@ export class Cockpit {
     this.ctx.d = data; this.ctx.host = h; this.ctx.t = time; this.ctx.utc = new Date(simNowMs());
     for (const m of this.mcdu) m.attach(h);
     // lighting (day/night)
-    const dl = this.daylight; this.hemi.intensity = 0.55 + 1.5 * dl + (1 - dl) * (0.9 * s.bright.flood + [0, 0.25, 0.7][this.groups.get('DomeLtSwtch')?.pos ?? 0]);   // DOME lt DIM / BRT /* panel / flood lights at night */ this.sun.intensity = 1.6 * dl;
+    const dl = this.daylight; this.hemi.intensity = 0.55 + 1.5 * dl + (1 - dl) * (0.9 * s.bright.flood + [0, 0.25, 0.7][this.groups.get('DomeLtSwtch')?.pos ?? 0]);   // DOME lt DIM / BRT (panel / flood lights at night)
+    this.sun.intensity = 1.6 * dl;
     // screens: culled, resolution-scaled and time-sliced (PFD first, secondary pages at 10-20 Hz, clock 2 Hz) – see scheduleScreens()
     this.camera.updateMatrixWorld(); this.pv.multiplyMatrices(this.camera.projectionMatrix, this.camera.matrixWorldInverse); this.frustum.setFromProjectionMatrix(this.pv);
     this.scheduleScreens(time, s);
@@ -1082,7 +1083,23 @@ export class Cockpit {
     const p = this.pickGroup(ray); return p ? { id: p.g.id, point: p.hit.point } : null;
   }
   get inputs() { return this.lastInp; }
-  dispose() { this.fallback?.dispose(); this.scene.traverse((o) => { const m = o as THREE.Mesh; m.geometry?.dispose?.(); }); for (const s of this.screens) { s.tex.dispose(); s.mat.dispose(); } }
+  /** Releases every GPU resource of the deck: geometry, materials and *all* their texture slots (the GLB carries ~340 MB of decoded textures). */
+  dispose() {
+    this.fallback?.dispose();
+    const seen = new Set<THREE.Material>();
+    const freeMat = (m: THREE.Material) => {
+      if (seen.has(m)) return; seen.add(m);
+      for (const v of Object.values(m)) if (v && (v as THREE.Texture).isTexture) (v as THREE.Texture).dispose();
+      m.dispose();
+    };
+    this.scene.traverse((o) => {
+      const m = o as THREE.Mesh; m.geometry?.dispose?.();
+      const mat = m.material as THREE.Material | THREE.Material[] | undefined;
+      if (Array.isArray(mat)) mat.forEach(freeMat); else if (mat) freeMat(mat);
+    });
+    for (const s of this.screens) { s.tex.dispose(); freeMat(s.mat); }
+    this.efbTex?.dispose(); this.fcuTex?.dispose();
+  }
   /** First-person seat positions in body space (captain / first officer). */
   eyeBody(fo = false) { const e = fo ? FO_EYE_M : EYE_M; const [ex, ey, ez] = this.spec.eye; const tx = ex + EYE_M.z, ty = ey - EYE_M.y, tz = ez - EYE_M.x; return new THREE.Vector3(-e.z + tx, e.y + ty, e.x + tz); }
 

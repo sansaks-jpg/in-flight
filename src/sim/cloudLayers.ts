@@ -46,7 +46,8 @@ export function planCloudLayers(w: CloudWxIn, out: CloudLayer[]): CloudLayer[] {
     Object.assign(low, { base: w.groundM + 25, top: w.groundM + 260, cover: 1, kind: 0, density: 1.1 });
   } else {
     // cumulus humilis ≈ 400-600 m deep, stratocumulus ≈ 700-900 m, nimbostratus 1.5-2.5 km deep
-    let thick = 450 + 650 * c0;
+    // cumulus grow tall (≈ 1.0 km at 45 % cover, domed towers rather than pancakes); a full deck flattens into ≈ 900 m of stratocumulus
+    let thick = 550 + 1150 * c0 * (1 - 0.55 * sstep(0.7, 1, c0));
     if (wet > 0.05) thick = Math.max(thick, 1500 + 1000 * wet);
     Object.assign(low, { base: w.lowBaseMsl, top: w.lowBaseMsl + thick, cover: c0, kind: 0, density: 1 + 0.25 * wet });
   }
@@ -71,7 +72,7 @@ export function planCloudLayers(w: CloudWxIn, out: CloudLayer[]): CloudLayer[] {
 
 /** Share of the ray-march step budget per layer (low, mid, high, storm); the storm column gets the most when active. */
 export function stepBudget(total: number, layers: CloudLayer[], out: number[]): number[] {
-  const wts = [0.42, 0.16, 0.12, 0.5];
+  const wts = [0.6, 0.14, 0.1, 0.6];
   let sum = 0;
   for (let i = 0; i < 4; i++) { wts[i] = layers[i].cover >= 0.03 ? wts[i] : 0; sum += wts[i]; }
   for (let i = 0; i < 4; i++) out[i] = sum > 0 ? Math.max(wts[i] > 0 ? 4 : 0, Math.round((total * wts[i]) / sum)) : 0;

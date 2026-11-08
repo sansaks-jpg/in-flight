@@ -32,6 +32,8 @@ export interface QualityProfile {
    *  preset — the structures.ts branch is dormant until a tier opts in). */
   outerRing: boolean;
   clouds: number;
+  /** Total ray-march step budget of the volumetric clouds (shared between the active layers, see cloudLayers.stepBudget). */
+  cloudSteps: number;
   /** Rain / snow particle budget around the camera (arrays are allocated once for the largest preset). */
   precipMax: number;
   buildingBudget: { full: number; roof: number; settlement: number };
@@ -69,6 +71,7 @@ export const QUALITY: Record<QualityPreset, QualityProfile> = {
     structureMaxAgl: 0,
     outerRing: false,
     clouds: 14,
+    cloudSteps: 26,
     precipMax: 700,
     buildingBudget: { full: 0, roof: 0, settlement: 0 },
     treeBudget: { count: 0, maxDist: 0, step: 0, fullCount: 0, fullDist: 0 },
@@ -93,6 +96,7 @@ export const QUALITY: Record<QualityPreset, QualityProfile> = {
     structureMaxAgl: 9000,
     outerRing: false,
     clouds: 24,
+    cloudSteps: 42,
     precipMax: 1500,
     buildingBudget: { full: 0, roof: 0, settlement: 0 },
     treeBudget: { count: 850, maxDist: 3000, step: 16, fullCount: 850, fullDist: 3000 },
@@ -117,6 +121,7 @@ export const QUALITY: Record<QualityPreset, QualityProfile> = {
     structureMaxAgl: 13000,
     outerRing: false,
     clouds: 36,
+    cloudSteps: 64,
     precipMax: 2600,
     buildingBudget: { full: 600, roof: 850, settlement: 0 },
     treeBudget: { count: 850, maxDist: 3000, step: 16, fullCount: 850, fullDist: 3000 },
@@ -141,6 +146,7 @@ export const QUALITY: Record<QualityPreset, QualityProfile> = {
     structureMaxAgl: 16000,
     outerRing: false,
     clouds: 48,
+    cloudSteps: 96,
     precipMax: 4200,
     buildingBudget: { full: 900, roof: 1200, settlement: 350 },
     treeBudget: { count: 1500, maxDist: 3800, step: 14, fullCount: 1500, fullDist: 3800 },

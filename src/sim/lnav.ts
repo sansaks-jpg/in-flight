@@ -45,21 +45,29 @@ export function inboundCourse(plan: FlightWaypoint[], idx: number, lat: number, 
   return bearing(lat, lon, wp.lat, wp.lon);
 }
 
+// legGuidance runs every frame while the autopilot is on: its result and the geodesic tuples are scratch objects (read before the next call).
+const _leg: LegGuidance = { course: 0, xtkM: 0, alongToGoM: 0, distToWpM: 0, legLenM: 0, direct: true };
+const _xt: [number, number] = [0, 0], _pt: [number, number] = [0, 0];
+function directLeg(lat: number, lon: number, wp: FlightWaypoint, dist: number): LegGuidance {
+  _leg.course = bearing(lat, lon, wp.lat, wp.lon); _leg.xtkM = 0; _leg.alongToGoM = dist; _leg.distToWpM = dist; _leg.legLenM = dist; _leg.direct = true;
+  return _leg;
+}
 export function legGuidance(plan: FlightWaypoint[], idx: number, lat: number, lon: number): LegGuidance {
   const wp = plan[idx];
   const dist = haversine(lat, lon, wp.lat, wp.lon);
-  const direct = (): LegGuidance => ({ course: bearing(lat, lon, wp.lat, wp.lon), xtkM: 0, alongToGoM: dist, distToWpM: dist, legLenM: dist, direct: true });
   const prev = idx > 0 ? plan[idx - 1] : null;
-  if (!prev) return direct();
+  if (!prev) return directLeg(lat, lon, wp, dist);
   const legLen = haversine(prev.lat, prev.lon, wp.lat, wp.lon);
-  if (legLen < 150) return direct();
-  const [xtk, atk] = crossTrack(lat, lon, prev.lat, prev.lon, wp.lat, wp.lon);
-  if (Math.abs(xtk) > DIRECT_TO_XTK_M || atk < -DIRECT_TO_XTK_M) return direct();
+  if (legLen < 150) return directLeg(lat, lon, wp, dist);
+  crossTrack(lat, lon, prev.lat, prev.lon, wp.lat, wp.lon, _xt);
+  const xtk = _xt[0], atk = _xt[1];
+  if (Math.abs(xtk) > DIRECT_TO_XTK_M || atk < -DIRECT_TO_XTK_M) return directLeg(lat, lon, wp, dist);
   // Great-circle course changes along the leg: take it at the aircraft's own along-track position.
   const legBrg = bearing(prev.lat, prev.lon, wp.lat, wp.lon);
-  const [pl, po] = destination(prev.lat, prev.lon, legBrg, clamp(atk, 0, legLen - 1));
-  const course = haversine(pl, po, wp.lat, wp.lon) > 30 ? bearing(pl, po, wp.lat, wp.lon) : legBrg;
-  return { course, xtkM: xtk, alongToGoM: legLen - atk, distToWpM: dist, legLenM: legLen, direct: false };
+  destination(prev.lat, prev.lon, legBrg, clamp(atk, 0, legLen - 1), _pt);
+  const course = haversine(_pt[0], _pt[1], wp.lat, wp.lon) > 30 ? bearing(_pt[0], _pt[1], wp.lat, wp.lon) : legBrg;
+  _leg.course = course; _leg.xtkM = xtk; _leg.alongToGoM = legLen - atk; _leg.distToWpM = dist; _leg.legLenM = legLen; _leg.direct = false;
+  return _leg;
 }
 
 /** Heading offset (°) that intercepts / holds the leg. Gain scales with ground speed for a constant capture time. */

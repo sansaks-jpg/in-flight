@@ -79,44 +79,59 @@ uniform vec3 uSunDir; uniform vec3 uSunCol; uniform vec3 uAmbTop; uniform vec3 u
 uniform vec3 uFogCol; uniform float uFogRho; uniform vec3 uDrift; uniform float uStorm; uniform float uFlash; uniform float uMaxDist;
 varying vec2 vUv;
 
-const vec4 EXT = vec4(0.030, 0.018, 0.0045, 0.040);   // extinction (1/m) at density 1 per layer kind
+const vec4 EXT = vec4(0.0155, 0.011, 0.0035, 0.024);   // extinction (1/m) at density 1 per layer kind
 float remap(float v, float lo, float hi){ return clamp((v - lo) / max(hi - lo, 1e-4), 0.0, 1.0); }
 
-float cloudDensity(vec3 p, float h, float cover, float kind, float dens){
+// Density of one slab at world position p (h = 0..1 height inside the slab).
+// "full" adds the fine erosion octaves; the sun-shadow taps skip them (standard "Horizon" trick: same silhouette, a third of the fetches).
+float cloudDensity(vec3 p, float h, float cover, float kind, float dens, bool full){
   vec3 q = p + uDrift;
-  float wm; float cov; float grad; float scaleS; float scaleD;
-  if (kind > 2.5) {                       // cumulonimbus: big cells, anvil spreading near the top
-    wm = texture(uNoise, vec3(q.xz / 16000.0, 0.17)).r * 0.65 + texture(uNoise, vec3(q.xz / 6000.0 + 0.3, 0.55)).r * 0.35;
+  float cov; float grad; float scaleS; float scaleD; float erode = 0.5; float sharp = 1.0;
+  if (kind > 2.5) {                       // cumulonimbus: big towering cells, anvil spreading near the top
+    float wm = texture(uNoise, vec3(q.xz / 14000.0, 0.17)).r * 0.65 + texture(uNoise, vec3(q.xz / 5200.0 + 0.3, 0.55)).r * 0.35;
     wm = clamp((wm - 0.5) * 2.1 + 0.5, 0.0, 1.0);
     float lo = (1.0 - cover) - 0.32 * smoothstep(0.55, 0.95, h);
     cov = smoothstep(lo, lo + 0.2, wm);
     grad = smoothstep(0.0, 0.04, h) * (1.0 - smoothstep(0.86, 1.0, h)) * (0.55 + 0.45 * cov);
-    scaleS = 7000.0; scaleD = 1700.0;
-  } else {
-    wm = texture(uNoise, vec3(q.xz / 30000.0, 0.37)).r * 0.6 + texture(uNoise, vec3(q.xz / 11000.0 + 0.31, 0.71)).r * 0.4;
+    scaleS = 5200.0; scaleD = 1300.0; sharp = 1.4;
+  } else if (kind < 0.5) {                // low deck: cumulus (domed tops, flat bases, clear gaps) -> stratocumulus -> stratus
+    float w1 = texture(uNoise, vec3(q.xz / 15000.0, 0.37)).r, w2 = texture(uNoise, vec3(q.xz / 6200.0 + 0.31, 0.71)).r;
+    float wm = clamp((w1 * 0.6 + w2 * 0.4 - 0.5) * 2.4 + 0.5, 0.0, 1.0);
+    float thr = 1.0 - cover * 1.15;
+    cov = smoothstep(thr, thr + 0.08, wm);
+    float s = smoothstep(0.72, 0.97, cover);                      // overcast: the cells merge into a sheet
+    float hv = 0.45 + 0.55 * smoothstep(0.25, 0.75, w1);                // each cloud gets its own height from a LOW-frequency field (a steep per-cell ramp made spires)
+    float cellH = hv * (0.2 + 0.8 * sqrt(smoothstep(thr, thr + 0.22, wm))); // sqrt edge profile = rounded dome with a ragged flat base
+    float gcu = smoothstep(0.0, 0.05, h) * (1.0 - smoothstep(cellH * 0.45, cellH, h));
+    float gst = smoothstep(0.0, 0.1, h) * (1.0 - smoothstep(0.62, 1.0, h));
+    grad = mix(gcu, gst, s); cov = mix(cov, 1.0, s * 0.8);
+    scaleS = 2300.0; scaleD = 420.0; erode = 0.72; sharp = 1.0;
+  } else if (kind < 1.5) {                // mid: altocumulus / altostratus
+    float wm = texture(uNoise, vec3(q.xz / 17000.0, 0.62)).r * 0.6 + texture(uNoise, vec3(q.xz / 6500.0 + 0.2, 0.28)).r * 0.4;
     wm = clamp((wm - 0.5) * 2.2 + 0.5, 0.0, 1.0);
-    float lo = 1.0 - cover * 1.25;
-    cov = smoothstep(lo, lo + 0.22, wm);
-    if (kind < 0.5) {                      // low deck: cumulus (rounded tops, flat bases) -> stratus
-      float s = smoothstep(0.72, 0.97, cover);
-      float gcu = smoothstep(0.0, 0.06, h) * (1.0 - smoothstep(0.5, 1.0, h / max(0.4, cov)));
-      float gst = smoothstep(0.0, 0.1, h) * (1.0 - smoothstep(0.62, 1.0, h));
-      grad = mix(gcu, gst, s); cov = mix(cov, 1.0, s * 0.8);
-      scaleS = 4200.0; scaleD = 950.0;
-    } else if (kind < 1.5) {               // mid: altocumulus / altostratus
-      grad = smoothstep(0.0, 0.2, h) * (1.0 - smoothstep(0.45, 1.0, h));
-      scaleS = 5600.0; scaleD = 1500.0;
-    } else {                               // cirrus: thin, ice, stretched along the wind
-      grad = smoothstep(0.0, 0.3, h) * (1.0 - smoothstep(0.35, 1.0, h));
-      q.x *= 0.35; scaleS = 9000.0; scaleD = 2600.0;
-    }
+    float lo = 1.0 - cover * 1.25; cov = smoothstep(lo, lo + 0.22, wm);
+    grad = smoothstep(0.0, 0.2, h) * (1.0 - smoothstep(0.45, 1.0, h));
+    scaleS = 3800.0; scaleD = 950.0; erode = 0.55;
+  } else {                                // cirrus: thin, ice, stretched along the wind
+    float wm = texture(uNoise, vec3(q.xz / 26000.0, 0.44)).r * 0.6 + texture(uNoise, vec3(q.xz / 10000.0 + 0.5, 0.81)).r * 0.4;
+    wm = clamp((wm - 0.5) * 2.2 + 0.5, 0.0, 1.0);
+    float lo = 1.0 - cover * 1.25; cov = smoothstep(lo, lo + 0.25, wm);
+    grad = smoothstep(0.0, 0.3, h) * (1.0 - smoothstep(0.35, 1.0, h));
+    q.x *= 0.3; scaleS = 8000.0; scaleD = 2000.0; erode = 0.7;
   }
-  if (grad * cov < 0.012) return 0.0;
+  if (grad * cov < 0.01) return 0.0;
   vec4 sh = texture(uNoise, q / scaleS);
-  vec4 dt = texture(uNoise, q / scaleD + 0.5);
-  float er = dt.g * 0.5 + dt.b * 0.3 + dt.a * 0.2;
-  float d0 = cov * grad * (0.55 + 0.75 * sh.r);
-  float d = remap(d0, (1.0 - er) * (kind > 1.5 && kind < 2.5 ? 0.7 : 0.5), 1.0);
+  float base = cov * grad * (0.45 + 0.85 * sh.r);
+  // billows: low-frequency Worley cells make the cauliflower silhouette
+  float bil = texture(uNoise, q / (scaleS * 0.42) + 0.37).g;
+  base -= (1.0 - bil) * 0.22 * grad;
+  if (full) {
+    vec3 qd = q + (sh.gba - 0.5) * scaleD * 0.9;                // domain warp: curls the erosion so tops look rolled, not blobby
+    vec4 dt = texture(uNoise, qd / scaleD + 0.5);
+    float er = dt.g * 0.5 + dt.b * 0.32 + dt.a * 0.18;
+    base = base - (1.0 - er) * erode * 0.55 * (1.0 - 0.25 * h);   // chew the rim, not the core
+  } else base -= 0.12 * erode;
+  float d = smoothstep(0.0, 0.5 / sharp, base);
   return d * dens;
 }
 
@@ -124,35 +139,44 @@ float hgPhase(float c, float g){ float g2 = g * g; return (1.0 - g2) / (12.56637
 
 void march(int li, float ta, float tb, float jit, vec3 rd, inout vec3 col, inout float T){
   float base = uBase[li], top = uTop[li], thick = top - base, cover = uCover[li], kind = uKind[li], dens = uDens[li];
-  float ext = EXT[li] ;
-  float minStep = thick / (kind > 2.5 ? 22.0 : 14.0);
+  float ext = EXT[li];
+  float minStep = thick / (kind > 2.5 ? 26.0 : 20.0);
   float cosT = dot(rd, uSunDir);
-  float ph = min(4.0, 12.566371 * (mix(hgPhase(cosT, -0.18), hgPhase(cosT, 0.62), 0.55)) * 0.95);
-  float ls = clamp(thick * 0.05, 70.0, 450.0);
+  // Wrenninge multiple scattering: three octaves, each with weaker extinction, weaker anisotropy and less energy
+  float ph0 = mix(hgPhase(cosT, -0.22), hgPhase(cosT, 0.64), 0.5) * 12.566371;
+  float ph1 = mix(hgPhase(cosT, -0.11), hgPhase(cosT, 0.32), 0.5) * 12.566371;
+  float ph2 = hgPhase(cosT, 0.0) * 12.566371;
+  float ls = clamp(thick * 0.09, 60.0, 520.0);
   int N = int(uSteps[li]);
-  float t = ta + jit * minStep;
-  for (int i = 0; i < 72; i++) {
+  float t = ta + jit * minStep * 2.0;
+  float empty = 99.0;                           // samples since the ray last touched cloud: far from a cloud take big strides, inside / next to one take fine ones
+  for (int i = 0; i < 96; i++) {
     if (i >= N || t >= tb || T < 0.03) break;
     vec3 p = uCamPos + rd * t;
     float h = clamp((p.y - base) / thick, 0.0, 1.0);
-    float d = cloudDensity(p, h, cover, kind, dens);
-    float dt = max(minStep, 0.055 * (t - ta + 350.0));
-    if (d > 0.004) {
+    float fine = max(minStep, 0.022 * (t - ta + 250.0));
+    float dt = empty > 2.5 ? fine * 2.6 : fine;
+    float d = cloudDensity(p, h, cover, kind, dens, true);
+    if (d <= 0.003) empty += 1.0;
+    else if (empty > 2.5) { t = max(ta, t - dt * 0.8); empty = 0.0; continue; }   // first contact: step back and re-enter with fine steps (no banding on the surface)
+    else empty = 0.0;
+    if (d > 0.003) {
       float sigma = d * ext;
       float tau = 0.0; vec3 lp = p;
-      for (int k = 0; k < 4; k++) {
-        float sl = ls * (1.0 + float(k) * 1.1);
+      for (int k = 0; k < 5; k++) {          // 5 taps toward the sun, spacing grows (a long, cheap cone)
+        float sl = ls * (0.55 + float(k) * float(k) * 0.42);
         lp += uSunDir * sl;
         if (lp.y > top) break;
         float lh = clamp((lp.y - base) / thick, 0.0, 1.0);
-        tau += cloudDensity(lp, lh, cover, kind, dens) * ext * sl;
+        tau += cloudDensity(lp, lh, cover, kind, dens, false) * ext * 1.8 * sl;
       }
-      float Ls = exp(-tau), Lms = exp(-tau * 0.22);
-      float powder = 1.0 - 0.55 * exp(-sigma * dt * 3.0);
-      vec3 amb = mix(uAmbBot, uAmbTop, smoothstep(0.0, 0.9, h));
-      vec3 S = uSunCol * (Ls * ph * powder + Lms * 0.30) + amb;
+      float sun = exp(-tau) * ph0 + 0.5 * exp(-tau * 0.5) * ph1 + 0.25 * exp(-tau * 0.25) * ph2;
+      float powder = 1.0 - 0.7 * exp(-sigma * dt * 2.5);                     // dark creases, bright rims
+      // sky light reaches the tops, the bases only see the (darker) ground bounce and the blue sky below
+      vec3 amb = mix(uAmbBot, uAmbTop, smoothstep(0.0, 0.85, h)) * (0.75 + 0.5 * exp(-tau * 0.6));
+      vec3 S = uSunCol * sun * mix(1.0, powder, 0.65) * 1.18 + amb * 1.3;
       S *= 1.0 - uStorm * (0.62 - 0.35 * h);
-      S += vec3(0.75, 0.8, 1.0) * uFlash * (0.4 + 0.6 * Lms);
+      S += vec3(0.75, 0.8, 1.0) * uFlash * (0.4 + 0.6 * exp(-tau * 0.22));
       float fogF = 1.0 - exp(-uFogRho * uFogRho * t * t);
       float vis = 1.0 - fogF;
       float a = exp(-sigma * dt);
@@ -196,14 +220,18 @@ void main(){
 }`;
 
 const COMP_FRAG = `
-uniform sampler2D tScene; uniform sampler2D tCloud; varying vec2 vUv;
+uniform sampler2D tScene; uniform sampler2D tCloud; uniform vec2 uTexel; varying vec2 vUv;
 void main(){
-  vec4 s = texture2D(tScene, vUv); vec4 c = texture2D(tCloud, vUv);
+  vec4 s = texture2D(tScene, vUv);
+  // 5-tap filter at cloud resolution: removes the per-pixel ray jitter pattern (clouds are soft, so no depth-aware weighting is needed)
+  vec4 c = texture2D(tCloud, vUv) * 0.4
+    + (texture2D(tCloud, vUv + uTexel * vec2(0.9, 0.5)) + texture2D(tCloud, vUv + uTexel * vec2(-0.9, -0.5))
+    +  texture2D(tCloud, vUv + uTexel * vec2(-0.5, 0.9)) + texture2D(tCloud, vUv + uTexel * vec2(0.5, -0.9))) * 0.15;
   gl_FragColor = vec4(s.rgb * c.a + c.rgb, 1.0);
   #include <colorspace_fragment>
 }`;
 
-const SCALE: Record<QualityPreset, number> = { low: 0.5, medium: 0.6, high: 0.8, ultra: 1 };
+const SCALE: Record<QualityPreset, number> = { low: 0.5, medium: 0.55, high: 0.65, ultra: 0.85 };
 const _size = new THREE.Vector2();
 
 export interface CloudEnv { sunDir: THREE.Vector3; sunCol: THREE.Color; ambTop: THREE.Color; ambBot: THREE.Color; flash: number; storm: number }
@@ -248,7 +276,7 @@ export class VolumetricClouds {
     const m1 = new THREE.Mesh(plane, this.cloudMat); m1.frustumCulled = false; this.cloudScene.add(m1);
     this.compMat = new THREE.ShaderMaterial({
       vertexShader: VERT, fragmentShader: COMP_FRAG, depthTest: false, depthWrite: false,
-      uniforms: { tScene: { value: null }, tCloud: { value: this.clearTex } },
+      uniforms: { tScene: { value: null }, tCloud: { value: this.clearTex }, uTexel: { value: new THREE.Vector2(0.001, 0.001) } },
     });
     const m2 = new THREE.Mesh(plane, this.compMat); m2.frustumCulled = false; this.compScene.add(m2);
   }
@@ -304,7 +332,7 @@ export class VolumetricClouds {
       const depth = new THREE.DepthTexture(w, h);
       this.sceneRT = new THREE.WebGLRenderTarget(w, h, {
         type: this.halfFloat ? THREE.HalfFloatType : THREE.UnsignedByteType, depthTexture: depth, depthBuffer: true,
-        samples: Math.min(this.quality === 'low' ? 2 : 4, r.capabilities.maxSamples), minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
+        samples: Math.min(this.quality === 'ultra' ? 4 : 2, r.capabilities.maxSamples), minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
       });
       this.sceneRT.texture.colorSpace = this.halfFloat ? THREE.LinearSRGBColorSpace : THREE.SRGBColorSpace;
     }
@@ -345,6 +373,7 @@ export class VolumetricClouds {
       cloudTex = crt.texture;
     }
     this.compMat.uniforms.tScene.value = srt.texture; this.compMat.uniforms.tCloud.value = cloudTex;
+    (this.compMat.uniforms.uTexel.value as THREE.Vector2).set(1 / crt.width, 1 / crt.height);
     r.setRenderTarget(null); r.render(this.compScene, this.orthoCam);
   }
 
