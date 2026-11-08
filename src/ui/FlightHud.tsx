@@ -48,7 +48,7 @@ function FlightToolbar({ workspace, onTool, pendingRadio, visible, onReveal, pin
 }) {
   const [focus, setFocus] = useState(0);
   return <div className="flight-toolbar-area" data-visible={visible} onPointerEnter={onReveal} onFocusCapture={onReveal}>
-    <button className="flight-toolbar-handle" aria-label="Show flight toolbar" aria-expanded={visible} onClick={onReveal} tabIndex={visible ? -1 : 0}>
+    <button className="flight-toolbar-handle" aria-label="Show top bar" aria-expanded={visible} onClick={onReveal} tabIndex={visible ? -1 : 0}>
       <span /><FlightIcon name="down" size={13} /><span />
     </button>
     <div className="flight-toolbar" role="toolbar" aria-label="In-flight tools" data-flight-ui onKeyDown={(e) => {
@@ -65,8 +65,8 @@ function FlightToolbar({ workspace, onTool, pendingRadio, visible, onReveal, pin
         <span className="flight-tool-label">{label}</span><span className="flight-tooltip">{label}{key && <kbd>{key}</kbd>}</span>
       </button>)}
       <span className="flight-toolbar-divider" />
-      <button className="flight-toolbar-pin" aria-label={pinned ? 'Auto-hide toolbar' : 'Keep toolbar visible'} aria-pressed={pinned} tabIndex={focus === TOOLS.length ? 0 : -1}
-        title={pinned ? 'Auto-hide toolbar' : 'Keep toolbar visible'} onFocus={() => setFocus(TOOLS.length)} onClick={(e) => { onPin(); if (e.detail) e.currentTarget.blur(); }}><FlightIcon name="pin" size={15} /></button>
+      <button className="flight-toolbar-pin" aria-label={pinned ? 'Auto-hide top bar' : 'Pin top bar'} aria-pressed={pinned} tabIndex={focus === TOOLS.length ? 0 : -1}
+        title={pinned ? 'Pinned — click to auto-hide the top bar' : 'Auto-hide on — click to pin the top bar'} onFocus={() => setFocus(TOOLS.length)} onClick={(e) => { onPin(); if (e.detail) e.currentTarget.blur(); }}><FlightIcon name="pin" size={15} /></button>
     </div>
   </div>;
 }
@@ -238,7 +238,7 @@ export function Hud({ game, hud, toasts, settings, setSettings, onMap, mapOpen, 
   // A changed arrival invalidates an inspected fix from the previous approach.
   useEffect(() => { setMapFocus(undefined); planScroll.current = null; }, [hud.apprRwy]);
   const [toolbarVisible, setToolbarVisible] = useState(true);
-  const [toolbarPinned, setToolbarPinned] = useState(true);
+  const toolbarPinned = settings.uiPinned;
   const [fullInstruments, setFullInstruments] = useState(false);
   const toolbarTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const toolbarHover = useRef(false);
@@ -317,15 +317,16 @@ export function Hud({ game, hud, toasts, settings, setSettings, onMap, mapOpen, 
     case 'display': toolBody = <DisplayPanel settings={settings} setSettings={setSettings} fullInstruments={fullInstruments} setFullInstruments={setFullInstruments} />; break;
   }
 
+  const barShown = toolbarVisible || toolbarPinned || !!tool;
   if (!visible) return null;
-  return <div ref={root} className={`flight-shell ${settings.colorblind ? 'flight-high-contrast' : ''}`} data-narrow={narrow} data-short={short} data-tight={width < 1100} data-pfd={pfd} data-alert={hud.warn.length > 0}
+  return <div ref={root} className={`flight-shell ${settings.colorblind ? 'flight-high-contrast' : ''}`} data-narrow={narrow} data-short={short} data-tight={width < 1100} data-pfd={pfd} data-alert={hud.warn.length > 0} data-bar={barShown ? 'shown' : 'hidden'}
     data-touch={viewport.touch} data-compact-nav={compactNav} data-mode={mode} data-interior={interior} data-edge={edgeInstruments} data-tool-open={!!tool} data-mini-map={miniMap}
     style={{ '--flight-text-scale': scale } as CSSProperties}>
     <div className="flight-screen-shade" />
     {interior && <CockpitTooltipOverlay tooltip={hud.cockpitTooltip ?? null} game={game} />}
     {interior && !tool && <CockpitFocusBar game={game} items={COCKPIT_FOCUS} />}
     {interior && <FreelookReticle active={!!hud.freelookActive} />}
-    <header className="flight-header">
+    <header className="flight-header" data-visible={barShown} inert={!barShown} onPointerEnter={() => { toolbarHover.current = true; }} onPointerLeave={() => { toolbarHover.current = false; reveal(); }} onFocusCapture={reveal}>
       <button className="flight-route-identity" aria-label="Open flight plan" onClick={() => openNavigation('plan')} data-flight-ui>
         <span className="flight-brand-symbol"><FlightIcon name="route" size={18} /></span><span><span className="flight-route-codes">{from.icao}<span>→</span>{to.icao}</span><span className="flight-aircraft-name" title={hud.activeWp?.name ?? hud.destId}>Next: {hud.activeWp?.name ?? hud.destId} · {formatDistance(hud.activeWp?.distNm ?? hud.distNm)} NM</span></span>
       </button>
@@ -335,8 +336,8 @@ export function Hud({ game, hud, toasts, settings, setSettings, onMap, mapOpen, 
       </div>
     </header>
     <div onPointerEnter={() => { toolbarHover.current = true; }} onPointerLeave={() => { toolbarHover.current = false; reveal(); }}>
-      <FlightToolbar workspace={workspace} onTool={toggleTool} pendingRadio={pendingRadio} visible={toolbarVisible || toolbarPinned || !!tool} onReveal={reveal}
-        pinned={toolbarPinned} onPin={() => { setToolbarPinned((value) => !value); reveal(); }} />
+      <FlightToolbar workspace={workspace} onTool={toggleTool} pendingRadio={pendingRadio} visible={barShown} onReveal={reveal}
+        pinned={toolbarPinned} onPin={() => { setSettings({ uiPinned: !toolbarPinned }); reveal(); }} />
     </div>
     <FlightAlerts game={game} hud={hud} />
     {miniMap && <AirportMiniMap game={game} hud={hud} />}

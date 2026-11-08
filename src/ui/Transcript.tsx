@@ -2,7 +2,7 @@ import './transcript.css';
 import { useEffect, useRef, useState } from 'react';
 import type { AtcMessage, HudState } from '../sim/game';
 import type { Settings } from '../sim/storage';
-import { speechSeconds, type CaptionKind } from '../sim/speech';
+import type { CaptionKind } from '../sim/speech';
 import { transcriptText, type TranscriptLang } from '../sim/translate';
 
 /** Short, instrument-style speaker codes (what a flight strip or an ACP label would show). */
@@ -54,8 +54,21 @@ export function LiveTranscript({ hud, settings }: { hud: HudState; settings: Pic
       </figcaption>
       <blockquote lang={id ? 'id' : 'en'}>{main}</blockquote>
       {id && !compact && <p className="comms-original" lang="en">{m.text}</p>}
-      <i className="comms-progress" key={m.id} style={{ animationDuration: `${speechSeconds(m.text)}s` }} aria-hidden="true" />
     </figure>
+  );
+}
+
+/** Static sample used by Settings > Captions so the effect of the switches can be judged before flying. */
+export function CaptionPreview({ lang, dimmed }: { lang: TranscriptLang; dimmed?: boolean }) {
+  const id = lang === 'id';
+  return (
+    <div className="if-sub-preview" aria-hidden="true" style={{ opacity: dimmed ? .35 : 1 }}>
+      <figure className="comms-live" data-kind="atc">
+        <figcaption><span className="comms-tag">TWR</span><span className="comms-name">Jakarta Tower</span></figcaption>
+        <blockquote>{id ? 'Skyline 986, angin 060 derajat 11 knot, landasan 07R, diizinkan lepas landas.' : 'Skyline 986, wind 060 degrees 11 knots, runway 07R, cleared for take-off.'}</blockquote>
+        {id && <p className="comms-original">Skyline 986, wind 060 degrees 11 knots, runway 07R, cleared for take-off.</p>}
+      </figure>
+    </div>
   );
 }
 

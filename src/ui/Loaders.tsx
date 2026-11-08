@@ -150,11 +150,11 @@ function LoadingScene({ eyebrow, headline, subline, progress, status, rows, leav
 
 /* ------------------------------------------------------------------ flight entry */
 
-const STAGE_ORDER: LoadStage[] = ['idle', 'dispatch', 'scenery', 'deck', 'weather', 'terrain', 'done'];
+const STAGE_ORDER: LoadStage[] = ['idle', 'dispatch', 'scenery', 'deck', 'weather', 'terrain', 'warm', 'done'];
 const rank = (s: LoadStage) => STAGE_ORDER.indexOf(s);
 const mb = (b: number) => (b / 1e6).toFixed(1); // decimal MB, like the 50.6 MB quoted in NOTICE.txt
 
-/** Overall 0..1 progress from the real signals. Bands: survey+scenery 0-12 %, deck 12-60 %, weather 60-68 %, terrain 68-98 %. */
+/** Overall 0..1 progress from the real signals. Bands: survey+scenery 0-12 %, deck 12-60 %, weather 60-68 %, terrain + city streaming 68-88 %, GPU warm-up 88-99 %. */
 function flightTarget(s: LoadSnap, terrain: number, finishing: boolean): number {
   if (finishing || s.stage === 'done') return 1;
   switch (s.stage) {
@@ -166,7 +166,8 @@ function flightTarget(s: LoadSnap, terrain: number, finishing: boolean): number 
       return 0.12 + 0.48 * (s.deckTotal > 0 && s.deckLoaded >= s.deckTotal ? 0.92 : bytes * 0.9);
     }
     case 'weather': return 0.62;
-    case 'terrain': return 0.68 + 0.3 * Math.max(0, Math.min(1, terrain));
+    case 'terrain': return 0.68 + 0.2 * Math.max(0, Math.min(1, terrain));
+    case 'warm': return 0.88 + 0.11 * Math.max(0, Math.min(1, s.warm));
   }
 }
 
@@ -189,11 +190,13 @@ function FlightLoaderView({ hud, from, to, aircraft, finishing, leaving, onAbort
     else if (snap.deckTotal > 0) deckDetail = 'decoding';
   }
   const terrainState = st('terrain');
+  const warmState = st('warm');
   const rows: Row[] = [
     { label: 'Dispatch & airfield survey', state: st('dispatch', 'scenery'), detail: st('dispatch', 'scenery') === 'done' ? 'ready' : '' },
     { label: 'A320 flight deck model', state: deckState, detail: deckDetail },
     { label: 'Live weather · METAR', state: st('weather'), detail: st('weather') === 'done' ? 'ready' : '' },
-    { label: 'Terrain & satellite imagery', state: terrainState, detail: terrainState === 'active' ? `${Math.round(terrain * 100)}%` : terrainState === 'done' ? 'ready' : '' },
+    { label: 'Terrain, imagery & city (all directions)', state: terrainState, detail: terrainState === 'active' ? `${Math.round(terrain * 100)}%` : terrainState === 'done' ? 'ready' : '' },
+    { label: 'Graphics pipeline · shaders & textures', state: warmState, detail: warmState === 'active' ? `${Math.round(snap.warm * 100)}%` : warmState === 'done' ? 'ready' : '' },
   ];
   const activeRow = rows.find((x) => x.state === 'active');
   let status = 'Preparing flight…';
@@ -203,7 +206,8 @@ function FlightLoaderView({ hud, from, to, aircraft, finishing, leaving, onAbort
   else if (snap.stage === 'scenery') status = 'Building airfield scenery…';
   else if (snap.stage === 'deck') status = deckDetail === 'decoding' ? 'Decoding flight deck textures and meshes…' : snap.deckCached ? 'Loading flight deck from local cache…' : 'Downloading flight deck model (first launch only, then cached)…';
   else if (snap.stage === 'weather') status = `Fetching live weather for ${from.icao}…`;
-  else if (snap.stage === 'terrain') status = `Streaming elevation and imagery around ${from.city || from.name}…`;
+  else if (snap.stage === 'terrain') status = `Streaming elevation, imagery and city around ${from.city || from.name}…`;
+  else if (snap.stage === 'warm') status = 'Compiling shaders and uploading textures to the GPU…';
   else if (activeRow) status = activeRow.label;
 
   const headline = (

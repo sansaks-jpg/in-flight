@@ -1,60 +1,59 @@
-/* Transcript UI: a flight-strip style lower third. Flat panel, hairline border, one accent rule per speaker type —
-   no gradients, glow or glass. Colour is never the only cue: every line also carries a text code (TWR, PLT, F/O ...). */
-.comms-live, .comms-entry { --c: #8cb8dd; }
-[data-kind="atc"] { --c: #8cb8dd; }
-[data-kind="pilot"] { --c: #e0b866; }
-[data-kind="crew"] { --c: #93d3ae; }
-[data-kind="pa"] { --c: #d6cfbd; }
-[data-kind="auto"] { --c: #b9c4cf; }
-[data-kind="warning"] { --c: #ff8a7c; }
+/* Captions: film-subtitle treatment. No panel, no border — just light type with a layered dark edge and a very soft,
+   feathered shade behind it, so the line stays legible over bright sky AND dark cockpit without ever reading as a box.
+   Speaker is a quiet small-caps line above the text; the colour is never the only cue (a text code always accompanies it). */
+.comms-live, .comms-entry { --c: #a9cbe6; }
+[data-kind="atc"] { --c: #a9cbe6; }
+[data-kind="pilot"] { --c: #f0cf8e; }
+[data-kind="crew"] { --c: #a8dcc0; }
+[data-kind="pa"] { --c: #e4dfd0; }
+[data-kind="auto"] { --c: #c4cfda; }
+[data-kind="warning"] { --c: #ff9d90; }
 
 .comms-tag {
-  flex: none; padding: 2px 5px 1px; border: 1px solid color-mix(in srgb, var(--c) 60%, transparent); color: var(--c); border-radius: 2px;
-  font: 600 10px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing: .1em; text-transform: uppercase;
+  flex: none; padding: 2px 6px 1px; border-radius: 4px; background: color-mix(in srgb, var(--c) 16%, transparent); color: var(--c);
+  font: 600 10px/1.3 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing: .1em; text-transform: uppercase;
 }
 
 .comms-live {
-  position: fixed; left: 50%; bottom: 74px; transform: translateX(-50%); z-index: 40; margin: 0;
-  width: max-content; max-width: min(720px, calc(100vw - 24px)); min-width: min(320px, calc(100vw - 24px));
-  padding: 9px 16px 11px 14px; border-radius: 3px; background: #0a0f15f2; border: 1px solid #b6cadc2b; border-left: 3px solid var(--c);
-  color: #eaf1f7; pointer-events: none; overflow: hidden; box-shadow: 0 10px 28px -14px #000;
-  animation: comms-in .16s ease-out both;
+  position: fixed; left: 50%; bottom: 82px; transform: translateX(-50%); z-index: 40; margin: 0; isolation: isolate;
+  width: max-content; max-width: clamp(340px, calc(100vw - 704px), 800px); padding: 0 8px; text-align: center;
+  color: #fff; pointer-events: none; animation: comms-in .22s ease-out both;
 }
-.comms-live figcaption { display: flex; align-items: center; gap: 8px; margin-bottom: 5px; min-width: 0; }
-.comms-name { font: 600 12px/1.2 ui-sans-serif, system-ui, sans-serif; color: #f4f8fb; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.comms-kind { font: 500 10.5px/1.2 ui-sans-serif, system-ui, sans-serif; color: #8fa4b5; white-space: nowrap; }
-.comms-lang {
-  margin-left: auto; padding: 1px 4px; border-radius: 2px; background: #1a2530; color: #bcd0df;
-  font: 600 9.5px/1.3 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing: .1em;
+/* the feathered shade: a blurred ellipse, wider than the text, fading to nothing */
+.comms-live::before {
+  content: ''; position: absolute; z-index: -1; inset: -22px -56px -18px; border-radius: 50%;
+  background: radial-gradient(closest-side, rgba(2, 5, 9, .62) 0%, rgba(2, 5, 9, .46) 55%, rgba(2, 5, 9, 0) 100%);
+  filter: blur(10px);
 }
-.comms-live blockquote { margin: 0; font: 500 15.5px/1.42 ui-sans-serif, system-ui, sans-serif; color: #f1f6fa; text-wrap: pretty; }
-.comms-original { margin: 6px 0 0; padding-top: 6px; border-top: 1px solid #b6cadc1f; font: 400 12px/1.4 ui-sans-serif, system-ui, sans-serif; color: #8fa4b5; text-wrap: pretty; }
-.comms-progress {
-  position: absolute; left: 0; right: 0; bottom: 0; height: 2px; background: var(--c); opacity: .75; transform-origin: left center;
-  animation: comms-run linear forwards;
+.comms-live figcaption { display: flex; align-items: center; justify-content: center; gap: 8px; margin-bottom: 4px; min-width: 0; text-shadow: 0 1px 3px rgba(0, 0, 0, .95), 0 0 8px rgba(0, 0, 0, .7); }
+.comms-name { font: 600 12px/1.2 "Segoe UI", ui-sans-serif, system-ui, sans-serif; letter-spacing: .06em; text-transform: uppercase; color: var(--c); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.comms-kind { font: 500 11px/1.2 "Segoe UI", ui-sans-serif, system-ui, sans-serif; color: rgba(255, 255, 255, .62); white-space: nowrap; }
+.comms-kind::before { content: '·'; margin-right: 8px; opacity: .7; }
+.comms-lang { padding: 1px 5px; border-radius: 3px; background: rgba(255, 255, 255, .14); color: #fff; font: 600 9.5px/1.3 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing: .1em; text-shadow: none; }
+.comms-live blockquote {
+  margin: 0; font: 500 clamp(16px, 1.55vw, 21px)/1.38 "Segoe UI", ui-sans-serif, system-ui, -apple-system, Roboto, Arial, sans-serif; color: #fff; text-wrap: balance;
+  text-shadow: 0 0 1px #000, 0 1px 2px rgba(0, 0, 0, .95), 0 0 6px rgba(0, 0, 0, .85), 0 2px 14px rgba(0, 0, 0, .65);
 }
-/* aircraft callouts / GPWS: one short line, no chrome */
-.comms-live[data-compact="true"] { min-width: 0; padding: 6px 12px 8px 10px; }
-.comms-live[data-compact="true"] figcaption { margin-bottom: 2px; }
+.comms-original { margin: 5px 0 0; font: italic 400 clamp(12.5px, 1.1vw, 14.5px)/1.4 "Segoe UI", ui-sans-serif, system-ui, sans-serif; color: rgba(255, 255, 255, .72); text-wrap: balance; text-shadow: 0 1px 2px rgba(0, 0, 0, .95), 0 0 8px rgba(0, 0, 0, .8); }
+/* aircraft callouts / GPWS: one short line */
 .comms-live[data-compact="true"] .comms-kind { display: none; }
-.comms-live[data-compact="true"] blockquote { font-size: 14px; font-weight: 600; }
+.comms-live[data-compact="true"] blockquote { font-weight: 650; letter-spacing: .01em; }
+.comms-live[data-kind="warning"] blockquote { color: #ffe3df; }
 
-@keyframes comms-in { from { opacity: 0; transform: translate(-50%, 4px); } to { opacity: 1; transform: translate(-50%, 0); } }
-@keyframes comms-run { from { transform: scaleX(0); } to { transform: scaleX(1); } }
-@media (max-width: 700px) { .comms-live { bottom: 120px; } .comms-live blockquote { font-size: 14px; } .comms-kind { display: none; } }
-@media (prefers-reduced-motion: reduce) { .comms-live { animation: none; } .comms-progress { animation: none; transform: scaleX(1); opacity: .35; } }
+@keyframes comms-in { from { opacity: 0; transform: translate(-50%, 6px); } to { opacity: 1; transform: translate(-50%, 0); } }
+@media (max-width: 1040px) { .comms-live { max-width: min(640px, calc(100vw - 24px)); bottom: 118px; } }
+@media (max-width: 700px) { .comms-kind { display: none; } .comms-live { bottom: 120px; } }
+@media (prefers-reduced-motion: reduce) { .comms-live { animation: none; } }
 
 /* history rows (Radio tool window) */
-.comms-entry { margin: 0 0 8px; padding: 9px 11px 10px; border: 1px solid #b2c5d81c; border-left: 2px solid var(--c); border-radius: 3px; background: #bbd2e807; }
+.comms-entry { margin: 0 0 6px; padding: 9px 11px 10px; border-radius: 9px; background: rgba(190, 215, 236, .05); border: 1px solid rgba(206, 222, 237, .09); }
 .comms-entry > div { display: flex; align-items: center; gap: 8px; }
-.comms-entry strong { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 600 11.5px/1.2 ui-sans-serif, system-ui, sans-serif; color: #dbe7f0; }
-.comms-entry time { font: 500 10px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #6f879a; font-variant-numeric: tabular-nums; }
-.comms-entry p { margin: 6px 0 0; font: 400 12.5px/1.55 ui-sans-serif, system-ui, sans-serif; color: #c7d4df; text-wrap: pretty; }
+.comms-entry strong { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 600 11.5px/1.2 "Segoe UI", ui-sans-serif, system-ui, sans-serif; color: var(--c); }
+.comms-entry time { font: 500 10px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #70818f; font-variant-numeric: tabular-nums; }
+.comms-entry p { margin: 6px 0 0; font: 400 12.5px/1.55 "Segoe UI", ui-sans-serif, system-ui, sans-serif; color: #d3dde6; text-wrap: pretty; }
 
-/* EN | ID switch */
-.comms-switch { display: inline-flex; border: 1px solid #b6cadc40; border-radius: 3px; overflow: hidden; }
-.comms-switch button { padding: 3px 9px; border: 0; border-right: 1px solid #b6cadc2b; background: #101a25; color: #9fb3c4; cursor: pointer; font: 600 10px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing: .08em; }
-.comms-switch button:last-child { border-right: 0; }
-.comms-switch button:hover { background: #17283a; color: #e2edf6; }
-.comms-switch button[aria-pressed="true"] { background: #dbe7f0; color: #0a0f15; }
-.comms-switch button:focus-visible { outline: 2px solid #8cb8dd; outline-offset: -2px; }
+/* OFF | EN | ID switch — same segmented control as Settings */
+.comms-switch { display: inline-flex; padding: 2px; gap: 2px; border-radius: 8px; background: rgba(4, 8, 12, .5); border: 1px solid rgba(206, 222, 237, .13); }
+.comms-switch button { min-height: 24px; padding: 0 9px; border: 0; border-radius: 6px; background: transparent; color: #9aa9b8; cursor: pointer; font: 600 10px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing: .08em; transition: background .15s, color .15s; }
+.comms-switch button:hover { color: #eef3f8; background: rgba(190, 215, 236, .07); }
+.comms-switch button[aria-pressed="true"] { background: rgba(154, 203, 235, .16); color: #9acbeb; box-shadow: inset 0 0 0 1px rgba(154, 203, 235, .35); }

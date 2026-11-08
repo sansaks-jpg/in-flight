@@ -4,6 +4,8 @@ import type { Settings, HudMode } from '../sim/storage';
 import { Modal, SettingsPanel, ControlsPanel, ScoresPanel } from './Screens';
 import type { Airport } from '../data/airports';
 import { FlightIcon } from './FlightIcon';
+import { Button, Kbd } from './Kit';
+import { FLIGHT_PHASE_LABELS, formatAltitude, formatDistance, formatEte, formatSpeed } from './navigation';
 
 export { Hud } from './FlightHud';
 export { FullMap } from './FlightMap';
@@ -66,30 +68,24 @@ export function ReadyScreen({
   aircraft: string;
 }) {
   return (
-    <div
-      className="absolute inset-0 z-40 grid place-items-end sm:place-items-center bg-gradient-to-t from-[#05080f]/90 via-[#05080f]/35 to-transparent text-white p-4 sm:p-8 select-none font-sans pointer-events-auto"
-    >
-      <div className="text-center max-w-xl pb-10 sm:pb-0 bg-[#0b1322]/90 border border-white/20 p-6 sm:p-8 rounded-sm backdrop-blur-md shadow-2xl">
-        <div className="text-[10px] tracking-[0.35em] text-[#5ea2ff] font-black uppercase">
-          {aircraft} · {hud.onGround ? 'READY FOR DEPARTURE' : 'READY TO FLY'}
+    <div className="if-scrim if-ready" onPointerDown={(e) => e.stopPropagation()}>
+      <div className="if-dialog" role="dialog" aria-label="Flight briefing">
+        <div className="if-pause-hero">
+          <span className="if-pause-status"><FlightIcon name="plane" size={12} />{hud.onGround ? 'Ready for departure' : 'Ready to fly'}</span>
+          <div className="if-pause-route"><span>{from.icao}</span><FlightIcon name="arrowRight" size={20} /><span>{to.icao}</span></div>
+          <div className="if-pause-sub">{aircraft} · {from.city || from.name} to {to.city || to.name}</div>
         </div>
-        <div className="text-4xl sm:text-5xl font-black mt-2 font-mono tracking-tight drop-shadow-lg flex items-center justify-center gap-3">
-          <span className="text-emerald-400">{from.icao}</span>
-          <FlightIcon name="arrowRight" className="w-6 h-6 text-slate-500" />
-          <span className="text-amber-400">{to.icao}</span>
+        <div className="if-stats">
+          <div className="if-stat"><span>Distance</span><strong>{Math.round(hud.distNm)}<small>NM</small></strong></div>
+          <div className="if-stat"><span>Wind</span><strong>{String(hud.wind.dir).padStart(3, '0')}°<small>{hud.wind.kt} KT</small></strong></div>
+          <div className="if-stat"><span>Runway</span><strong>{hud.depRwy || '—'}</strong></div>
+          <div className="if-stat"><span>Ete</span><strong>{formatEte(hud.eteMin, true)}</strong></div>
         </div>
-        <div className="text-slate-300 mt-2 text-sm sm:text-base font-medium">
-          {Math.round(hud.distNm)} nm · wind {String(hud.wind.dir).padStart(3, '0')} deg / {hud.wind.kt} kt
-          {hud.depRwy && ` · Runway ${hud.depRwy}`}
-        </div>
-        <button
-          onClick={onGo}
-          className="mt-6 px-10 py-3.5 rounded-sm font-black tracking-[0.22em] text-slate-950 bg-[#eab308] hover:bg-[#facc15] shadow-[0_0_40px_rgba(234,179,8,0.45)] active:scale-95 transition cursor-pointer"
-        >
-          BEGIN FLIGHT
-        </button>
-        <div className="mt-4 text-xs text-slate-400 font-mono">
-          Right mouse + drag to look around · <b>C</b> camera · <b>H</b> HUD modes · <b>P</b> pause · <b>R</b> hold to restart
+        <div className="if-pause-actions">
+          <Button variant="primary" icon="play" onClick={onGo} autoFocus>Begin flight</Button>
+          <div className="if-pause-hint">
+            <span><Kbd>C</Kbd>camera</span><span><Kbd>H</Kbd>HUD mode</span><span><Kbd>P</Kbd>pause</span><span><Kbd>R</Kbd>hold to restart</span>
+          </div>
         </div>
       </div>
     </div>
@@ -110,101 +106,58 @@ export function PauseMenu({
   onResume: () => void;
 }) {
   const [sub, setSub] = useState<null | 'settings' | 'controls' | 'scores'>(null);
+  const [confirm, setConfirm] = useState<null | 'restart' | 'abort'>(null);
   const hud = game.hud();
-
+  const metric = settings.units === 'metric';
+  const units = metric ? 'metric' : 'aviation';
   return (
-    <div
-      className="absolute inset-0 z-40 grid place-items-center bg-[#05080f]/85 backdrop-blur-md text-white p-4 select-none font-sans"
-      onPointerDown={(e) => e.stopPropagation()}
-    >
-      <div className="w-full max-w-md rounded-sm border border-white/20 bg-[#0d1626]/95 p-6 sm:p-8 text-center shadow-2xl">
-        <div className="text-[11px] tracking-[0.35em] text-[#5ea2ff] font-black uppercase">SIMULATION PAUSED</div>
-
-        {/* Flight Snapshot Card */}
-        <div className="mt-4 p-3.5 rounded-sm bg-white/5 border border-white/10 text-left grid grid-cols-2 gap-3 text-xs">
-          <div>
-            <span className="text-[10px] text-slate-400 uppercase tracking-wider block">Route</span>
-            <span className="font-mono font-bold text-white text-sm inline-flex items-center gap-1.5">
-              {hud.fromId}
-              <FlightIcon name="arrowRight" className="w-3 h-3 text-slate-400" />
-              {hud.destId}
-            </span>
-          </div>
-          <div>
-            <span className="text-[10px] text-slate-400 uppercase tracking-wider block">Airspeed / Alt</span>
-            <span className="font-mono font-bold text-white text-sm">{Math.round(hud.kias)} kt · {Math.round(hud.altFt).toLocaleString()} ft</span>
-          </div>
-          <div>
-            <span className="text-[10px] text-slate-400 uppercase tracking-wider block">Remaining Dist</span>
-            <span className="font-mono font-bold text-cyan-300">{hud.distNm.toFixed(1)} nm</span>
-          </div>
-          <div>
-            <span className="text-[10px] text-slate-400 uppercase tracking-wider block">Pax Comfort</span>
-            <span className="font-mono font-bold text-emerald-300">{Math.round(hud.comfort)}%</span>
-          </div>
+    <div className="if-scrim if-pause" onPointerDown={(e) => e.stopPropagation()}>
+      <div className="if-dialog" role="dialog" aria-label="Flight paused">
+        <div className="if-pause-hero">
+          <span className="if-pause-status"><span className="if-pause-glyph" aria-hidden="true" />Paused</span>
+          <div className="if-pause-route"><span>{hud.fromId}</span><FlightIcon name="arrowRight" size={20} /><span>{hud.destId}</span></div>
+          <div className="if-pause-sub">{game.spec.name} · {FLIGHT_PHASE_LABELS[hud.flightPhase]}</div>
         </div>
-
-        <div className="mt-5 grid gap-2">
-          <button
-            onClick={onResume}
-            className="py-3.5 rounded-sm font-black tracking-widest bg-[#eab308] hover:bg-[#facc15] text-slate-950 active:scale-95 transition shadow-[0_0_25px_rgba(234,179,8,0.35)] cursor-pointer"
-          >
-            RESUME FLIGHT
-          </button>
-          <button
-            onClick={() => game.restart()}
-            className="py-2.5 rounded-sm font-bold bg-white/10 hover:bg-white/20 border border-white/15 transition flex items-center justify-center gap-2 cursor-pointer"
-          >
-            <FlightIcon name="plane" className="w-3.5 h-3.5 text-cyan-300" />
-            <span>Restart Flight (R)</span>
-          </button>
-          <button
-            onClick={() => setSub('settings')}
-            className="py-2.5 rounded-sm font-bold bg-white/10 hover:bg-white/20 border border-white/15 transition flex items-center justify-center gap-2 cursor-pointer"
-          >
-            <FlightIcon name="settings" className="w-3.5 h-3.5 text-slate-300" />
-            <span>Settings</span>
-          </button>
-          <button
-            onClick={() => setSub('controls')}
-            className="py-2.5 rounded-sm font-bold bg-white/10 hover:bg-white/20 border border-white/15 transition flex items-center justify-center gap-2 cursor-pointer"
-          >
-            <FlightIcon name="keyboard" className="w-3.5 h-3.5 text-slate-300" />
-            <span>Flight Controls</span>
-          </button>
-          <button
-            onClick={() => setSub('scores')}
-            className="py-2.5 rounded-sm font-bold bg-white/10 hover:bg-white/20 border border-white/15 transition flex items-center justify-center gap-2 cursor-pointer"
-          >
-            <FlightIcon name="trophy" className="w-3.5 h-3.5 text-amber-300" />
-            <span>High Scores</span>
-          </button>
-          <button
-            onClick={onMenu}
-            className="py-2.5 rounded-sm font-bold bg-rose-500/20 hover:bg-rose-500/35 border border-rose-300/30 text-rose-200 transition cursor-pointer"
-          >
-            Abort to World Map
-          </button>
+        <div className="if-stats">
+          <div className="if-stat"><span>Airspeed</span><strong>{formatSpeed(hud.kias, units)}<small>{metric ? 'KM/H' : 'KT'}</small></strong></div>
+          <div className="if-stat"><span>Altitude</span><strong>{formatAltitude(hud.altFt, units)}<small>{metric ? 'M' : 'FT'}</small></strong></div>
+          <div className="if-stat"><span>To go</span><strong>{formatDistance(hud.distNm)}<small>NM</small></strong></div>
+          <div className="if-stat"><span>Ete</span><strong>{formatEte(hud.eteMin, hud.gsKt > 5)}</strong></div>
+        </div>
+        <div className="if-pause-actions">
+          <Button variant="primary" icon="play" kbd="Esc" onClick={onResume} autoFocus>Resume flight</Button>
+          <div className="if-tiles">
+            <button type="button" className="if-tile" onClick={() => setSub('settings')}><FlightIcon name="settings" size={20} />Settings</button>
+            <button type="button" className="if-tile" onClick={() => setSub('controls')}><FlightIcon name="keyboard" size={20} />Controls</button>
+            <button type="button" className="if-tile" onClick={() => setSub('scores')}><FlightIcon name="trophy" size={20} />Logbook</button>
+          </div>
+          {confirm ? (
+            <div className="if-confirm" role="alertdialog" aria-label="Confirm">
+              <span>{confirm === 'restart' ? 'Restart from the beginning of this flight?' : 'Leave this flight and return to the world map?'}</span>
+              <Button variant="ghost" onClick={() => setConfirm(null)}>Cancel</Button>
+              <Button variant="danger" autoFocus onClick={() => (confirm === 'restart' ? game.restart() : onMenu())}>{confirm === 'restart' ? 'Restart' : 'Leave'}</Button>
+            </div>
+          ) : (
+            <div className="if-pause-secondary">
+              <Button grow icon="reset" onClick={() => setConfirm('restart')}>Restart</Button>
+              <Button grow variant="danger" icon="globe" onClick={() => setConfirm('abort')}>Abort to map</Button>
+            </div>
+          )}
         </div>
       </div>
 
       {sub === 'settings' && (
         <Modal title="Settings" onClose={() => setSub(null)}>
-          <SettingsPanel
-            s={settings}
-            set={(p) => {
-              setSettings(p);
-            }}
-          />
+          <SettingsPanel s={settings} set={setSettings} />
         </Modal>
       )}
       {sub === 'controls' && (
-        <Modal title="Controls" wide onClose={() => setSub(null)}>
+        <Modal title="Flight controls" wide onClose={() => setSub(null)}>
           <ControlsPanel />
         </Modal>
       )}
       {sub === 'scores' && (
-        <Modal title="High scores" onClose={() => setSub(null)}>
+        <Modal title="Pilot logbook" onClose={() => setSub(null)}>
           <ScoresPanel />
         </Modal>
       )}

@@ -21,6 +21,8 @@ export type { CockpitInputs, CockpitUi, View, CockpitHost };
 export interface CockpitHover { id: string; label: string; value: string; hint: string; desc: string; }
 export interface PressResult { id: string; handled: boolean; }
 
+/** Camera layer of the objects drawn by the flight-deck stencil mask pass (see Cockpit.renderMask). */
+const MASK_LAYER = 1;
 const EYE_M = new THREE.Vector3(0.22, 0.66, 0.52);       // captain's design eye point (model metres)
 const FO_EYE_M = new THREE.Vector3(0.22, 0.66, -0.52);
 const V = (x: number, y: number, z: number) => new THREE.Vector3(x, y, z);
@@ -304,6 +306,11 @@ export class Cockpit {
     this.ctx = { d: null as unknown as PanelData, sys: this.sys, host: null as unknown as CockpitHost, t: 0, mcdu: this.mcdu[0], utc: new Date() };
     tuneCockpitMaterials(this.root); // trilinear + max-anisotropy filtering, mip-safe anti-aliased alpha cut-outs (see a320/cockpitRender.ts)
     this.collectMaskMats();
+    // The mask pass only needs the big opaque surfaces: the merged static meshes and the display screens. The ~380 knobs / switches / keys sit on
+    // those surfaces (same pixels) and the colour pass draws them over the world anyway, so they are kept out of the mask pass (layer MASK_LAYER).
+    const maskSet = new Set(this.maskMats);
+    for (const m of merged.children) if (maskSet.has((m as THREE.Mesh).material as THREE.Material)) m.layers.enable(MASK_LAYER);
+    for (const m of this.screenMesh.values()) m.layers.enable(MASK_LAYER);
     const lead = new Set(Object.values(LEADER)); this.animOrder = [...this.groups.values()].sort((a, b) => (lead.has(b.id) ? 1 : 0) - (lead.has(a.id) ? 1 : 0));
     for (const g of this.animOrder) if (LEADER[g.id]) g.still = false; // followers ride on moving levers
     this.loaded = true; this.setPreset('pilot', true);
@@ -1041,7 +1048,9 @@ export class Cockpit {
   /** Colour-less pass that stamps stencil = 1 wherever the opaque flight deck is visible. */
   renderMask(r: THREE.WebGLRenderer) {
     for (const m of this.maskMats) { m.colorWrite = false; m.stencilWrite = true; m.stencilRef = 1; m.stencilFunc = THREE.AlwaysStencilFunc; m.stencilZPass = THREE.ReplaceStencilOp; }
-    r.render(this.scene, this.camera);
+    // Only MASK_LAYER objects are drawn (and, since lights live on layer 0, without lighting – colour is not written anyway).
+    const cam = this.camera, saved = cam.layers.mask; cam.layers.set(MASK_LAYER);
+    try { r.render(this.scene, cam); } finally { cam.layers.mask = saved; }
     for (const m of this.maskMats) { m.colorWrite = true; m.stencilWrite = false; }
   }
   private brMap: Record<string, number> = {};

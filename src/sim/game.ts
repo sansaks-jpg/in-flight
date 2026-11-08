@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { loadState } from './loadState';
+import { collectTextures, forceDrawAll, nextFrame, uploadTextures } from './warmup';
 import { Airport, airportsNear, frequenciesFor } from '../data/airports';
 import { taxiRoute, TaxiRoute } from './airfield';
 import { magVar } from './magvar';
@@ -304,6 +305,8 @@ export class Game {
   viewIdx = 0; lookYaw = 0; lookPitch = 0; orbitYaw = 0; orbitPitch = 0.1; zoom = 1; chaseQ = new THREE.Quaternion(); chaseInit = false;
   private raf = 0; private last = 0; private acc = 0; time = 0; private hudT = 0; private slowT = 0; timeScale = 1; private toastId = 1;
   private emaFrameMs = 16.6; private dprScale = 1.0; private dprCooldown = 0;
+  /** Loading pipeline: stream everything -> GPU warm-up -> done (see loop() and prewarm()). */
+  private warm: 'stream' | 'warm' | 'done' = 'stream'; private warmStart = 0;
   // input
   radioMenuOpen = false;
   keys = new Set<string>(); private axes = { pitch: 0, roll: 0, yaw: 0 }; touch = { pitch: 0, roll: 0, yaw: 0, brake: false }; yokeDrag: { pitch: number; roll: number } | null = null; private pad = { pitch: 0, roll: 0, yaw: 0 };
@@ -369,7 +372,7 @@ export class Game {
     probeRenderCaps(this.renderer); // GPU anisotropy limit + real MSAA state, used by the flight-deck texture / alpha cut-out setup
     this.resize();
     window.addEventListener('resize', this.resize);
-    window.addEventListener('keydown', this.onKeyDown); window.addEventListener('keyup', this.onKeyUp); window.addEventListener('blur', this.onBlur);
+    window.addEventListener('keydown', this.onKeyDown); window.addEventListener('keyup', this.onKeyUp); window.addEventListener('blur', this.onBlur); document.documentElement.addEventListener('pointerleave', this.onPointerLeaveDoc);
     canvas.addEventListener('pointerdown', this.onPointerDown); window.addEventListener('pointermove', this.onPointerMove); window.addEventListener('pointerup', this.onPointerUp); window.addEventListener('pointercancel', this.onPointerUp);
     canvas.addEventListener('wheel', this.onWheel, { passive: true }); canvas.addEventListener('contextmenu', (e) => e.preventDefault());
     document.addEventListener('visibilitychange', () => { if (document.hidden && this.phase === 'playing') this.pause(); });
@@ -416,7 +419,7 @@ export class Game {
     // Via setPhase, not a bare field write: leaving a PAUSED flight straight into a new load would
     // otherwise leave AtcRadio paused and speechSynthesis globally frozen (ATC/GPWS voice dead for
     // the whole next flight). setPhase un-pauses the radio on the way out of 'paused'.
-    this.setPhase('loading'); this.loadStart = performance.now();
+    this.setPhase('loading'); this.loadStart = performance.now(); this.warm = 'stream';
     loadState.stage('scenery');
     const proj = new Projection(from.lat, from.lon);
     const anisoMap: Record<QualityPreset, number> = {
@@ -962,7 +965,7 @@ export class Game {
   }
   dispose() {
     cancelAnimationFrame(this.raf); this.disposeScenario(); this.stopRadio();
-    window.removeEventListener('resize', this.resize); window.removeEventListener('keydown', this.onKeyDown); window.removeEventListener('keyup', this.onKeyUp); window.removeEventListener('blur', this.onBlur);
+    window.removeEventListener('resize', this.resize); window.removeEventListener('keydown', this.onKeyDown); window.removeEventListener('keyup', this.onKeyUp); window.removeEventListener('blur', this.onBlur); document.documentElement.removeEventListener('pointerleave', this.onPointerLeaveDoc); window.clearTimeout(this.hoverTimer);
     this.renderer.dispose();
     if ((window as any).sim === this) delete (window as any).sim;
   }
@@ -985,7 +988,7 @@ export class Game {
     if (this.depTh) this.depTh = null;
   }
   setView(v: ViewId) {
-    this.viewIdx = VIEWS.indexOf(v); this.lookYaw = 0; this.lookPitch = 0; this.orbitYaw = 0; this.orbitPitch = 0.12; this.cockpit?.resetLook();
+    this.clearHover(); this.viewIdx = VIEWS.indexOf(v); this.lookYaw = 0; this.lookPitch = 0; this.orbitYaw = 0; this.orbitPitch = 0.12; this.cockpit?.resetLook();
     this.visual?.setInterior(this.isInterior());
   }
   resetView() {
@@ -1021,7 +1024,7 @@ export class Game {
     }
   }
   setPhase(p: Phase) {
-    if (this.phase === p) return; this.phase = p;
+    if (this.phase === p) return; this.phase = p; this.clearHover();
     // flight over / reloading: nothing on the frequency is relevant any more
     if (p === 'crashed' || p === 'complete' || p === 'loading') this.radio.cancel();
     this.syncVoice();
@@ -1074,7 +1077,7 @@ export class Game {
     this.touch.pitch = this.touch.roll = this.touch.yaw = 0; this.touch.brake = false;
     this.yokeDrag = null; this.drag = null; this.pointers.clear(); this.restartHold = 0;
   }
-  private onBlur = () => { this.clearInput(); };
+  private onBlur = () => { this.clearInput(); this.clearHover(); };
   private onKeyDown = (e: KeyboardEvent) => {
     if (e.defaultPrevented || e.metaKey || (e.ctrlKey && e.key !== 'Control') || e.altKey) return;
     if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement || (e.target instanceof HTMLElement && e.target.isContentEditable)) return;
@@ -1274,6 +1277,23 @@ export class Game {
 
   // ---- pointer ----
   private lastHoverT = 0; private lastDX = 0; private lastDY = 0;
+  // Cockpit hover badge. The raycast is rate-limited to ~33 Hz, but the LAST pointer position is always evaluated (trailing timer):
+  // dropping it used to leave the badge stuck on a control the cursor had already left. It is also cleared whenever the cursor is
+  // not over the canvas (HUD / window edge / blur), a gesture starts, the view changes or the sim leaves the playing state.
+  private hoverX = 0; private hoverY = 0; private hoverTimer = 0; private readonly hoverNdc = new THREE.Vector2();
+  private clearHover() { if (this.hoverTimer) { window.clearTimeout(this.hoverTimer); this.hoverTimer = 0; } this.cockpitTooltip = null; }
+  private hoverAllowed() { return this.mode === 'play' && this.phase === 'playing' && !!this.cockpit && this.isInterior(); }
+  private evalHover() {
+    this.hoverTimer = 0; this.lastHoverT = performance.now();
+    if (!this.hoverAllowed() || this.drag) { this.cockpitTooltip = null; return; }
+    const r = this.canvas.getBoundingClientRect(), cam = this.cockpit!.activeCamera;
+    this.hoverNdc.set(((this.hoverX - r.left) / r.width) * 2 - 1, -((this.hoverY - r.top) / r.height) * 2 + 1);
+    cam.updateMatrixWorld(); this.raycaster.setFromCamera(this.hoverNdc, cam);
+    const hv = this.cockpit!.hover(this.raycaster);
+    this.cockpitTooltip = hv ? { id: hv.id, label: hv.label, value: hv.value, actionHint: hv.hint, description: hv.desc, x: this.hoverX, y: this.hoverY } : null;
+  }
+  private onPointerLeaveDoc = () => this.clearHover();
+
   private ndc(e: PointerEvent) { const r = this.canvas.getBoundingClientRect(); return new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1); }
   private onPointerDown = (e: PointerEvent) => {
     if (e.button !== 0 && e.button !== 2 && e.button !== 1) return;
@@ -1314,20 +1334,15 @@ export class Game {
   private onPointerMove = (e: PointerEvent) => {
     const d = this.drag;
     if (!d) {
-      if (this.mode === 'play' && this.isInterior() && this.cockpit && this.phase === 'playing') {
-        const nowH = performance.now();
-        if (nowH - this.lastHoverT > 30) {
-          this.lastHoverT = nowH;
-          const cam = this.cockpit.activeCamera; cam.updateMatrixWorld(); this.raycaster.setFromCamera(this.ndc(e), cam);
-          const hv = this.cockpit.hover(this.raycaster);
-          this.cockpitTooltip = hv ? { id: hv.id, label: hv.label, value: hv.value, actionHint: hv.hint, description: hv.desc, x: e.clientX, y: e.clientY } : null;
-        }
-      } else {
-        this.cockpitTooltip = null;
-      }
+      // Only the 3D scene is hoverable: over a HUD panel / button the pointer target is not the canvas.
+      if (e.target !== this.canvas || !this.hoverAllowed()) { this.clearHover(); return; }
+      this.hoverX = e.clientX; this.hoverY = e.clientY;
+      const wait = 30 - (performance.now() - this.lastHoverT);
+      if (wait <= 0) { window.clearTimeout(this.hoverTimer); this.evalHover(); }
+      else if (!this.hoverTimer) this.hoverTimer = window.setTimeout(() => this.evalHover(), wait);
       return;
     }
-    this.cockpitTooltip = null; // no hover badge while a drag / look gesture is in progress
+    this.clearHover(); // no hover badge while a drag / look gesture is in progress
     const c = this.fm?.ctl; const dx = e.clientX - d.sx, dy = e.clientY - d.sy;
     switch (d.id) {
       case 'cockpit': { const p = this.pointers.get(e.pointerId); const mx = p ? e.clientX - p.x : dx - (this.lastDX ?? 0), my = p ? e.clientY - p.y : dy - (this.lastDY ?? 0); if (p) { p.x = e.clientX; p.y = e.clientY; } this.cockpit?.drag(mx, my); break; }
@@ -1345,6 +1360,7 @@ export class Game {
     }
   };
   private onPointerUp = (e: PointerEvent) => {
+    if (e.pointerType !== 'mouse') this.clearHover(); // touch / pen have no hover: never leave the badge behind after a tap
     if (this.drag?.id === 'look' && this.isInterior()) this.cockpit?.endLook();
     this.cockpit?.release();
     this.pointers.delete(e.pointerId);
@@ -1504,7 +1520,15 @@ export class Game {
       const t = this.world.terrain, waited = (now - this.loadStart) / 1000;
       this.world.update(this.camera, this.fm.pos, 1, this.time);
       this.attractCamera(rdt); this.render();
-      if ((t.nearReady() && waited > 1.2) || waited > (t.offline ? 4 : 11)) { this.setPhase('idle'); loadState.stage('done'); this.hooks.onHud(this.hud()); }
+      if (this.warm === 'stream') {
+        // Everything around the aircraft – ALL terrain LOD rings and the whole city ring, in every direction – must be built before the flight starts.
+        const streamed = t.progress() >= 0.99 && this.world.structures.progress() >= 0.99;
+        if ((streamed && waited > 1.2) || waited > (t.offline ? 4 : 25)) {
+          if (this.mode === 'play') { this.warm = 'warm'; this.warmStart = now; loadState.stage('warm'); this.prewarm().catch((e) => console.warn('[prewarm]', e)).finally(() => { this.warm = 'done'; }); }
+          else this.warm = 'done'; // the menu background (attract mode) never shows the flight deck: no warm-up
+        }
+      }
+      if (this.warm === 'done' || (this.warm === 'warm' && now - this.warmStart > 30000)) { this.warm = 'done'; this.setPhase('idle'); loadState.stage('done'); this.hooks.onHud(this.hud()); }
       else if (this.ticks % 6 === 0) this.hooks.onHud(this.hud());
       return;
     }
@@ -1530,18 +1554,56 @@ export class Game {
     r.clear();
     if (!this.world) return;
     const deck = this.mode === 'play' && this.isInterior() && this.cockpit && this.phase !== 'loading' ? this.cockpit : null;
-    if (deck && deck.canMask && this.emaFrameMs > 9.5 && !this.world.clouds.active) {
+    const clouds = this.world.clouds.active;
+    this.drawFrame(deck && deck.canMask && this.emaFrameMs > 9.5 && !clouds ? 'mask' : clouds ? 'clouds' : 'plain', deck);
+  }
+  /** The three ways a frame can be drawn; `prewarm()` runs each once so none of them has to build GPU resources during play. */
+  private drawFrame(path: 'mask' | 'clouds' | 'plain', deck: Cockpit | null) {
+    const r = this.renderer, world = this.world!;
+    if (path === 'mask' && deck) {
       // Flight-deck occlusion: stamp the opaque deck into the stencil buffer, then draw the world only where the stencil is still 0 (through the windows).
       // The stencil state is LOCKED so every world material – streamed tiles included – obeys it without touching any material.
       deck.renderMask(r);
       const st = r.state.buffers.stencil, gl = r.getContext();
       r.clearDepth(); st.setTest(true); st.setMask(0); st.setFunc(gl.NOTEQUAL, 1, 0xff); st.setOp(gl.KEEP, gl.KEEP, gl.KEEP); st.setLocked(true);
-      try { r.render(this.world.scene, this.camera); } finally { st.setLocked(false); st.setTest(false); st.setMask(0xff); }
-    } else if (this.world.clouds.active) {
+      try { r.render(world.scene, this.camera); } finally { st.setLocked(false); st.setTest(false); st.setMask(0xff); }
+    } else if (path === 'clouds') {
       // volumetric clouds: scene -> colour+depth target -> depth-aware ray-march -> composite to the canvas
-      this.world.clouds.render(r, this.world.scene, this.camera, this.world.cloudEnv);
-    } else r.render(this.world.scene, this.camera);
+      world.clouds.render(r, world.scene, this.camera, world.cloudEnv);
+    } else r.render(world.scene, this.camera);
     if (deck) { r.clearDepth(); r.render(deck.activeScene, deck.activeCamera); }
+  }
+
+  /**
+   * Loading-screen GPU warm-up (see warmup.ts). Afterwards nothing is compiled, uploaded or allocated lazily when the pilot first looks
+   * out of the windshield, down at the pedestal or switches to the exterior camera. Every step restores whatever flag it forced
+   * before yielding to the main loop, so the live scene is never left in the "draw everything" state.
+   */
+  private async prewarm() {
+    const r = this.renderer, world = this.world!, deck = this.cockpit ?? null;
+    const deckScene = deck?.activeScene ?? null, deckCam = deck?.activeCamera ?? null;
+    const bar = (p: number) => loadState.warmProgress(p);
+    bar(0.02);
+    // 1. every shader program, hidden objects included (compile() walks all materials), in parallel on the driver's compile threads
+    await Promise.all([r.compileAsync(world.scene, this.camera), deckScene && deckCam ? r.compileAsync(deckScene, deckCam) : Promise.resolve()]);
+    bar(0.3);
+    // 2. every texture (the flight deck alone is ~344 MB of mip-mapped RGBA), a couple per frame so the loader keeps moving
+    await uploadTextures(r, collectTextures(deckScene ? [world.scene, deckScene] : [world.scene]), (p) => bar(0.3 + 0.4 * p));
+    // 3. one real draw of everything through each frame path: vertex / instance buffers, render targets, cloud noise, stencil path
+    const paths: ('mask' | 'clouds' | 'plain')[] = deck && deck.canMask ? ['mask', 'clouds', 'plain'] : ['clouds', 'plain'];
+    for (let i = 0; i < paths.length; i++) {
+      const undo = [forceDrawAll(world.scene)]; if (deckScene) undo.push(forceDrawAll(deckScene));
+      try {
+        r.clear();
+        if (paths[i] === 'clouds') { world.clouds.warm(r, world.scene, this.camera, world.cloudEnv); if (deckScene && deckCam) { r.clearDepth(); r.render(deckScene, deckCam); } }
+        else this.drawFrame(paths[i], deck);
+        r.getContext().finish(); // really wait for the GPU: the work must be finished behind the loading screen, not queued behind the first frame
+      } catch (e) { console.warn('[prewarm] pass failed', paths[i], e); }
+      finally { for (const u of undo) u(); r.setRenderTarget(null); }
+      bar(0.7 + 0.3 * ((i + 1) / paths.length));
+      await nextFrame();
+    }
+    r.clear();
   }
 
   private attractCamera(dt: number) {
@@ -1986,7 +2048,6 @@ export class Game {
     if (this.phase === 'crashed') amp += Math.max(0, 1 - this.crashTimer / 3) * 0.02;
     const sx = amp * (Math.sin(t * 23.1) + Math.sin(t * 41.7 + 1.3)), sy = amp * (Math.sin(t * 19.3 + 2) + Math.sin(t * 37.9)), sr = amp * 0.6 * Math.sin(t * 29.1);
     const gOff = flying ? clamp(-(fm.nz - 1) * 0.025, -0.06, 0.06) : 0;
-    this.world?.setInterior(this.isInterior() && this.mode === 'play');
     if (this.isInterior() && this.mode === 'play') {
       cam.near = 0.25; // world camera: nothing exists inside 25 cm of the eye point – a 12x larger near plane gives the 24-bit depth buffer far more range (less z-fighting, cheaper rasterisation)
       const vw = this.cockpit!.smooth(dt);
@@ -2242,7 +2303,7 @@ export class Game {
     const rwyIdent = this.apprKey || (th ? th.ident : '');
     const rwyDistNm = th ? Math.hypot(fm.pos.x - th.x, fm.pos.z - th.z) / M_PER_NM : 0;
     const total = haversine(this.cfg.from.lat, this.cfg.from.lon, this.cfg.to.lat, this.cfg.to.lon) || 1;
-    const loadP = this.world ? this.world.terrain.progress() : 0;
+    const loadP = this.world ? Math.min(this.world.terrain.progress(), this.world.structures.progress()) : 0;
 
     // Reading the HUD is side-effect free. Phase announcements are emitted by simulation,
     // not by React/map consumers requesting another navigation snapshot.

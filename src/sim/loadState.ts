@@ -5,7 +5,7 @@
 // flight-deck asset loader (byte progress of the 50 MB GLB). Snapshots are immutable and replaced on every
 // change, which is what useSyncExternalStore requires; byte progress is throttled so React is never flooded.
 
-export type LoadStage = 'idle' | 'dispatch' | 'scenery' | 'deck' | 'weather' | 'terrain' | 'done';
+export type LoadStage = 'idle' | 'dispatch' | 'scenery' | 'deck' | 'weather' | 'terrain' | 'warm' | 'done';
 
 export interface LoadSnap {
   stage: LoadStage;
@@ -14,11 +14,13 @@ export interface LoadSnap {
   deckTotal: number;
   /** The flight-deck model came out of the Cache Storage (no network). */
   deckCached: boolean;
+  /** 0..1 progress of the GPU warm-up (shader programs, texture uploads, first full draw) that closes the loading screen. */
+  warm: number;
   /** Set when the scenario could not be built; the loader then offers a way back. */
   error: string | null;
 }
 
-const IDLE: LoadSnap = { stage: 'idle', deckLoaded: 0, deckTotal: 0, deckCached: false, error: null };
+const IDLE: LoadSnap = { stage: 'idle', deckLoaded: 0, deckTotal: 0, deckCached: false, warm: 0, error: null };
 let snap: LoadSnap = IDLE;
 const subs = new Set<() => void>();
 let lastBytesEmit = 0;
@@ -32,6 +34,8 @@ export const loadState = {
   begin(stage: LoadStage = 'dispatch') { lastBytesEmit = 0; emit({ ...IDLE, stage }); },
   stage(stage: LoadStage) { if (snap.stage !== stage || snap.error) emit({ ...snap, stage, error: null }); },
   fail(message: string) { emit({ ...snap, error: message }); },
+  /** GPU warm-up progress; emits at most once per percent so React is never flooded. */
+  warmProgress(p: number) { const v = Math.max(0, Math.min(1, p)); if (v >= 1 || v - snap.warm >= 0.01) emit({ ...snap, warm: v }); },
   deckBytes(loaded: number, total: number, cached = false) {
     const now = performance.now();
     const final = total > 0 && loaded >= total;

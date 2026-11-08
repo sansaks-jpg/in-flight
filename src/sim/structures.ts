@@ -842,9 +842,6 @@ function patchRoadShader(mat: THREE.MeshLambertMaterial, uniforms: RoadUniforms)
   mat.customProgramCacheKey = () => 'road-asphalt-v2';
 }
 
-const _structBox = new THREE.Box3();
-const _sMin = new THREE.Vector3();
-const _sMax = new THREE.Vector3();
 
 interface TileBounds {
   minX: number;
@@ -1049,9 +1046,23 @@ export class Structures {
     return false;
   }
 
-  /** Flight-deck view: smaller always-keep core and tighter frustum skirt (see Terrain.interior). */
-  interior = false;
-  update(x: number, z: number, agl: number, airports: Airport[], frustum?: THREE.Frustum) {
+  /**
+   * 0..1: how much of the streamed 3x3 ring is final – real MVT geometry built (not the procedural stand-in) and its tree
+   * scatter finished. The loading screen waits for this so no city tile is still being swapped in once the flight starts.
+   * (Low has no 3D world layer and is always ready.)
+   */
+  progress(): number {
+    if (this.profile.buildings === 'none' && !this.profile.trees) return 1;
+    let n = 0, done = 0;
+    for (const [key, t] of this.tiles) { n++; if (!t.isProcedural && !this.treeJobs.has(key)) done++; }
+    return n ? done / n : 0;
+  }
+  /**
+   * Residency is decided by POSITION only (the whole ring around the aircraft, in every direction) – never by the view frustum.
+   * Streaming by frustum rebuilt tiles whenever the pilot looked away and back, and meant the loading screen (which looks at the
+   * aircraft from outside) could not pre-load what the cockpit camera sees. Drawing stays culled per object (`frustumCulled`).
+   */
+  update(x: number, z: number, agl: number, airports: Airport[]) {
     if (this.activeAirports !== airports) {
       this.activeAirports = airports;
       this.updateRunwayZones(airports);
@@ -1135,51 +1146,18 @@ export class Structures {
         const tx = cx + dx, ty = cy + dy;
         const key = `${ZOOM}/${tx}/${ty}`;
 
-        const minLon = tileXToLon(tx, ZOOM);
-        const maxLon = tileXToLon(tx + 1, ZOOM);
-        const maxLat = tileYToLat(ty, ZOOM);
-        const minLat = tileYToLat(ty + 1, ZOOM);
-        const x0 = this.proj.x(minLon), x1 = this.proj.x(maxLon);
-        const z0 = this.proj.z(maxLat), z1 = this.proj.z(minLat);
-        const minX = Math.min(x0, x1), maxX = Math.max(x0, x1);
-        const minZ = Math.min(z0, z1), maxZ = Math.max(z0, z1);
-        const tileCenterX = (minX + maxX) * 0.5;
-        const tileCenterZ = (minZ + maxZ) * 0.5;
-        const distCam = Math.hypot(tileCenterX - x, tileCenterZ - z);
-
-        // Core zone or center tile is never culled
-        const coreR = profile.structureCore * (this.interior ? 0.4 : 1), skirt = this.interior ? 150 : 600;
-        let inView = false;
-        if ((dx === 0 && dy === 0) || distCam <= coreR || !frustum) {
-          inView = true;
+        wanted.add(key);
+        const t = this.tiles.get(key);
+        if (t) {
+          t.lastSeen = now;
+          t.fadeTgt = 1; // visibility itself is driven by the fade (see stepTileFades)
         } else {
-          _sMin.set(minX - skirt, -200, minZ - skirt);
-          _sMax.set(maxX + skirt, 3000, maxZ + skirt);
-          _structBox.set(_sMin, _sMax);
-          inView = frustum.intersectsBox(_structBox);
-        }
-
-        if (inView) {
-          wanted.add(key);
-          const t = this.tiles.get(key);
-          if (t) {
-            t.lastSeen = now;
-            t.fadeTgt = 1; // visibility itself is driven by the fade (see stepTileFades)
-          } else {
-            this.loadTile(key, tx, ty, Math.max(Math.abs(dx), Math.abs(dy)) > 1);
-          }
-        } else {
-          const t = this.tiles.get(key);
-          if (t) {
-            t.fadeTgt = 0;
-            // Graceful retention: keep in memory for up to 6s
-            if (now - (t.lastSeen || 0) < (this.interior ? 25000 : 6000)) { // longer grace in the flight deck: glancing back must not rebuild tiles
-              wanted.add(key);
-            }
-          }
+          this.loadTile(key, tx, ty, Math.max(Math.abs(dx), Math.abs(dy)) > 1);
         }
       }
     }
+    // A tile that just left the ring (border crossing) keeps its place for a few seconds: no fetch/build thrash on a jittering border.
+    for (const [key, t] of this.tiles) if (!wanted.has(key) && now - (t.lastSeen || 0) < 6000) wanted.add(key);
 
     // Advance the per-tile fades BEFORE pruning so tiles leaving the wanted set dissolve first.
     this.stepTileFades(dtMs);

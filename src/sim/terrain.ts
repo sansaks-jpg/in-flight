@@ -6,7 +6,6 @@ import { loadImage, tileUrl, styleById, ELEVATION_URL, cancelQueued, DEFAULT_TIL
 import { groundDetailTexture } from './textures';
 import { airportsNear, airfieldSpines } from '../data/airports';
 import { QualityPreset } from './storage';
-import { QUALITY } from './quality';
 
 export interface LodCfg { z: number; r: number; N: number; drop: number; }
 export const LOD_ULTRA: LodCfg[] = [
@@ -46,9 +45,6 @@ const LOD_MAP: Record<QualityPreset, LodCfg[]> = {
 
 const FLAT_R = 420, BLEND_R = 1800; // realistic envelope around runways preserving airport plates and surrounding plains
 
-const _tileBox = new THREE.Box3();
-const _boxMin = new THREE.Vector3();
-const _boxMax = new THREE.Vector3();
 
 interface Tile {
   key: string; lod: number; z: number; x: number; y: number; mesh: THREE.Mesh | null; heights: Float32Array | null; water: Float32Array | null;
@@ -57,7 +53,7 @@ interface Tile {
   demDone: boolean; texDone: boolean; tex: THREE.Texture | null; overlayTex: THREE.Texture | null; disposed: boolean; synthetic: boolean;
   /** Chebyshev distance in tiles from the camera tile; drives how deep the imagery is stitched. */
   dist: number;
-  /** Timestamp (seconds) when tile was last seen in view frustum or within core zone. */
+  /** performance.now()/1000 when the tile was last inside the streamed rings (drives the short eviction grace period). */
   lastSeen?: number;
 }
 
@@ -421,64 +417,41 @@ export class Terrain {
     });
   }
 
-  /** Flight-deck view: the windshield only shows a forward cone, so the 360° always-keep core shrinks and the frustum skirt tightens (less overdraw). */
-  interior = false;
-  update(camX: number, camZ: number, time = 0, sunDir?: THREE.Vector3, frustum?: THREE.Frustum) {
+  /**
+   * Residency is decided by POSITION only: the full LOD rings around the aircraft are always requested, in every direction.
+   * The old code requested outer rings only inside the camera frustum (and shrank the 360° core in the flight deck), so imagery
+   * and meshes were fetched / rebuilt the moment the pilot turned their head – the "assets load when they come into view" hitch,
+   * and none of it could be finished behind the loading screen. Drawing is still culled per mesh by three.js (`frustumCulled`).
+   */
+  private wantedKeys = new Set<string>(); // reused every frame (zero-allocation render-loop rule)
+  update(camX: number, camZ: number, time = 0, sunDir?: THREE.Vector3) {
     this.timeU.value = time;
     if (sunDir) this.sunU.value.copy(sunDir);
+    const nowS = performance.now() / 1000;
     const mx = camX / this.proj.k + this.proj.ox, my = -camZ / this.proj.k + this.proj.oy;
-    const wanted = new Set<string>();
+    const wanted = this.wantedKeys; wanted.clear();
     this.lods.forEach((cfg, l) => {
       const S = tileSizeMerc(cfg.z), n = 2 ** cfg.z;
-      const halfSize = (S * this.proj.k) * 0.5;
       const cx = Math.floor((mx + Math.PI * R_MERC) / S), cy = Math.floor((Math.PI * R_MERC - my) / S);
       for (let dy = -cfg.r; dy <= cfg.r; dy++) for (let dx = -cfg.r; dx <= cfg.r; dx++) {
         const ty = cy + dy; if (ty < 0 || ty >= n) continue;
         const tx = cx + dx;
         const key = `${cfg.z}/${tx}/${ty}`;
-
-        // Mercator center to world position
-        const cmx = -Math.PI * R_MERC + (tx + 0.5) * S;
-        const cmy = Math.PI * R_MERC - (ty + 0.5) * S;
-        const posX = (cmx - this.proj.ox) * this.proj.k;
-        const posZ = -(cmy - this.proj.oy) * this.proj.k;
-        const distCam = Math.hypot(posX - camX, posZ - camZ);
-
-        // Core 360-degree zone or innermost ring is never culled
-        const coreR = QUALITY[this.quality].terrainCore * (this.interior ? 0.4 : 1), pad = this.interior ? 250 : 1000;
-        let inView = false;
-        if (l === 0 || distCam - halfSize <= coreR || !frustum) {
-          inView = true;
+        wanted.add(key);
+        const t = this.tiles.get(key);
+        if (t) {
+          t.lastSeen = nowS;
+          if (t.mesh) t.mesh.visible = true;
         } else {
-          _boxMin.set(posX - halfSize - pad, -500, posZ - halfSize - pad);
-          _boxMax.set(posX + halfSize + pad, 4500, posZ + halfSize + pad);
-          _tileBox.set(_boxMin, _boxMax);
-          inView = frustum.intersectsBox(_tileBox);
-        }
-
-        if (inView) {
-          wanted.add(key);
-          const t = this.tiles.get(key);
-          if (t) {
-            t.lastSeen = time;
-            if (t.mesh) t.mesh.visible = true;
-          } else {
-            this.createTile(key, l, cfg.z, tx, ty, Math.hypot(dx, dy));
-          }
-        } else {
-          const t = this.tiles.get(key);
-          if (t) {
-            if (t.mesh) t.mesh.visible = false;
-            // Graceful retention: keep in memory for up to 8s in case pilot pans camera back
-            if (time - (t.lastSeen || 0) <= (this.interior ? 25.0 : 8.0)) {
-              wanted.add(key);
-            }
-          }
+          this.createTile(key, l, cfg.z, tx, ty, Math.hypot(dx, dy));
         }
       }
     });
-    // unload
-    for (const [k, t] of this.tiles) if (!wanted.has(k)) this.disposeTile(t, k);
+    // Tiles that just left the rings (the aircraft crossed a tile border) stay for a few seconds so a jittering border cannot thrash fetch/build.
+    for (const [k, t] of this.tiles) {
+      if (wanted.has(k)) continue;
+      if (nowS - (t.lastSeen ?? 0) > 6) this.disposeTile(t, k);
+    }
     // build at most 1-2 meshes per frame within a strict 2.2 ms frame budget
     let built = 0;
     const t0 = performance.now();
@@ -506,11 +479,14 @@ export class Terrain {
     });
   }
 
-  /** 0..1 loading progress of the innermost ring (used by loading screen). */
+  /**
+   * 0..1 loading progress over EVERY LOD ring (mesh built and imagery settled – loaded or failed), not just the innermost one:
+   * the loading screen may only finish once nothing around the aircraft is still to be streamed in.
+   */
   progress() {
-    const cfg = this.lods[0], n = Math.pow(cfg.r * 2 + 1, 2);
-    let done = 0; this.tiles.forEach((t) => { if (t.lod === 0 && t.mesh && t.texDone) done++; });
-    return Math.min(1, done / n);
+    let n = 0, done = 0;
+    this.tiles.forEach((t) => { n++; if (t.mesh && t.texDone) done++; });
+    return n ? Math.min(1, done / n) : 0;
   }
   nearReady() { return this.progress() >= 0.99; }
   get offline() { return this.demFailures > 3 && this.demOk === 0; }

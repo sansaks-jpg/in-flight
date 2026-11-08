@@ -79,9 +79,9 @@ To prevent garbage collection (GC) micro-stutters:
 | `src/ui/globeCamera.ts` | Google-Earth-style camera helpers: eased fly-to with pull-back arc, drag inertia, normalised wheel zoom. |
 | `src/ui/globeRunways.ts` | True-scale (metres) runway markings for the globe overlay with a metres-per-pixel fade gate. |
 | `src/ui/PreGameVisuals.tsx` | Interactive pre-flight globe and planner visuals: `InteractiveEarthGlobe`, runway-end anchors and airport framing helpers. |
-| `src/sim/aircraftModel.ts` + `aircraftGeo.ts` | Exterior models. NOTE (corrected): the A320 exterior may use `src/assets/models/a320.glb` (see its CREDITS.md); the C172/ATR procedural builders remain only as reference – the product is **A320-only** (`AIRCRAFT` in `specs.ts` is filtered to `sky`). Body frame +X right, +Y up, -Z forward, CG at origin; wheel contact points come straight from `spec.gear`. |
-| `src/sim/cockpit.ts` | **A320 flight deck**: loads the FlightGear A320-family GLB (`public/models/a320/cockpit.glb`, GPL-2.0), merges static geometry per material, animates ~600 switches/knobs/levers/keys about their original axes, replaces screen textures with live canvases, handles pointer/wheel/double-click interaction and the damped camera rig (presets, 1–14x zoom). Falls back to the procedural deck if the GLB cannot be fetched. |
-| `src/sim/a320/assets.ts` | GLB + manifest loader (meshopt decoder) with local-first URL list and pinned jsDelivr / raw.githubusercontent fallbacks. |
+| `src/sim/aircraftModel.ts` + `aircraftGeo.ts` | Exterior models, **all procedural** (verified against the code: no `.glb` is imported anywhere; the earlier claim that the exterior may use `src/assets/models/a320.glb` was wrong and those binaries were removed). The product is **A320-only** (`AIRCRAFT` in `specs.ts` is filtered to `sky`); the C172/ATR builders remain only as reference. Body frame +X right, +Y up, -Z forward, CG at origin; wheel contact points come straight from `spec.gear`. |
+| `src/sim/cockpit.ts` | **A320 flight deck**: loads the FlightGear A320-family GLB (`public/models/a320/cockpit.glb`, GPL-2.0), merges static geometry per material, animates ~600 switches/knobs/levers/keys about their original axes, replaces screen textures with live canvases, handles pointer/wheel/double-click interaction and the damped camera rig (presets, 1–14x zoom). Falls back to the procedural deck if the GLB cannot be fetched. The stencil mask pass draws only `MASK_LAYER` objects (merged static surfaces + screens), not the ~380 individual knobs/switches. |
+| `src/sim/a320/assets.ts` | Flight-deck GLB + manifest loader (meshopt decoder, Cache Storage). **CDN only** (verified): the 50.6 MB GLB comes from a SHA-pinned `raw.githubusercontent.com` URL (with the `github.com/.../raw/` redirect as backup) and the manifest from pinned jsDelivr; there is no local copy and no local-first lookup (the earlier text said otherwise). |
 | `src/sim/a320/systems.ts` | Electrics, APU, bleed/packs, pressurisation, hydraulics, fuel, ENG MODE/MASTER start logic, autobrake/ground-spoiler arming, ECAM page selection. `CockpitHost` is the bridge to `Game`. |
 | `src/sim/a320/displays.ts` | PFD, ND (ARC/ROSE/PLAN), E/WD, 13 SD pages, MCDU (2 units), ISIS, FCU digit strip and clock renderers. |
 | `src/sim/a320/proceduralCockpit.ts` | Old procedural cockpit, kept only as runtime fallback. |
@@ -94,8 +94,8 @@ To prevent garbage collection (GC) micro-stutters:
 | `src/sim/specs.ts` | Aircraft performance data, engine configurations, aerodynamic coefficients, and weight balance profiles. |
 | `src/sim/storage.ts` | localStorage persistence for settings, score records and the last route; defines the `QualityPreset` type. |
 | `src/sim/quality.ts` | Graphics quality presets (`low`, `medium`, `high`, `ultra`) with per-preset render budgets and `resolveAutoQuality()` (mobile devices are handled via an `isMobile` flag, not a preset). |
-| `src/sim/terrain.ts` | Procedural and vector terrain elevation sampling, heightmaps, and terrain meshes. |
-| `src/sim/tiles.ts` | Tile streaming logic, LOD management, and bounding frustum culling. |
+| `src/sim/terrain.ts` | Terrain elevation sampling, heightmaps and the LOD-ring tile streamer. Residency is by position only; `progress()` covers every ring. |
+| `src/sim/tiles.ts` | Tile sources (Esri imagery, elevation, overlays) and the shared prioritised/cancellable image loader + cache. Streaming *residency* lives in `terrain.ts` / `structures.ts` and is position-based (see §9). |
 | `src/sim/structures.ts`| Procedural urban generation, building extrusions, runway markings, and approach lights. |
 | `src/sim/airportGround.ts` | Airport ground planning shared by the 3D scenery, spawn logic, tree/building scatterer and mini map. |
 | `src/sim/airfieldMesh.ts` | 3D airfield ground layout from surveyed OpenStreetMap data: taxiways, aprons, stand/hold-short markers, helipads, hangar and terminal footprints. |
@@ -107,7 +107,8 @@ To prevent garbage collection (GC) micro-stutters:
 | `src/sim/cloudLayers.ts` | Cloud layer planning: converts live METAR/model weather into 4 MSL altitude slabs (low, mid, high, CB storm column) for volumetric ray-marching. |
 | `src/sim/volumetricClouds.ts` | Fly-through volumetric ray-marched clouds with scene depth buffer intersection, Henyey-Greenstein phase lighting, and IMC white-out. |
 | `src/sim/lightning.ts` | Cloud-to-ground lightning for thunderstorm conditions: billboarded bolt ribbons, a dedicated flash light, and an `onStrike` hook wired to procedural thunder in `audio.ts`. |
-| `src/sim/loadState.ts` | Observable load-stage store (`dispatch → scenery → deck → weather → terrain → done`, flight-deck GLB byte progress, error). |
+| `src/sim/loadState.ts` | Observable load-stage store (`dispatch → scenery → deck → weather → terrain → warm → done`, flight-deck GLB byte progress, GPU warm-up progress, error). |
+| `src/sim/warmup.ts` | Loading-screen GPU warm-up helpers: `forceDrawAll`, `collectTextures`, `uploadTextures`, `nextFrame` (used by `Game.prewarm`). |
 | `src/ui/Loaders.tsx` + `loaders.css` | Loading screens: `BootLoader` (first visit/reload) and `FlightLoader` (real-progress opaque loader from FLY click to ready). |
 | `src/ui/A320Plan.tsx` | True-scale plan-view A320-200 SVG for the loaders with progressive fill progress. |
 | `src/sim/audio.ts` | Web Audio API procedural synthesis (engines, slipstream, rolling, warnings tones, one-shots, thunder). `halt()` suspends the AudioContext for a pause and refuses every one-shot; `silence()` additionally forgets queued speech. Speech itself is NOT produced here any more: `speak()` is a thin adapter onto the shared `VoiceBus` (`audio.voice`). |
@@ -123,7 +124,9 @@ To prevent garbage collection (GC) micro-stutters:
 | `src/ui/AirportMiniMap.tsx` | Dedicated airport/runway navigation display: airport diagram on the ground; airborne a full en-route chart (flight-plan polyline, waypoints, nearby airports/NAVAIDs, graticule, magnetic compass rose with heading/track/AP bugs, minute markers, wind arrow). |
 | `src/ui/mapLayers.ts` | Persisted 2D-map layer preferences (base style + overlays). |
 | `src/ui/navigation.ts` | Single HUD/navigation display-mode order shared by the keyboard, gamepad and display menu. |
-| `src/ui/Hud.tsx` | Glass HUD overlay, airspeed tape, altimeter tape, artificial horizon, and system annunciators. |
+| src/ui/Hud.tsx | Re-exports the flight HUD and holds the pre-flight **briefing** (`ReadyScreen`), the **pause screen** (`PauseMenu`: status, flight snapshot, resume, settings / controls / logbook tiles, confirm-guarded restart & abort) and the result screen. |
+| src/ui/kit.cssKit.tsx | **In-game UI kit** — the one design language for every pause / settings / reference surface: tokens (`--if-*`), `Dialog` (focus trap, owns Esc), `Button`, `Section`/`Row`, `Switch`, `Segmented`, `Slider`, `Select`. New in-game surfaces must be built from these, not from ad-hoc Tailwind colours. |
+| src/ui/SettingsPanels.tsx | `Modal` (thin `Dialog` wrapper used by menu and pause), categorised `SettingsPanel` (Graphics · Audio & voice · Flight & controls · Interface · Captions, with a live caption preview), `ControlsPanel` (grouped key map) and `ScoresPanel` (logbook). `Screens.tsx` re-exports them. |
 | `src/ui/FlightHud.tsx` | In-flight glass HUD component (re-exported by `Hud.tsx`). |
 | `src/ui/FlightInstruments.tsx` | React flight instruments: `PrimaryFlightDisplay` and `TouchControls`. |
 | `src/ui/MsfsWindows.tsx` | Floating in-flight tool windows (ATC, camera, checklist, weather, EFB, systems) plus overlays: world markers, cockpit tooltips, freelook reticle. |
@@ -160,11 +163,11 @@ To prevent garbage collection (GC) micro-stutters:
   ```bash
   npm run preview
   ```
-- **Run Test Suite** (`node:test` — 73 test blocks across ten suites; the exact executed count can differ slightly when a runner expands subtests):
+- **Run Test Suite** (`node:test` — about 90 test blocks across eleven suites; the exact executed count can differ slightly when a runner expands subtests):
   ```bash
   npm test
   ```
-  Suites: `scripts/autopilot-test.ts`, `scripts/globe-tiles-test.ts`, `scripts/navigation-test.ts`, `scripts/runtime-test.ts`, `scripts/dispatch-test.ts`, `scripts/clock-test.ts`, `scripts/runway-data-test.ts`, `scripts/weather-test.ts`, `scripts/scale-terrain-test.ts`, `scripts/atc-test.ts`.
+  Suites: `scripts/autopilot-test.ts`, `scripts/globe-tiles-test.ts`, `scripts/navigation-test.ts`, `scripts/runtime-test.ts`, `scripts/dispatch-test.ts`, `scripts/clock-test.ts`, `scripts/runway-data-test.ts`, `scripts/weather-test.ts`, `scripts/scale-terrain-test.ts`, `scripts/atc-test.ts`, `scripts/voice-test.ts`.
 - **Run Secondary Test Scripts** (outside the main `npm test` suite):
   ```bash
   npm run test:ui
@@ -201,6 +204,7 @@ To prevent garbage collection (GC) micro-stutters:
 5. **Asset Storage & CDN Rules**:
    - **Do NOT bundle or commit heavy binary assets** (e.g. 3D GLB/GLTF models, large textures, binary datasets) directly into the repository files.
    - All external 3D models and heavy assets must be loaded via **runtime auto-fetch from a permanent, reliable public URL/CDN** (e.g. pinned jsDelivr, GitHub releases, or Hugging Face CDN mirrors) with automated fallback (such as procedural geometry).
+   - Enforcement: `*.glb` / `*.gltf` are in `.gitignore`. Previously the three exterior GLBs (`a320`, `atr72`, `c172`, 4.2 MB) were committed twice (`src/assets/models/` and the generated `public/src/assets/models/`) although nothing imported them; they were removed. Menu photos load from the pinned jsDelivr CDN (`flightDispatch.ts`), so `src/assets/images` is not needed either.
    - Never alter `package.json` project name or delete root build scripts. Keep all dependencies and build configs aligned with Cloudflare Pages requirements.
 
 
@@ -240,7 +244,33 @@ To prevent garbage collection (GC) micro-stutters:
 
 - **Two entry points, one look.** `index.html` paints a static `#boot-splash` before any JavaScript is parsed (the single-file bundle is ~4 MB); `BootLoader` removes it (cross-fade) after its own first paint. `FlightLoader` is shown when `launching || (screen === 'flight' && phase === 'loading')`. `launching` bridges the gap between pressing FLY and `Game.load()` (the OpenStreetMap runway survey in `startFlight` can take seconds) – never remove it, or the menu freezes visibly.
 - **Opaque on purpose.** The loader sits at `z-index: 60`, above the HUD/ready screen, and is fully opaque: the old 90 %-opaque blurred overlay let half-built terrain and tile pop-in show through. It stays mounted for the fade-out so the hand-over to the Ready screen is never a hard cut.
-- **Progress is real.** `flightTarget()` maps `loadState` to bands (survey + scenery 0–12 %, flight deck 12–60 % from streamed bytes, weather 60–68 %, terrain 68–98 % from `Terrain.progress()`); `useSmoothed()` eases towards it and never moves backwards.
+- **Progress is real.** `flightTarget()` maps `loadState` to bands (survey + scenery 0–12 %, flight deck 12–60 % from streamed bytes, weather 60–68 %, terrain + city streaming 68–88 % from `min(Terrain.progress(), Structures.progress())`, GPU warm-up 88–99 % from `loadState.warm`); `useSmoothed()` eases towards it and never moves backwards.
 - **Globe gate.** `InteractiveEarthGlobe` has an `onLoadProgress` prop: it reports the 16 level-2 Esri tiles settling (loaded *or* failed) and reaches exactly 1 only after the painted texture was uploaded and a frame was rendered.
 - **Volumetric Clouds.** `volumetricClouds.ts` replaces the 2D billboards with full-screen ray-marching against the scene depth buffer. `cloudLayers.ts` groups live weather into 4 MSL altitude slabs. Allows realistic flight inside IMC clouds.
 - **DEM Retry & Coastlines.** Missing elevation tiles are retried with back-off and sample from coarser tiles in the interim. Coastal airport 3.7 km boundaries blend smoothly into the sea.
+
+---
+
+## 9. Streaming residency & GPU warm-up (added)
+
+**Rule 1 – residency never depends on the camera.** `Terrain.update` and `Structures.update` request every tile of their rings around the *aircraft*, in every direction. They used to request outer rings only inside the view frustum (and shrank the 360° core to 40 % in the flight deck, evicting out-of-view tiles after 25 s), so imagery and meshes were fetched and rebuilt whenever the pilot turned their head, and the loading screen (which orbits the aircraft from outside) could not pre-load what the cockpit camera sees. Drawing is still culled per mesh by three.js (`frustumCulled`). Do not re-introduce a frustum/look-direction input to any loader. Tiles that leave a ring are kept for 6 s (border jitter) before disposal.
+
+**Rule 2 – nothing is created lazily after the loading screen.** `Game.loop` (phase `loading`) first waits for `Terrain.progress()` and `Structures.progress()` (all rings, real MVT geometry, finished tree scatter), then runs `Game.prewarm()` (stage `warm`, play mode only; the attract background skips it):
+1. `renderer.compileAsync` for the world and the flight-deck scene (walks hidden objects too);
+2. `uploadTextures` – every texture of both scenes, two per frame (the deck alone is ~344 MB of mip-mapped RGBA: three 4096², several 2048² PNGs);
+3. one real draw of everything through each frame path (`drawFrame('mask' | 'clouds' | 'plain')`) with `forceDrawAll` (visible, never culled; lights untouched because they change the shader variant), `gl.finish()`, flags restored before every yield. `VolumetricClouds.warm` also builds the CPU 3D noise volume and, for a clear sky, frees the large render targets again.
+Anything new added to `world.scene` / the cockpit scene before `load()` finishes is covered automatically. A new *render path* (another way `render()` can draw a frame) must be added to `prewarm()`. A hard 30 s cap guarantees the game never hangs on the loader.
+
+**Verification (measured, headless Chromium + SwiftShader):** after the loader finished, looking forward / left / right / up / down / back created **0** new programs, textures or geometries (`renderer.info`), versus lazy creation on first sight before.
+
+**Known limits.** Streaming further along the route as the aircraft flies is inherent (the world is 8,400 airports): ring *changes* still fetch new tiles, but always ahead of the aircraft in all directions, never as a function of view direction. GPU timing cannot be measured in the sandbox (software GL), so the frame-time gains of the mask-pass change are reasoned from draw-call counts (deck pass: ~417 calls / ~383k triangles; the mask pass now draws roughly the merged static meshes + screens instead of all of them).
+
+---
+
+## 10. In-game UI conventions (added)
+
+- **One language.** `kit.css` extends the flight-HUD palette (slate glass, a single sky accent `#9acbeb`, hairline borders, radii 6/10/14). Amber = caution/attention, red = warning/destructive, green = normal — the A320 ECAM colour convention. No second accent colour, no glow.
+- **Top bar auto-hide + pin.** The flight header (route, phase, mute, pause) and the tool bar share one visibility state in `FlightHud.tsx` (`barShown`): visible on entering flight, when the pointer reaches the top 85 px, on keyboard focus, while a tool panel is open; otherwise it hides after ~6.5 s. The pin button in the tool bar persists `settings.uiPinned` (also in Settings > Interface). Hidden bars are `inert`. The bottom cockpit FOCUS bar is intentionally untouched.
+- **Cockpit hover badge** (`CockpitTooltipOverlay`, `.cp-tip`). `Game.cockpitTooltip` is the source of truth. The hover raycast is rate-limited but **always evaluates the last pointer position** (trailing timer — dropping it left the badge stuck), and the badge is cleared when the pointer is not over the canvas (HUD / window edge / blur), on touch release, on drag, on view change and on every phase change. The overlay hides itself on the same signals. Never set `cockpitTooltip` without going through `clearHover()` / `evalHover()`.
+- **Captions** (`transcript.css`) are film-subtitle style: no panel, light type with a layered dark edge and a feathered radial shade; speaker line above in small caps. Width is capped (`100vw - 704px`) so the line never collides with the toast stack at the lower left.
+- **Verification.** Keep visual checks out of the repo (no screenshot folders or one-off test scripts); compare cockpit-facing labels with the real panels (e.g. EFIS control panel buttons CSTR / WPT / VOR.D / NDB / ARPT, FCU, ECAM, MCDU, OVHD, PED).

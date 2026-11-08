@@ -119,33 +119,53 @@ export function MsfsFloatingWindow({
    1. COCKPIT INTERACTIVE TOOLTIP OVERLAY
    ========================================================================= */
 export function CockpitTooltipOverlay({ tooltip, game }: { tooltip: CockpitTooltip | null; game?: Game }) {
-  // Minimalist dark-glass badge that sticks next to the cursor:  NAME · STATE · function.
-  // It is driven straight from the pointer + the game's hover state (no React render per mouse move) so it vanishes the moment the cursor leaves a control.
+  // Dark-glass badge that follows the cursor. It is driven straight from the pointer + the game's hover state (no React render per
+  // mouse move). Game.cockpitTooltip is the source of truth and is cleared on leaving a control, the canvas, the window, a pause or a
+  // view change; the overlay additionally hides itself at once on the same signals so a lagging state can never leave it stuck.
   const el = useRef<HTMLDivElement>(null);
+  const ptr = useRef({ x: -999, y: -999 });
   const [live, setLive] = useState<CockpitTooltip | null>(tooltip);
+  const [away, setAway] = useState(false);
+  const place = React.useCallback(() => {
+    const n = el.current; if (!n) return;
+    const { x: px, y: py } = ptr.current, w = n.offsetWidth, h = n.offsetHeight;
+    const x = px + 16 + w > window.innerWidth - 8 ? px - 12 - w : px + 16, y = py + 22 + h > window.innerHeight - 8 ? py - 14 - h : py + 22;
+    n.style.transform = `translate3d(${Math.max(6, x)}px, ${Math.max(6, y)}px, 0)`;
+  }, []);
   React.useEffect(() => {
-    let raf = 0, key = '', px = -999, py = -999;
-    const place = () => {
-      const n = el.current; if (!n) return;
-      const w = n.offsetWidth, h = n.offsetHeight, x = px + 16 + w > window.innerWidth - 8 ? px - 12 - w : px + 16, y = py + 22 + h > window.innerHeight - 8 ? py - 14 - h : py + 22;
-      n.style.transform = `translate3d(${Math.max(6, x)}px, ${Math.max(6, y)}px, 0)`;
+    let raf = 0, key = '';
+    const move = (e: PointerEvent) => {
+      ptr.current.x = e.clientX; ptr.current.y = e.clientY;
+      setAway(!!game && e.target !== game.canvas); // over a HUD panel / button: no cockpit badge
+      place();
     };
-    const move = (e: PointerEvent) => { px = e.clientX; py = e.clientY; place(); };
+    const gone = () => setAway(true);
+    const vis = () => { if (document.hidden) setAway(true); };
     const tick = () => {
-      const t = game ? game.cockpitTooltip : tooltip, k = t ? `${t.id}|${t.value}` : '';
+      const t = game ? game.cockpitTooltip : tooltip, k = t ? `${t.id}|${t.value}|${t.description ?? ''}` : '';
       if (k !== key) { key = k; setLive(t ? { ...t } : null); }
       raf = requestAnimationFrame(tick);
     };
-    window.addEventListener('pointermove', move, { passive: true }); raf = requestAnimationFrame(tick);
-    return () => { window.removeEventListener('pointermove', move); cancelAnimationFrame(raf); };
-  }, [game, tooltip]);
-  React.useLayoutEffect(() => { const n = el.current; if (n && live) { const x = (live.x ?? 0), y = (live.y ?? 0); if (!n.style.transform) n.style.transform = `translate3d(${x + 16}px, ${y + 22}px, 0)`; } }, [live]);
-  if (!live) return null;
+    window.addEventListener('pointermove', move, { passive: true }); window.addEventListener('blur', gone);
+    document.documentElement.addEventListener('pointerleave', gone); document.addEventListener('visibilitychange', vis);
+    raf = requestAnimationFrame(tick);
+    return () => {
+      window.removeEventListener('pointermove', move); window.removeEventListener('blur', gone);
+      document.documentElement.removeEventListener('pointerleave', gone); document.removeEventListener('visibilitychange', vis); cancelAnimationFrame(raf);
+    };
+  }, [game, tooltip, place]);
+  // (re)position whenever the content changes size or the badge (re)appears — from the live pointer, falling back to the hover point
+  React.useLayoutEffect(() => {
+    if (!live) return;
+    if (ptr.current.x < 0) { ptr.current.x = live.x ?? 0; ptr.current.y = live.y ?? 0; }
+    place();
+  }, [live, away, place]);
+  if (!live || away) return null;
   return (
     <div ref={el} className="cp-tip" role="status" aria-live="off">
-      <b>{live.label}</b>
-      {live.value && <><i>·</i><span className="cp-tip-state">{live.value}</span></>}
-      {live.description && <><i>·</i><span className="cp-tip-fn">{live.description}</span></>}
+      <div className="cp-tip-head"><b>{live.label}</b>{live.value && <span className="cp-tip-state">{live.value}</span>}</div>
+      {live.description && <p className="cp-tip-fn">{live.description}</p>}
+      {live.actionHint && <p className="cp-tip-hint">{live.actionHint}</p>}
     </div>
   );
 }

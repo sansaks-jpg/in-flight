@@ -259,6 +259,22 @@ export class VolumetricClouds {
     stepBudget(this.stepTotal, this.layers.length === 4 ? this.layers : planCloudLayers(this.lastIn ?? EMPTY_IN, this.layers), this.steps);
   }
 
+  /**
+   * Loading-screen warm-up of the whole cloud pipeline, also for a clear sky: builds the CPU-generated 3D noise volume (otherwise made the
+   * moment live weather first brings a layer – a mid-flight stall), uploads it and runs the real scene -> ray-march -> composite path once
+   * so every program variant and render target exists before the first playable frame.
+   */
+  warm(r: THREE.WebGLRenderer, scene: THREE.Scene, camera: THREE.PerspectiveCamera, env: CloudEnv) {
+    if (!this.noise) this.noise = makeCloudNoise();
+    r.initTexture(this.noise);
+    const was = this.active;
+    this.active = this.layers.length === 4; // a clear sky has no layers to march: still run the shader once
+    try { this.render(r, scene, camera, env); } finally { this.active = was; }
+    if (!was) this.releaseTargets(); // clear sky: keep the compiled programs, drop the (large) render targets until clouds appear
+  }
+  /** Frees the full-resolution render targets (used after the loading warm-up when the sky turned out to be clear: the compiled programs stay). */
+  releaseTargets() { this.cloudRT?.dispose(); this.cloudRT = null; this.sceneRT?.dispose(); this.sceneRT = null; }
+
   private lastIn: CloudWxIn | null = null;
   /** Push the live weather; re-plans the slabs (cheap). */
   setWeather(w: CloudWxIn) {

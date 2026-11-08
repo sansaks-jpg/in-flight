@@ -1165,28 +1165,28 @@ export function Planner({
       {/* 8. UTILITY MODALS */}
       {modal === 'scores' && (
         <div className="pointer-events-auto">
-          <Modal title="Pilot Logbook & High Scores" onClose={() => setModal(null)}>
+          <Modal title="Pilot logbook" onClose={() => setModal(null)}>
             <ScoresPanel />
           </Modal>
         </div>
       )}
       {modal === 'settings' && (
         <div className="pointer-events-auto">
-          <Modal title="Simulation Settings" onClose={() => setModal(null)}>
+          <Modal title="Settings" onClose={() => setModal(null)}>
             <SettingsPanel s={settings} set={set} />
           </Modal>
         </div>
       )}
       {modal === 'controls' && (
         <div className="pointer-events-auto">
-          <Modal title="Keyboard & Controller Flight Map" wide onClose={() => setModal(null)}>
+          <Modal title="Flight controls" wide onClose={() => setModal(null)}>
             <ControlsPanel />
           </Modal>
         </div>
       )}
       {modal === 'credits' && (
         <div className="pointer-events-auto">
-          <Modal title="Aeronautical Data & Repository Architecture" onClose={() => setModal(null)}>
+          <Modal title="Data sources" onClose={() => setModal(null)}>
             <ul className="text-sm text-slate-300 space-y-2.5 list-disc pl-5">
               <li>
                 <b>OurAirports + OpenStreetMap</b> — {REPO_FACTS.totalAirports.toLocaleString()} airfields, {REPO_FACTS.indonesiaAirports} in Indonesia (every mapped runway incl. grass/gravel strips) with surveyed centrelines, surfaces, displaced thresholds and taxiway/apron/stand layouts for {REPO_FACTS.indonesiaWithLayout}. Headings are magnetic (WMM2025).

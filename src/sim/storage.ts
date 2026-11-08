@@ -5,10 +5,12 @@ export type HudMode = 'minimal' | 'standard' | 'assisted' | 'cockpit';
 export interface Settings {
   volume: number; muted: boolean; voice: boolean; assist: boolean; invertPitch: boolean; quality: QualityPreset | 'auto'; mapStyle: string; terrainStyle: string; tod: 'live'; weather: 'clear' | 'scattered' | 'overcast'; wind: 'calm' | 'light' | 'strong'; startMode: 'runway' | 'cruise' | 'final'; name: string; sens: number; shake: boolean; hud: boolean; units: 'aviation' | 'metric';
   hudMode: HudMode; uiScale: number; colorblind: boolean;
+  /** Keep the in-flight top bar (route, status, tool buttons) on screen; otherwise it auto-hides after a few idle seconds. */
+  uiPinned: boolean;
   /** On-screen transcripts of every spoken line (ATC, pilots, crew, cabin PA) and their language (English is the default). */
   transcripts: boolean; transcriptLang: 'en' | 'id';
 }
-export const DEFAULT_SETTINGS: Settings = { volume: 0.8, muted: false, voice: true, assist: true, invertPitch: false, quality: 'auto', mapStyle: 'hybrid', terrainStyle: 'hybrid', tod: 'live', weather: 'scattered', wind: 'light', startMode: 'runway', name: 'Pilot', sens: 1, shake: true, hud: true, units: 'aviation', hudMode: 'standard', uiScale: 1.0, colorblind: false, transcripts: true, transcriptLang: 'en' };
+export const DEFAULT_SETTINGS: Settings = { volume: 0.8, muted: false, voice: true, assist: true, invertPitch: false, quality: 'auto', mapStyle: 'hybrid', terrainStyle: 'hybrid', tod: 'live', weather: 'scattered', wind: 'light', startMode: 'runway', name: 'Pilot', sens: 1, shake: true, hud: true, units: 'aviation', hudMode: 'standard', uiScale: 1.0, colorblind: false, uiPinned: false, transcripts: true, transcriptLang: 'en' };
 const SK = 'skyline.settings.v3', HK = 'skyline.scores.v2', LK = 'skyline.lastroute.v2';
 export function loadSettings(): Settings {
   try {
@@ -30,6 +32,7 @@ export function loadSettings(): Settings {
     if (typeof s.colorblind !== 'boolean') {
       s.colorblind = DEFAULT_SETTINGS.colorblind;
     }
+    if (typeof s.uiPinned !== 'boolean') s.uiPinned = DEFAULT_SETTINGS.uiPinned;
     if (typeof s.transcripts !== 'boolean') s.transcripts = DEFAULT_SETTINGS.transcripts;
     if (s.transcriptLang !== 'en' && s.transcriptLang !== 'id') s.transcriptLang = DEFAULT_SETTINGS.transcriptLang;
     return s;

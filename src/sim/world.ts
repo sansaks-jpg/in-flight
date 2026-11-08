@@ -429,8 +429,6 @@ export class World {
   private papiOff = new THREE.MeshBasicMaterial({ color: 0xff2200 });
   private strobeOn = new THREE.MeshBasicMaterial({ color: 0xffffff });
   private strobeOff = new THREE.MeshBasicMaterial({ color: 0xffe899 });
-  private frustum = new THREE.Frustum();
-  private projScreenMatrix = new THREE.Matrix4();
   private lastAcLat = 0;
   private lastAcLon = 0;
   /** Preallocated terrain callback for the lightning strikes (no closure churn in the frame loop). */
@@ -1047,33 +1045,27 @@ export class World {
     this.rebuildAirports(lat, lon);
   }
 
-  /** True while the camera is inside the flight deck: tightens terrain / city culling (see Terrain.interior). */
-  setInterior(v: boolean) { this.terrain.interior = v; this.structures.interior = v; }
   update(cameraOrPos: THREE.Camera | THREE.Vector3, acPos: THREE.Vector3, agl: number, time: number) {
     this.lastAcLat = this.proj.lat(acPos.z);
     this.lastAcLon = this.proj.lon(acPos.x);
+    // Streaming is position-based (see Terrain.update / Structures.update): the camera only places the sky dome and sun light.
     let camPos: THREE.Vector3;
-    let frustum: THREE.Frustum | undefined;
-
     if ((cameraOrPos as THREE.Camera).isCamera) {
       const camera = cameraOrPos as THREE.Camera;
       camPos = camera.position;
       camera.updateMatrixWorld();
-      this.projScreenMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
-      this.frustum.setFromProjectionMatrix(this.projScreenMatrix);
-      frustum = this.frustum;
     } else {
       camPos = cameraOrPos as THREE.Vector3;
     }
 
     this.updateSunFromClock();
-    this.terrain.update(acPos.x, acPos.z, time, this.sunDir, frustum);
+    this.terrain.update(acPos.x, acPos.z, time, this.sunDir);
     this.detail.update(acPos.x, acPos.z, agl, time, this.sunDir);
     // reuse the airport buffer instead of allocating a fresh array every frame
     let n = 0;
     for (const sc of this.airports.values()) this.airportList[n++] = sc.ap;
     if (this.airportList.length !== n) this.airportList.length = n;
-    this.structures.update(acPos.x, acPos.z, agl, this.airportList, frustum);
+    this.structures.update(acPos.x, acPos.z, agl, this.airportList);
     this.sky.position.copy(camPos);
     this.skyMat.uniforms.camAlt.value = Math.max(0, camPos.y);
     this.cloudEnv.flash = Math.min(1, this.lightning.light.intensity / 3.4);
