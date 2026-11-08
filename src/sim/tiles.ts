@@ -143,7 +143,14 @@ export function loadImage(url: string, prio = 5): Promise<HTMLImageElement | nul
         resolve(ok ? img : null); pump();
       };
       // Decode off the main thread BEFORE the image is handed out, so the first drawImage()/texImage2D() never stalls a frame.
-      img.onload = () => { if (typeof img.decode === 'function') img.decode().then(() => finish(true), () => finish(true)); else finish(true); };
+      // Once the bytes have arrived the request is a success: the 12 s watchdog must not fire while a busy main thread is still
+      // decoding (that used to turn a delivered DEM tile into a "failure" and, with it, into random synthetic terrain).
+      img.onload = () => {
+        clearTimeout(timeout);
+        if (typeof img.decode !== 'function') { finish(true); return; }
+        const guard = setTimeout(() => finish(true), 4000);
+        img.decode().then(() => { clearTimeout(guard); finish(true); }, () => { clearTimeout(guard); finish(true); });
+      };
       img.onerror = () => finish(false);
       img.src = url;
     };

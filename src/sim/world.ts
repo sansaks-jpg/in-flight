@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { Projection, wrap360, D2R, R2D, clamp, haversine, destination } from './geo';
+import { Projection, wrap360, D2R, R2D, haversine, destination } from './geo';
 import { Terrain, DetailLayer } from './terrain';
 import { Structures } from './structures';
 import { Airport, Runway, Surface, airportsNear, getAirfield, isPaved } from '../data/airports';
@@ -7,8 +7,8 @@ import { buildAirfieldMeshes } from './airfieldMesh';
 import { synthGround, SynthGround, Rect } from './airportGround';
 import { QualityPreset } from './storage';
 import { QUALITY } from './quality';
-import { sunPosition, simNowMs, nightLights } from './clock';
-import { CloudField, makeCloudTexture } from './clouds';
+import { sunPosition, moonPosition, simNowMs, nightLights } from './clock';
+import { VolumetricClouds, CloudEnv } from './volumetricClouds';
 import { LightningSystem } from './lightning';
 import { precipVisibility } from './liveWeather';
 
@@ -141,7 +141,7 @@ const hashN = (a: number, b: number, s = 0) => {
 
 // Scratch colours for setSun (runs on the 15 s solar clock, but stays allocation-free anyway).
 const tmpCloudTint = new THREE.Color();
-const CLOUD_WHITE = new THREE.Color(1, 1, 1);
+const addScaled = (d: THREE.Color, o: THREE.Color, k: number) => { d.r += o.r * k; d.g += o.g * k; d.b += o.b * k; return d; };
 
 function runwayTexture(rw: Runway, len: number, wid: number) {
   if (!isPaved(rw.surface)) return unpavedRunwayTexture(rw, len, wid);
@@ -399,8 +399,10 @@ export class World {
   hemi: THREE.HemisphereLight;
   sky: THREE.Mesh;
   skyMat: THREE.ShaderMaterial;
-  /** Live-weather cloud field (one instanced draw call; see clouds.ts). */
-  clouds: CloudField;
+  /** Live-weather volumetric clouds (ray-marched, fly-through; see volumetricClouds.ts / cloudLayers.ts). */
+  clouds: VolumetricClouds;
+  /** Light + ambient fed to the cloud shader (refreshed in setSun, flash per frame). */
+  cloudEnv: CloudEnv = { sunDir: new THREE.Vector3(0, 1, 0), sunCol: new THREE.Color(1, 1, 1), ambTop: new THREE.Color(0.4, 0.5, 0.7), ambBot: new THREE.Color(0.2, 0.2, 0.2), flash: 0, storm: 0 };
   /** Cloud-to-ground lightning with a distance hook for procedural thunder (see lightning.ts). */
   lightning: LightningSystem;
   airports = new Map<string, AirportScene>();
@@ -415,8 +417,6 @@ export class World {
   sunAzimuth = 180;
   nightAmount = 0;
   private cloudColor = new THREE.Color(0xffffff);
-  /** Shadowed flank tint for the cloud impostors (derived from cloudColor in setSun). */
-  cloudShadow = new THREE.Color(0.5, 0.53, 0.6);
   /** Live wind (m/s, world axes) at the cloud decks, refreshed by the game at ~1 Hz (setCloudWind). */
   private windDriftX = 0;
   private windDriftZ = 0;
@@ -461,8 +461,13 @@ export class World {
         sunDir: { value: new THREE.Vector3(0, 1, 0) },
         sunCol: { value: new THREE.Color() },
         stars: { value: 0 },
+        moonDir: { value: new THREE.Vector3(0, -1, 0) },
+        moonPhase: { value: 0.5 },
+        sunEl: { value: 0.5 },
+        camAlt: { value: 0 },
+        overcast: { value: 0 },
       },
-      vertexShader: 'varying vec3 vD; void main(){ vD = normalize(position); gl_Position = projectionMatrix*modelViewMatrix*vec4(position,1.0); gl_Position.z = gl_Position.w*0.9999; }',
+      vertexShader: 'varying vec3 vD; void main(){ vD = normalize(position); gl_Position = projectionMatrix*modelViewMatrix*vec4(position,1.0); gl_Position.z = gl_Position.w*0.9999995; }',
       // Soft, continuous horizon:
       //  - a wide haze band that saturates at exactly the fog colour right at 0 deg elevation,
       //  - a gentle zenith falloff (no visible gradient bands / hard cut at the skyline),
@@ -471,20 +476,46 @@ export class World {
       // written straight into an sRGB framebuffer, so the sky was darker than the fogged terrain
       // beneath it — the mismatch is what read as a sharp horizon line.
       fragmentShader: `varying vec3 vD; uniform vec3 zen; uniform vec3 hor; uniform vec3 haze; uniform vec3 sunDir; uniform vec3 sunCol; uniform float stars;
+        uniform vec3 moonDir; uniform float moonPhase; uniform float sunEl; uniform float camAlt; uniform float overcast;
         void main(){
           vec3 v = normalize(vD);
+          vec3 sd = normalize(sunDir);
           float h = max(v.y, 0.0);
-          vec3 c = mix(hor, zen, pow(h, 0.42));
-          float band = exp(-h * 22.0);
+          // Thin air at altitude: Rayleigh optical depth falls ~exp(-alt/8 km), so the zenith deepens toward near-black blue
+          // and the bright haze band hugs the horizon (the view from FL350 in photographs).
+          float thin = 1.0 - exp(-camAlt / 9000.0);
+          vec3 zenC = mix(zen, zen * vec3(0.30, 0.38, 0.62), thin * 0.85);
+          vec3 c = mix(hor, zenC, pow(h, 0.42 + 0.25 * thin));
+          float band = exp(-h * (22.0 + 40.0 * thin));
           c = mix(c, haze, band * 0.88);
           if (v.y < 0.0) c = mix(haze, hor, clamp(-v.y * 3.0, 0.0, 1.0));
-          float s = max(dot(v, normalize(sunDir)), 0.0);
-          c += sunCol * (pow(s, 900.0) * 2.2 + pow(s, 20.0) * 0.14 + pow(s, 3.0) * 0.06);
-          if (stars > 0.01 && v.y > 0.02) {
+          float s = max(dot(v, sd), 0.0);
+          // Twilight: warm glow around the sun's azimuth, Earth's shadow (blue-grey) opposite with the pink Belt of Venus above it
+          float tw = smoothstep(-9.0, -1.0, sunEl) * (1.0 - smoothstep(4.0, 16.0, sunEl));
+          vec2 sh = normalize(sd.xz + 1e-5), vh = normalize(v.xz + 1e-5);
+          float toward = dot(sh, vh) * 0.5 + 0.5;
+          float low = exp(-h * 5.0);
+          c += vec3(1.0, 0.45, 0.16) * tw * pow(toward, 3.0) * low * 0.55 * (1.0 - overcast * 0.7);
+          float anti = (1.0 - toward) * tw;
+          c = mix(c, c * vec3(0.55, 0.6, 0.85), anti * exp(-h * 9.0) * 0.55);
+          c += vec3(0.55, 0.2, 0.28) * anti * smoothstep(0.02, 0.16, h) * exp(-h * 6.0) * 0.18;
+          c += sunCol * (pow(s, 900.0) * 2.2 * (1.0 - overcast * 0.85) + pow(s, 20.0) * 0.14 + pow(s, 3.0) * 0.06);
+          float night = smoothstep(-3.0, -12.0, sunEl);
+          if (night > 0.01) {
             vec3 d = v * 140.0; vec3 id = floor(d); vec3 f = fract(d) - 0.5;
-            float h = fract(sin(dot(id, vec3(12.9898, 78.233, 37.719))) * 43758.5453);
-            float tw = step(0.978, h) * smoothstep(0.32, 0.0, length(f));
-            c += vec3(0.85, 0.9, 1.0) * tw * stars * smoothstep(0.02, 0.22, v.y) * (0.45 + 0.55 * fract(h * 91.7));
+            float hh = fract(sin(dot(id, vec3(12.9898, 78.233, 37.719))) * 43758.5453);
+            float tws = step(0.978, hh) * smoothstep(0.32, 0.0, length(f));
+            float vis = (1.0 - overcast) * smoothstep(0.0, 0.2, v.y);
+            c += vec3(0.85, 0.9, 1.0) * tws * night * vis * (0.45 + 0.55 * fract(hh * 91.7)) * (1.0 - 0.8 * thin * 0.0);
+            // moon: disc with a lit limb for the real phase, plus a soft halo
+            vec3 md = normalize(moonDir); float mc = dot(v, md);
+            if (mc > 0.9) {
+              float disc = smoothstep(0.99996, 0.99998, mc);
+              vec3 sideV = normalize(cross(md, vec3(0.0, 1.0, 0.0)) + 1e-5);
+              float lit = smoothstep(-0.2, 0.2, dot(normalize(v - md * mc), sideV) * (moonPhase - 0.5) * 4.0 + (moonPhase - 0.5) * 0.4);
+              c += vec3(0.95, 0.93, 0.85) * disc * mix(0.08, 1.0, lit) * (1.0 - overcast * 0.9) * 1.3;
+            }
+            c += vec3(0.5, 0.6, 0.8) * pow(max(mc, 0.0), 160.0) * 0.20 * (0.3 + moonPhase) * night * (1.0 - overcast * 0.6);
           }
           gl_FragColor = vec4(c, 1.0);
           #include <colorspace_fragment>
@@ -495,7 +526,7 @@ export class World {
     this.sky.renderOrder = -10;
     this.scene.add(this.sky);
 
-    this.clouds = new CloudField(this.scene, QUALITY[opts.quality]?.clouds ?? 40, makeCloudTexture());
+    this.clouds = new VolumetricClouds(opts.quality, QUALITY[opts.quality]?.clouds ?? 36);
     this.lightning = new LightningSystem(this.scene);
     this.updateSunFromClock(true);
   }
@@ -506,7 +537,7 @@ export class World {
     this.terrain.setQuality(q);
     this.structures.setQuality(q);
     this.structures.setNight(this.nightAmount);
-    this.clouds.setBudget(QUALITY[q].clouds);
+    this.clouds.setQuality(q, QUALITY[q].clouds);
     // Terminal detail / airport count is preset-specific. Rebuild the (small) airport set
     // around aircraft current position immediately so a quality change doesn't leave heavy meshes.
     const lat = this.lastAcLat || this.proj.lat(0);
@@ -518,11 +549,14 @@ export class World {
   overcast() { return Math.min(1, Math.max(this.wx.cover[0], this.wx.cover[1] * 0.85, this.wx.cover[2] * 0.4)); }
 
   /** Apply real weather: cloud layers (low / mid / high), ceiling, precipitation, visibility. */
-  setLiveWeather(cover: [number, number, number], baseAglM: number | null, groundM: number, rain: number, snow: number, visM: number, thunder: boolean, midBaseMsl = 3100, highBaseMsl = 9160) {
+  setLiveWeather(cover: [number, number, number], baseAglM: number | null, groundM: number, rain: number, snow: number, visM: number, thunder: boolean, midBaseMsl = 3100, highBaseMsl = 9160, fog = 0) {
     this.wx.cover = cover; this.wx.baseMsl = groundM + (baseAglM ?? 1800); this.wx.rain = rain; this.wx.snow = snow; this.wx.visM = visM; this.wx.thunder = thunder;
     // precipitation haze: showers cut horizontal visibility beyond the station METAR value
     this.wx.visEffM = precipVisibility(visM, rain, snow);
-    this.clouds.setLiveWeather(cover, this.wx.baseMsl, midBaseMsl, highBaseMsl);
+    this.clouds.setWeather({
+      cover, lowBaseMsl: this.wx.baseMsl, midBaseMsl, highBaseMsl, rain, snow, fog, thunder,
+      latDeg: this.lastAcLat || this.proj.lat(0), groundM,
+    });
     this.lightning.setActive(thunder);
     this.updateSunFromClock(true);
   }
@@ -565,6 +599,13 @@ export class World {
     this.skyMat.uniforms.haze.value.copy(c.haze);
     this.skyMat.uniforms.sunCol.value.copy(c.sun);
     this.skyMat.uniforms.stars.value = Math.max(0, Math.min(1, (-elDeg - 3) / 10));
+    this.skyMat.uniforms.sunEl.value = elDeg; this.skyMat.uniforms.overcast.value = Math.min(1, ov * (0.55 + 0.45 * wet + 0.25));
+    {
+      const lat = this.lastAcLat || this.proj.lat(0), lon = this.lastAcLon || this.proj.lon(0), mp = moonPosition(simNowMs(), lat, lon);
+      const ma = mp.azimuth * D2R, me = mp.elevation * D2R;
+      (this.skyMat.uniforms.moonDir.value as THREE.Vector3).set(Math.sin(ma) * Math.cos(me), Math.sin(me), -Math.cos(ma) * Math.cos(me));
+      this.skyMat.uniforms.moonPhase.value = mp.illumination;
+    }
     this.sunLight.color.copy(c.sun);
     this.sunLight.intensity = c.dir * (1 - 0.72 * Math.pow(ov, 1.2));
     this.hemi.color.copy(c.zen).lerp(this.cloudColor.set(1, 1, 1), 0.5);
@@ -582,13 +623,16 @@ export class World {
     this.detail.setEnvironment(c.haze, this.sunDir);
     this.nightAmount = nightLights(elDeg);
     this.structures.setNight(this.nightAmount);
-    // Cloud tint: white by day, warm at sunset, dark grey-blue at night (scratch colours — no allocation).
-    const dayL = clamp((elDeg + 6) / 14, 0, 1);
-    tmpCloudTint.copy(c.hor).lerp(c.sun, 0.25).lerp(CLOUD_WHITE, clamp((elDeg - 2) / 20, 0, 1));
-    this.cloudColor.setRGB(0.16, 0.19, 0.28).lerp(tmpCloudTint, dayL);
-    this.cloudColor.multiplyScalar(1 - 0.38 * Math.min(1, ov * (0.4 + wet)));
-    // shadow flank for the impostor shading: darker, pulled slightly toward the ground tone
-    this.cloudShadow.copy(this.cloudColor).multiplyScalar(0.52).lerp(c.ground, 0.15);
+    // Cloud lighting: the real sun colour/strength of this solar elevation, sky-coloured ambient (dark bases), storm darkening.
+    const dayK = c.dir / 3.1, sunK = 0.88 * (1 - 0.55 * Math.min(1, ov * (0.35 + wet)));
+    this.cloudEnv.sunDir.copy(skyDir);
+    if (elDeg < 2) this.cloudEnv.sunDir.y = Math.max(this.cloudEnv.sunDir.y, 0.02);
+    this.cloudEnv.sunCol.copy(c.sun).multiplyScalar(sunK * dayK * (elDeg > -2 ? 1 : 0.12));
+    addScaled(tmpCloudTint.copy(c.hor).multiplyScalar(0.72), c.zen, 0.3);
+    this.cloudEnv.ambTop.copy(tmpCloudTint).multiplyScalar(0.62 * (0.55 + 0.45 * ov));
+    addScaled(this.cloudEnv.ambBot.copy(c.haze).multiplyScalar(0.2), c.ground, 0.8).multiplyScalar(0.9);
+    this.cloudEnv.storm = Math.min(1, 0.25 * ov + 0.55 * wet + (this.wx.thunder ? 0.35 : 0));
+    this.cloudColor.copy(tmpCloudTint);
   }
 
   setStyle(id: string) {
@@ -991,6 +1035,8 @@ export class World {
   }
 
   rebase(np: Projection, lat: number, lon: number) {
+    // the new origin moved: anchor the cloud pattern to the real ground (world point 0,0 of the old frame)
+    this.clouds.shift(np.x(this.proj.lon(0)), np.z(this.proj.lat(0)));
     this.proj = np;
     this.lastAcLat = lat;
     this.lastAcLon = lon;
@@ -1029,6 +1075,8 @@ export class World {
     if (this.airportList.length !== n) this.airportList.length = n;
     this.structures.update(acPos.x, acPos.z, agl, this.airportList, frustum);
     this.sky.position.copy(camPos);
+    this.skyMat.uniforms.camAlt.value = Math.max(0, camPos.y);
+    this.cloudEnv.flash = Math.min(1, this.lightning.light.intensity / 3.4);
     this.sunLight.position.copy(camPos).addScaledVector(this.sunDir, 1000);
     this.sunLight.target.position.copy(camPos);
 
@@ -1061,7 +1109,7 @@ export class World {
 
     // clouds advect with the live wind (World clock freezes while paused, so the drift freezes too);
     // lightning shares the same clock and hooks the host for distance-delayed thunder audio
-    this.clouds.update(camPos, time, this.sunDir, this.cloudColor, this.cloudShadow, this.windDriftX, this.windDriftZ);
+    this.clouds.update(time, this.windDriftX, this.windDriftZ);
     this.lightning.update(time, camPos, this.wx.baseMsl, this.heightAtFn);
   }
 

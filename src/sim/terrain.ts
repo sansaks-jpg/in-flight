@@ -534,10 +534,26 @@ export class Terrain {
     const prio = lod * 10 + dist;
     loadImage(tileUrl(ELEVATION_URL, z, x, y), prio).then((img) => {
       if (t.disposed) return;
-      if (img) this.demOk++; else this.demFailures++;
+      if (img) this.demOk++; else { this.demFailures++; this.retryElevation(t, 1, prio); }
       this.buildQueue.push({ tile: t, img });
     });
     this.requestTexture(t);
+  }
+
+  /**
+   * A missing elevation tile must never become a permanent slab of random noise with a flat dark "sea" painted over the real
+   * imagery. The tile is first built from the coarser terrain already loaded underneath (see buildMesh); the real DEM is then
+   * re-requested with back-off and swapped in as soon as it arrives.
+   */
+  private retryElevation(t: Tile, attempt: number, prio: number) {
+    if (attempt > 6) return;
+    setTimeout(() => {
+      if (t.disposed || !t.synthetic) return;
+      loadImage(tileUrl(ELEVATION_URL, t.z, t.x, t.y), prio).then((img) => {
+        if (t.disposed) return;
+        if (img) { this.demOk++; this.buildQueue.push({ tile: t, img }); } else this.retryElevation(t, attempt + 1, prio);
+      });
+    }, 16_000 * attempt);
   }
 
   private extractSatGrid(t: Tile, source: CanvasImageSource) {
@@ -698,6 +714,8 @@ export class Terrain {
   private buildMesh(t: Tile, img: HTMLImageElement | null) {
     const cfg = this.lods[t.lod], N = cfg.N, S = tileSizeMerc(t.z);
     const cmx0 = -Math.PI * R_MERC + t.x * S, cmy0 = Math.PI * R_MERC - t.y * S; // NW corner (mercator)
+    if (t.mesh) { this.group.remove(t.mesh); t.mesh.geometry.dispose(); (t.mesh.material as THREE.Material).dispose(); t.mesh = null; } // real DEM replacing a fallback build
+    const kx = this.proj.k;
     // 1. raw elevation
     let src: Uint8ClampedArray | null = null;
     if (img) { this.ctx.drawImage(img, 0, 0, 256, 256); try { src = this.ctx.getImageData(0, 0, 256, 256).data; } catch { src = null; } }
@@ -723,7 +741,15 @@ export class Terrain {
     for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
       const u = i / (N - 1), v = j / (N - 1);
       const mx = cmx0 + u * S, my = cmy0 - v * S;
-      const raw = src ? sample(u * 255, v * 255) : synthHeight(mx, my);
+      let raw: number, fbWater = -1;
+      if (src) raw = sample(u * 255, v * 255);
+      else {
+        // DEM unavailable: continue the terrain/coastline of whatever coarser (or finer) tile is already loaded here.
+        const wx = (mx - this.proj.ox) * kx, wz = -(my - this.proj.oy) * kx;
+        const hh = this.sampleField(wx, wz, (q) => q.heights);
+        if (hh !== null) { raw = hh; fbWater = this.sampleField(wx, wz, (q) => q.water) ?? 0; if (fbWater > 0.5) raw = Math.min(raw, -1); }
+        else raw = synthHeight(mx, my);
+      }
 
       let bestD = 1e9, bestE = 0;
       for (const s of segs) {
@@ -742,26 +768,30 @@ export class Terrain {
       // Dry land above sea level (raw >= 0.0) is strictly land (water = 0).
       let water = 0;
       if (src) {
-        if (!nearAirport) {
+        if (bestD >= FLAT_R + BLEND_R) {
           if (raw < -0.35) {
             water = 1.0;
           } else if (raw < 0.0) {
             water = clamp(-raw / 0.35, 0, 1);
           }
         }
+      } else if (fbWater >= 0) {
+        water = nearAirport ? 0 : fbWater;
       } else {
         water = (!nearAirport && raw < 0.05) ? 1.0 : 0.0;
       }
 
       // Height: ocean surface is clamped to 0.0 MSL, while dry land and below-sea-level airports
       // preserve their true elevation down to their local floor.
-      let h = src ? Math.max(minLandH, raw) : raw;
+      let h = src ? Math.max(minLandH, raw) : (fbWater >= 0 ? Math.max(minLandH, fbWater > 0.5 ? 0 : raw) : raw);
 
       if (bestD < FLAT_R + BLEND_R) {
         h = lerp(bestE, h, smoothstep(FLAT_R, FLAT_R + BLEND_R, bestD));
         water = 0; // airport plateau and envelope is strictly dry land
       } else if (nearAirport) {
-        water = 0; // airport approach and perimeter are strictly dry land
+        // Beyond the flattened plateau the coast is allowed to return gradually. A hard "everything within 3.7 km of a strip is dry
+        // land" switch drew a razor-sharp edge through open water (bright land-shaded sea inside, dark sea outside).
+        water *= smoothstep(FLAT_R + BLEND_R, FLAT_R + BLEND_R + 1500, bestD);
       }
       H[j * N + i] = h;
       W[j * N + i] = water;

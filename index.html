@@ -2,12 +2,27 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>In-Flight — Airbus A320 Interactive Flight Deck Simulator</title>
     <meta name="theme-color" content="#05080f" />
     <meta name="description" content="In-Flight – a worldwide Airbus A320-200 simulator with a fully interactive 3D flight deck, live displays, EFB tablet and 8,400+ real airports." />
+    <style>
+      html, body { margin: 0; background: #05080f; }
+      /* Painted before any JavaScript is parsed (the single-file bundle is large); removed by <BootLoader> once it has painted. */
+      #boot-splash { position: fixed; inset: 0; z-index: 70; display: grid; place-items: center; background: #05080f; color: #e8eefc;
+        font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif; opacity: 1; transition: opacity 480ms ease; }
+      #boot-splash .w { text-align: center; }
+      #boot-splash .t { font-weight: 900; font-size: clamp(30px, 6vw, 52px); letter-spacing: .06em; }
+      #boot-splash .t span { color: #5ea2ff; }
+      #boot-splash .s { margin-top: 10px; font-size: 11px; letter-spacing: .35em; text-transform: uppercase; color: #5ea2ff; font-weight: 800; }
+      #boot-splash .b { position: relative; width: min(260px, 60vw); height: 3px; margin: 26px auto 0; border-radius: 2px; background: rgba(255,255,255,.09); overflow: hidden; }
+      #boot-splash .b i { position: absolute; top: 0; bottom: 0; width: 38%; border-radius: 2px; background: linear-gradient(90deg, transparent, #5ea2ff, transparent); animation: bs 1.4s ease-in-out infinite; }
+      @keyframes bs { from { left: -40%; } to { left: 102%; } }
+      @media (prefers-reduced-motion: reduce) { #boot-splash .b i { animation: none; left: 31%; } }
+    </style>
   </head>
   <body>
+    <div id="boot-splash" aria-hidden="true"><div class="w"><div class="t">IN<span>-</span>FLIGHT</div><div class="s">Starting simulator</div><div class="b"><i></i></div></div></div>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

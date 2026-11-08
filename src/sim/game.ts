@@ -1,10 +1,11 @@
 import * as THREE from 'three';
+import { loadState } from './loadState';
 import { Airport, airportsNear, frequenciesFor } from '../data/airports';
 import { taxiRoute, TaxiRoute } from './airfield';
 import { magVar } from './magvar';
 import { AircraftSpec, specById } from './specs';
 import { FlightModel, G, atmosphere, airState } from './physics';
-import { LiveWx, OFFLINE_WX, fetchLiveWeather, windProfile, windVector, isaDeviation, wxSummary } from './liveWeather';
+import { LiveWx, WxPreview, weatherPreview, OFFLINE_WX, fetchLiveWeather, windProfile, windVector, isaDeviation, wxSummary } from './liveWeather';
 import { Precip } from './precip';
 import { chooseSpawn, Spawn } from './departure';
 import { AtcRadio, buildAmbient, buildExchange, makeCallsign, phoneticLetter, AmbientPhase, RadioCtx } from './atc';
@@ -25,7 +26,7 @@ import { Settings, addScore, QualityPreset } from './storage';
 import { QUALITY, resolveAutoQuality } from './quality';
 import { DEFAULT_CHECKLIST_ITEMS, buildApproachGates, buildTaxiRibbon, computeWorldScreenMarkers } from './navAssists';
 import { computeFlightPhaseState, FlightPhaseContext } from './flightPhase';
-import { simNowMs, sunPhase } from './clock';
+import { simNowMs, sunPhase, setLocalSolarHour } from './clock';
 
 /** Lowest adaptive-resolution multiplier while looking at the flight deck (text / icons must not be up-scaled). */
 const INTERIOR_MIN_SCALE = 0.9;
@@ -416,6 +417,7 @@ export class Game {
     // otherwise leave AtcRadio paused and speechSynthesis globally frozen (ATC/GPWS voice dead for
     // the whole next flight). setPhase un-pauses the radio on the way out of 'paused'.
     this.setPhase('loading'); this.loadStart = performance.now();
+    loadState.stage('scenery');
     const proj = new Projection(from.lat, from.lon);
     const anisoMap: Record<QualityPreset, number> = {
       ultra: this.renderer.capabilities.getMaxAnisotropy(),
@@ -439,9 +441,11 @@ export class Game {
     // falloff; only in play mode so the airport-background menu never rumbles
     if (mode === 'play') this.world.lightning.onStrike = (distM) => this.audio.thunder(clamp(1 - distM / 15000, 0.06, 1), distM / 343);
     this.visual = await loadAircraftVisual(this.spec); this.world.scene.add(this.visual.root);
+    loadState.stage('deck');
     this.cockpit = new Cockpit(this.spec, this.quality); this.cockpit.host = this.makeCockpitHost(); await this.cockpit.ready;
     for (const cam of [this.cockpit.camera, this.cockpit.activeCamera]) { cam.aspect = this.camera.aspect; cam.updateProjectionMatrix(); }
     this.audio.voiceOn = s.voice; this.audio.setVolume(s.volume); this.audio.setMuted(s.muted);
+    loadState.stage('weather');
     // REAL weather: METAR + model data for the departure airfield (no presets). Never blocks the sim for more than a few seconds.
     let wx: LiveWx = OFFLINE_WX;
     try { wx = await Promise.race([fetchLiveWeather(from.lat, from.lon, from.icao), new Promise<LiveWx>((_, rej) => setTimeout(() => rej(new Error('timeout')), 7000))]); } catch { wx = { ...OFFLINE_WX, lat: from.lat, lon: from.lon, elevM: from.elev }; }
@@ -460,11 +464,14 @@ export class Game {
     this.camera.fov = 65; this.setView(mode === 'attract' ? 'chase' : s.startMode === 'runway' ? 'cockpit' : 'cockpit');
     this.world.update(this.camera, this.fm.pos, 1, 0);
     this.resize();
+    loadState.stage('terrain'); // from here on the loading screen follows the terrain tile streaming
   }
 
   /** Push a weather report into wind, turbulence, air density, runway friction, clouds, fog and precipitation. */
   private applyLiveWx(wx: LiveWx, groundM: number) {
-    this.liveWx = wx; this.wxFetchedAt = performance.now();
+    this.liveWxReal = wx; this.wxFetchedAt = performance.now();
+    if (this.wxPreview) wx = weatherPreview(this.wxPreview, wx); // optional sky preview – never the default
+    this.liveWx = wx;
     windProfile(wx, groundM + 10, 10, this.wxTmp);
     this.windFrom = Math.round(this.wxTmp.dir) % 360; this.windKt = Math.round(this.wxTmp.kt);
     // turbulence from the real gust spread (+ convective weather)
@@ -472,7 +479,7 @@ export class Game {
     this.turb = clamp(0.03 + spreadMs / 3.2 * 0.9 + (wx.thunder ? 0.6 : 0) + wx.rain * 0.08 + wx.windKt / 80 * 0.1, 0.02, 2.2);
     airState.dT = isaDeviation(wx, groundM); airState.qnh = wx.qnh;
     this.applyAirToFm();
-    this.world?.setLiveWeather(wx.cover, wx.baseAglM, groundM, wx.rain, wx.snow, wx.visM, wx.thunder, wx.midBaseMsl, wx.highBaseMsl);
+    this.world?.setLiveWeather(wx.cover, wx.baseAglM, groundM, wx.rain, wx.snow, wx.visM, wx.thunder, wx.midBaseMsl, wx.highBaseMsl, wx.fog);
     this.precip?.set(wx.rain, wx.snow);
     // clouds advect with the live wind at their own altitude (the mid deck), not the surface wind
     windVector(wx, wx.midBaseMsl, 0, this.cloudWind);
@@ -837,6 +844,17 @@ export class Game {
   setTimeOfDay(_tod?: TimeOfDay) {
     this.world?.updateSunFromClock(true);
     this.toast('Time is synchronised with the real world (UTC) and cannot be changed', 'info');
+  }
+
+  /** Sky preview (weather + time of day) for checking how every condition renders. `null` = the real, live sky (default). */
+  wxPreview: WxPreview | null = null; liveWxReal: LiveWx | null = null; previewHour: number | null = null;
+  setSkyPreview(o: { weather?: WxPreview | null; hour?: number | null }) {
+    if (!this.world) return;
+    if (o.hour !== undefined) { this.previewHour = o.hour; setLocalSolarHour(o.hour, this.lon()); }
+    if (o.weather !== undefined) this.wxPreview = o.weather;
+    this.world.updateSunFromClock(true);
+    const base = this.liveWxReal ?? this.liveWx ?? OFFLINE_WX;
+    this.applyLiveWx(base, this.fm.groundH);
   }
 
   /** Weather is always the real thing – the old presets only report what is live. */
@@ -1486,7 +1504,7 @@ export class Game {
       const t = this.world.terrain, waited = (now - this.loadStart) / 1000;
       this.world.update(this.camera, this.fm.pos, 1, this.time);
       this.attractCamera(rdt); this.render();
-      if ((t.nearReady() && waited > 1.2) || waited > (t.offline ? 4 : 11)) { this.setPhase('idle'); this.hooks.onHud(this.hud()); }
+      if ((t.nearReady() && waited > 1.2) || waited > (t.offline ? 4 : 11)) { this.setPhase('idle'); loadState.stage('done'); this.hooks.onHud(this.hud()); }
       else if (this.ticks % 6 === 0) this.hooks.onHud(this.hud());
       return;
     }
@@ -1512,13 +1530,16 @@ export class Game {
     r.clear();
     if (!this.world) return;
     const deck = this.mode === 'play' && this.isInterior() && this.cockpit && this.phase !== 'loading' ? this.cockpit : null;
-    if (deck && deck.canMask && this.emaFrameMs > 9.5) {
+    if (deck && deck.canMask && this.emaFrameMs > 9.5 && !this.world.clouds.active) {
       // Flight-deck occlusion: stamp the opaque deck into the stencil buffer, then draw the world only where the stencil is still 0 (through the windows).
       // The stencil state is LOCKED so every world material – streamed tiles included – obeys it without touching any material.
       deck.renderMask(r);
       const st = r.state.buffers.stencil, gl = r.getContext();
       r.clearDepth(); st.setTest(true); st.setMask(0); st.setFunc(gl.NOTEQUAL, 1, 0xff); st.setOp(gl.KEEP, gl.KEEP, gl.KEEP); st.setLocked(true);
       try { r.render(this.world.scene, this.camera); } finally { st.setLocked(false); st.setTest(false); st.setMask(0xff); }
+    } else if (this.world.clouds.active) {
+      // volumetric clouds: scene -> colour+depth target -> depth-aware ray-march -> composite to the canvas
+      this.world.clouds.render(r, this.world.scene, this.camera, this.world.cloudEnv);
     } else r.render(this.world.scene, this.camera);
     if (deck) { r.clearDepth(); r.render(deck.activeScene, deck.activeCamera); }
   }

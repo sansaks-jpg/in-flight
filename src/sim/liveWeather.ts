@@ -54,6 +54,33 @@ export function precipVisibility(visM: number, rain: number, snow: number): numb
   return Math.min(visM, 20000 - 14000 * wet);
 }
 
+/** Optional preview conditions (MSFS-style "what would it look like"); the default is always the live report. */
+export type WxPreview = 'clear' | 'few' | 'scattered' | 'broken' | 'overcast' | 'rain' | 'thunder' | 'snow' | 'fog';
+export const WX_PREVIEWS: { id: WxPreview; label: string }[] = [
+  { id: 'clear', label: 'Clear' }, { id: 'few', label: 'Few' }, { id: 'scattered', label: 'Scattered' }, { id: 'broken', label: 'Broken' },
+  { id: 'overcast', label: 'Overcast' }, { id: 'rain', label: 'Rain' }, { id: 'thunder', label: 'Thunderstorm' }, { id: 'snow', label: 'Snow' }, { id: 'fog', label: 'Fog' },
+];
+/**
+ * Typical METAR-style values for each condition: cover octas -> low/mid/high fractions, ceilings of the real cloud genera
+ * (cumulus ~1.5 km, stratus 300-600 m, nimbostratus ~450 m, cumulonimbus base ~1 km), station visibility and precipitation intensity.
+ */
+export function weatherPreview(kind: WxPreview, base: LiveWx): LiveWx {
+  const w: LiveWx = { ...base, ok: true, rain: 0, snow: 0, fog: 0, thunder: false, code: 0, wxString: '', metar: '', icao: '', source: `Preview · ${kind}` };
+  const set = (cover: [number, number, number], baseAgl: number | null, visM: number, extra: Partial<LiveWx> = {}) => Object.assign(w, { cover, baseAglM: baseAgl, visM }, extra);
+  switch (kind) {
+    case 'clear': set([0, 0, 0.04], null, 40000, { condition: 'Clear' }); break;
+    case 'few': set([0.22, 0.1, 0.2], 1500, 30000, { condition: 'Few clouds' }); break;
+    case 'scattered': set([0.45, 0.3, 0.3], 1400, 24000, { condition: 'Scattered clouds' }); break;
+    case 'broken': set([0.75, 0.5, 0.4], 1200, 16000, { condition: 'Broken clouds' }); break;
+    case 'overcast': set([1, 0.7, 0.5], 650, 9000, { condition: 'Overcast' }); break;
+    case 'rain': set([1, 0.9, 0.7], 450, 6000, { rain: 0.75, code: 63, wxString: 'RA', condition: 'Rain' }); break;
+    case 'thunder': set([0.85, 0.7, 0.6], 900, 7000, { rain: 0.95, thunder: true, code: 95, gustKt: Math.max(base.gustKt, base.windKt + 18), wxString: 'TSRA', condition: 'Thunderstorm' }); break;
+    case 'snow': set([1, 0.9, 0.6], 500, 3500, { snow: 0.75, code: 73, wxString: 'SN', tempC: Math.min(base.tempC, -2), dewC: Math.min(base.dewC, -3), condition: 'Snow' }); break;
+    case 'fog': set([1, 0, 0], 60, 400, { fog: 1, code: 45, wxString: 'FG', condition: 'Fog' }); break;
+  }
+  return w;
+}
+
 const num = (v: unknown, d = 0) => (typeof v === 'number' && Number.isFinite(v) ? v : d);
 async function getJson(url: string, ms = 6000): Promise<any> {
   const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), ms);

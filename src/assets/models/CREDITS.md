@@ -1,5 +1,7 @@
 # Aircraft 3D model credits
 
+> **Not shipped here.** The `.glb` files listed below are *not* part of this project (AGENTS.md section 5) and no code imports them: the A320 exterior is built procedurally and the flight deck is downloaded at runtime. The table is kept for attribution of the upstream repository's history only.
+
 | File | Work | Author | License | Notes |
 |---|---|---|---|---|
 | `a320.glb` | Airbus A320-200 V2 | fDlruosne (Sketchfab) / FlightGear | CC-BY 4.0 | Rescaled at load time to the real 37.57 m x 34.10 m. Landing gear is added procedurally (the source model has none). |
@@ -11,4 +13,4 @@
 - The original zip snapshots this project was recovered from never contained the `.glb` binaries. `c172.glb` and `a320.glb` were restored from the repository history (commit `d15e2bb`). `atr72.glb` was re-acquired via the [Godeye](https://github.com/Darksayd1224/Godeye) mirror of Oyan3D's Sketchfab model (CC-BY 4.0); that derivative strips textures, so the ATR 72 renders with flat materials. The propeller meshes (`Cylinder.024_Black_0`, `Cylinder.024_Yellow_0`) are preserved, which is what `glbAircraft.ts` splits to spin them.
 
 
-| `public/models/a320/cockpit.glb` | Airbus A320 flight deck | FlightGear A320-family contributors (via radebit/flight-simulator conversion) | GPL-2.0 | See `public/models/a320/NOTICE.txt`. Textures WebP, geometry meshopt-compressed. |
+| `public/models/a320/cockpit.glb` | Airbus A320 flight deck | FlightGear A320-family contributors (via radebit/flight-simulator conversion) | GPL-2.0 | See `public/models/a320/NOTICE.txt`. Used unmodified (21 PNG/JPEG textures, no mesh compression); fetched at runtime, never stored here. |

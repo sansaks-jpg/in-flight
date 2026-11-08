@@ -12,7 +12,22 @@ const D2R = Math.PI / 180;
 const R2D = 180 / Math.PI;
 
 /** Current real-world instant in epoch milliseconds (UTC). Single source of truth for sim time. */
-export const simNowMs = (): number => Date.now();
+let timeOffsetMs = 0;
+export const simNowMs = (): number => Date.now() + timeOffsetMs;
+
+/**
+ * Optional "what would the sky look like at…" shift applied to the ONE clock (MSFS-style time-of-day override).
+ * 0 (the default) is the true real-world UTC time; every consumer still reads `simNowMs()`, so nothing can drift apart.
+ */
+export function setSimTimeOffsetMs(ms: number) { timeOffsetMs = Number.isFinite(ms) ? ms : 0; }
+export const getSimTimeOffsetMs = () => timeOffsetMs;
+/** Shift the clock so that LOCAL MEAN SOLAR time at `lonDeg` reads `hour` (0..24) today; `null` returns to real time. */
+export function setLocalSolarHour(hour: number | null, lonDeg: number) {
+  if (hour === null) { timeOffsetMs = 0; return; }
+  const now = Date.now(), utcH = (((now / 3600000) % 24) + 24) % 24, localH = (utcH + lonDeg / 15 + 24) % 24;
+  let d = hour - localH; if (d > 12) d -= 24; if (d < -12) d += 24;
+  timeOffsetMs = d * 3600000;
+}
 
 export interface SunPosition {
   /** Degrees above the (geometric) horizon, negative below. Includes standard atmospheric refraction. */
@@ -60,6 +75,28 @@ export function sunPosition(ms: number, latDeg: number, lonDeg: number): SunPosi
   if (geo > -1) refr = 1.02 / Math.tan((geo + 10.3 / (geo + 5.11)) * D2R) / 60;
   const az = Math.atan2(Math.sin(ha), Math.cos(ha) * Math.sin(lat) - Math.tan(decl) * Math.cos(lat)) * R2D + 180;
   return { elevation: geo + refr, azimuth: ((az % 360) + 360) % 360, declination: decl * R2D };
+}
+
+export interface MoonPosition { elevation: number; azimuth: number; /** illuminated fraction 0 (new) … 1 (full) */ illumination: number; /** elongation from the sun, degrees */ elongation: number }
+
+/**
+ * Low-precision lunar position (Meeus, "Astronomical Algorithms" ch. 47 truncated to the dominant terms: ≈0.3° — far below
+ * what a 1° moon disc can show) plus its phase. Used for the night sky and moonlit scenery.
+ */
+export function moonPosition(ms: number, latDeg: number, lonDeg: number): MoonPosition {
+  const d = ms / 86400000 + 2440587.5 - 2451545.0; // days since J2000
+  const L = 218.316 + 13.176396 * d, M = 134.963 + 13.064993 * d, F = 93.272 + 13.229350 * d;
+  const lon = (L + 6.289 * Math.sin(M * D2R)) * D2R, lat = 5.128 * Math.sin(F * D2R) * D2R;
+  const eps = (23.4393 - 3.563e-7 * d) * D2R;
+  const ra = Math.atan2(Math.sin(lon) * Math.cos(eps) - Math.tan(lat) * Math.sin(eps), Math.cos(lon));
+  const dec = Math.asin(Math.sin(lat) * Math.cos(eps) + Math.cos(lat) * Math.sin(eps) * Math.sin(lon));
+  const gmst = (280.46061837 + 360.98564736629 * d) % 360;
+  const ha = (gmst + lonDeg) * D2R - ra, phi = latDeg * D2R;
+  const sinEl = Math.sin(phi) * Math.sin(dec) + Math.cos(phi) * Math.cos(dec) * Math.cos(ha);
+  const az = Math.atan2(-Math.sin(ha) * Math.cos(dec), Math.cos(phi) * Math.sin(dec) - Math.sin(phi) * Math.cos(dec) * Math.cos(ha));
+  const sunLon = (280.46646 + 0.98564736 * d + 1.915 * Math.sin((357.529 + 0.98560028 * d) * D2R)) * D2R;
+  const elong = Math.acos(Math.max(-1, Math.min(1, Math.cos(lat) * Math.cos(lon - sunLon))));
+  return { elevation: Math.asin(sinEl) * R2D, azimuth: ((az * R2D) % 360 + 360) % 360, illumination: (1 - Math.cos(elong)) / 2, elongation: elong * R2D };
 }
 
 export type SunPhase = 'day' | 'golden' | 'civil' | 'nautical' | 'astronomical' | 'night';

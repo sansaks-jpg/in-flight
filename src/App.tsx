@@ -9,7 +9,10 @@ import { GlobeControlHandle, InteractiveEarthGlobe } from './ui/PreGameVisuals';
 import { nextHudMode } from './ui/navigation';
 import { flightWorkspaceReducer, INITIAL_WORKSPACE } from './ui/flightWorkspace';
 import type { NavigationMapView } from './ui/MapPanel';
-import { Hud, LoadingScreen, ReadyScreen, PauseMenu, ResultScreen, FullMap } from './ui/Hud';
+import { Hud, ReadyScreen, PauseMenu, ResultScreen, FullMap } from './ui/Hud';
+import { BootLoader, FlightLoader, type BootTasks } from './ui/Loaders';
+import { loadState } from './sim/loadState';
+import { AIRCRAFT_STUDIO_IMAGES, MENU_BENTO_TILES } from './ui/flightDispatch';
 
 type Screen = 'start' | 'planner' | 'flight';
 
@@ -45,6 +48,13 @@ export default function App() {
   const [workspace, dispatchWorkspace] = useReducer(flightWorkspaceReducer, INITIAL_WORKSPACE);
   const [game, setGame] = useState<Game | null>(null);
   const [attractReady, setAttractReady] = useState(false);
+  // Loading screens: `launching` covers the gap between pressing FLY and Game.load() (airfield survey), `booting` the first paint.
+  const [launching, setLaunching] = useState(false);
+  const launchingRef = useRef(false);
+  const [booting, setBooting] = useState(true);
+  const [bootTasks, setBootTasks] = useState<BootTasks>({ images: 0, globe: 0, engine: false });
+  const onBootDone = useCallback(() => setBooting(false), []);
+  const onGlobeProgress = useCallback((f: number) => setBootTasks((t) => (f > t.globe ? { ...t, globe: f } : t)), []);
   const cur = useRef({ aircraftId, from, to }); cur.current = { aircraftId, from, to };
 
   const setSettings = useCallback((p: Partial<Settings>) => {
@@ -78,10 +88,29 @@ export default function App() {
     gameRef.current = g; setGame(g); (window as any).__sky = g;
     g.suspended = true;
     setAttractReady(true);
+    setBootTasks((t) => ({ ...t, engine: true }));
     return () => { g.dispose(); gameRef.current = null; };
     // eslint-disable-next-line
   }, []);
 
+
+  // ---- first visit: decode the menu photography before the menu is revealed (it is otherwise fetched tile by tile) ----
+  useEffect(() => {
+    let cancelled = false;
+    const urls = Array.from(new Set([...MENU_BENTO_TILES.map((t) => t.imageUrl), AIRCRAFT_STUDIO_IMAGES.sky]));
+    let settled = 0;
+    const settle = () => { settled++; if (!cancelled) setBootTasks((t) => ({ ...t, images: settled / urls.length })); };
+    for (const url of urls) {
+      const img = new Image();
+      img.decoding = 'async';
+      let once = false;
+      const done = () => { if (!once) { once = true; clearTimeout(timer); settle(); } };
+      const timer = window.setTimeout(done, 9000); // offline / slow CDN: the tiles have solid fallbacks, never wait forever
+      img.src = url;
+      (typeof img.decode === 'function' ? img.decode() : Promise.reject()).then(done, done);
+    }
+    return () => { cancelled = true; };
+  }, []);
 
   const loadAttract = useCallback(() => {
     const g = gameRef.current; if (!g) return;
@@ -97,14 +126,19 @@ export default function App() {
   }, [cfgOf, menuBgMode]);
 
   const startFlight = useCallback(async () => {
-    const g = gameRef.current; if (!g) return; const s = settingsRef.current;
+    const g = gameRef.current; if (!g || launchingRef.current) return; const s = settingsRef.current;
+    // The loading screen goes up immediately: the survey below can take seconds on a slow network.
+    launchingRef.current = true; loadState.begin('dispatch'); setLaunching(true);
     // Make sure both airfields use surveyed (OpenStreetMap) runway geometry before the scenery is built.
-    await Promise.all([refineWithin(cur.current.from, 3500), refineWithin(cur.current.to, 3500)]);
+    try { await Promise.all([refineWithin(cur.current.from, 3500), refineWithin(cur.current.to, 3500)]); } catch { /* keep the approximate runways */ }
     saveRoute({ from: cur.current.from.id, to: cur.current.to.id, aircraft: cur.current.aircraftId });
     setTransitioningMenuExit(false);
     g.suspended = false; mapView.current = null; setResult(null); setMapOpen(false); dispatchWorkspace({ type: 'close' }); setScreen('flight'); setToasts([]);
     const plan = launchPlan.current ? rwySelRef.current : null;
-    g.load({ ...cfgOf(s), depRwy: plan?.dep || undefined, arrRwy: plan?.arr || undefined, startSpot: plan && s.startMode === 'runway' ? plan.spot || undefined : undefined }, 'play', s.startMode);
+    // Game.load() switches the phase to 'loading' synchronously, so `launching` can be dropped in the same React batch.
+    const loading = g.load({ ...cfgOf(s), depRwy: plan?.dep || undefined, arrRwy: plan?.arr || undefined, startSpot: plan && s.startMode === 'runway' ? plan.spot || undefined : undefined }, 'play', s.startMode);
+    launchingRef.current = false; setLaunching(false);
+    loading.catch((e) => { console.error('[flight] scenario failed to load', e); loadState.fail('The flight could not be prepared. Check your connection and try again.'); });
   }, [cfgOf]);
 
   const quick = useCallback(() => { launchPlan.current = false; startFlight(); }, [startFlight]);
@@ -234,6 +268,7 @@ export default function App() {
             onSelectRunway={handleSelectRunway}
             onFlyNow={handleFlyNowFromGlobe}
             onScaleKmChange={(km, px) => setScaleInfo({ km, px })}
+            onLoadProgress={onGlobeProgress}
             controlRef={globeControlRef}
             className="w-full h-full pointer-events-auto"
           />
@@ -293,13 +328,14 @@ export default function App() {
           }}
         />
       )}
-      {screen === 'flight' && g && phase === 'loading' && <LoadingScreen hud={hud} from={from} to={to} aircraft={g.spec?.name || ''} />}
+      <FlightLoader active={launching || (screen === 'flight' && !!g && phase === 'loading')} hud={hud} from={from} to={to} aircraft={g?.spec?.name || ''} onAbort={toMenu} />
       {showHud && hud && g && <Hud game={g} hud={hud} toasts={toasts} settings={settings} setSettings={setSettings} onMap={() => { g.clearInput(); setMapOpen(true); }} mapOpen={mapOpen} mapViewRef={mapView} workspace={workspace} dispatchWorkspace={dispatchWorkspace} from={from} to={to} phase={phase} />}
       {playing && phase === 'idle' && g!.mode === 'play' && <ReadyScreen hud={hud!} from={from} to={to} aircraft={g!.spec.name} onGo={() => g!.begin()} />}
       {playing && phase === 'paused' && !mapOpen && <PauseMenu game={g!} settings={settings} setSettings={setSettings} onMenu={toMenu} onResume={() => g!.resume()} />}
       {playing && mapOpen && phase !== 'crashed' && <FullMap game={g!} hud={hud!} from={from} to={to} settings={settings} setSettings={setSettings} viewStateRef={mapView} onClose={() => setMapOpen(false)} />}
       {playing && result && (phase === 'crashed' || phase === 'complete') && <ResultScreen r={result} onRetry={() => { setResult(null); g!.restart(); }} onNew={() => toPlanner(false)} onMenu={toMenu} />}
       {playing && phase === 'crashed' && !result && <div className="absolute inset-0 pointer-events-none" style={{ background: 'radial-gradient(circle, rgba(255,70,0,.25), rgba(120,0,0,.55))' }} />}
+      {booting && <BootLoader tasks={bootTasks} onDone={onBootDone} />}
     </div>
   );
 }

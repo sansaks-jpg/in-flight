@@ -747,6 +747,7 @@ export function InteractiveEarthGlobe({
   onFlyNow,
   onInspectAirport,
   onScaleKmChange,
+  onLoadProgress,
   controlRef,
   className = '',
 }: {
@@ -764,6 +765,8 @@ export function InteractiveEarthGlobe({
   onFlyNow?: (airport: Airport) => void;
   onInspectAirport?: (airport: Airport) => void;
   onScaleKmChange?: (scaleKm: number, scalePx: number) => void;
+  /** Base-imagery loading 0..1; reaches exactly 1 once the world tiles are painted onto a rendered frame (boot loader gate). */
+  onLoadProgress?: (fraction: number) => void;
   controlRef?: MutableRefObject<GlobeControlHandle | null>;
   className?: string;
 }) {
@@ -869,6 +872,8 @@ export function InteractiveEarthGlobe({
   const tilesRef = useRef<GlobeTiles | null>(null);
   /** Asks the render loop to repaint (the loop skips frames when nothing changed). */
   const wakeRef = useRef<() => void>(() => {});
+  const loadCbRef = useRef(onLoadProgress);
+  loadCbRef.current = onLoadProgress;
   const inertiaRef = useRef({ lat: 0, lon: 0 });
   const zoomAnchorRef = useRef<{ lat: number; lon: number; x: number; y: number } | null>(null);
   const popupHoverRunwayRef = useRef<{ airportId: string; ident: string } | null>(null);
@@ -1034,6 +1039,14 @@ export function InteractiveEarthGlobe({
     const loadedTiles = new Set<string>();
     let texNeedsUpload = false;
 
+    // Boot-loader gate: the globe counts as ready once all 16 world tiles settled (loaded OR failed) AND the
+    // painted texture has been uploaded and drawn at least once - so the first visible frame never shows the
+    // flat placeholder continents being overwritten tile by tile.
+    let z2Settled = 0;
+    let z2AllSettled = false;
+    let readyPending = false;
+    let readySignalled = false;
+
     if (texCtx) {
       // Level 2: 16 tiles covering the entire globe loaded directly in parallel
       for (let ty = 0; ty < 4; ty++) {
@@ -1041,6 +1054,9 @@ export function InteractiveEarthGlobe({
           const key = `2/${tx}/${ty}`;
           loadedTiles.add(key);
           loadGlobeTile(esriUrl(2, tx, ty)).then((img) => {
+            z2Settled++;
+            if (z2Settled >= 16) { z2AllSettled = true; texNeedsUpload = true; wakeRef.current(); }
+            else loadCbRef.current?.((z2Settled / 16) * 0.95);
             if (disposed || !img) return;
             drawMercatorTileToEquirectangular(texCtx, img, 2, tx, ty, texCanvas.width, texCanvas.height);
             texNeedsUpload = true;
@@ -1816,6 +1832,7 @@ export function InteractiveEarthGlobe({
         texNeedsUpload = false;
         lastTexUploadTime = now;
         forceRender = true;
+        if (z2AllSettled && !readySignalled) readyPending = true;
       }
 
       if (!pausedRef.current && !(window as any).__hangarModalOpen) {
@@ -1929,6 +1946,7 @@ export function InteractiveEarthGlobe({
           forceRender = false;
           renderer.render(scene, camera);
           drawOverlay();
+          if (readyPending) { readyPending = false; readySignalled = true; loadCbRef.current?.(1); }
         }
       }
       afterDraw(animate);

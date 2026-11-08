@@ -103,8 +103,13 @@ To prevent garbage collection (GC) micro-stutters:
 | `src/sim/departure.ts` | Spawn placement: parked at the designated stand, clear of buildings, runways and jet bridges. |
 | `src/sim/effects.ts` | Pooled GPU-point particle effects: sparks, smoke, fire, dust and tyre smoke. |
 | `src/sim/precip.ts` | Rain / snow streaks around the camera, advected by the real relative airflow. |
-| `src/sim/clouds.ts` | Live-weather cloud field: three live-data-driven instanced layers (low = METAR ceiling, mid/cirrus = Open-Meteo geopotential bases) in a single draw call, advected by the live wind on the sim clock. |
+| `src/sim/clouds.ts` | Legacy cloud field fallback. |
+| `src/sim/cloudLayers.ts` | Cloud layer planning: converts live METAR/model weather into 4 MSL altitude slabs (low, mid, high, CB storm column) for volumetric ray-marching. |
+| `src/sim/volumetricClouds.ts` | Fly-through volumetric ray-marched clouds with scene depth buffer intersection, Henyey-Greenstein phase lighting, and IMC white-out. |
 | `src/sim/lightning.ts` | Cloud-to-ground lightning for thunderstorm conditions: billboarded bolt ribbons, a dedicated flash light, and an `onStrike` hook wired to procedural thunder in `audio.ts`. |
+| `src/sim/loadState.ts` | Observable load-stage store (`dispatch → scenery → deck → weather → terrain → done`, flight-deck GLB byte progress, error). |
+| `src/ui/Loaders.tsx` + `loaders.css` | Loading screens: `BootLoader` (first visit/reload) and `FlightLoader` (real-progress opaque loader from FLY click to ready). |
+| `src/ui/A320Plan.tsx` | True-scale plan-view A320-200 SVG for the loaders with progressive fill progress. |
 | `src/sim/audio.ts` | Web Audio API procedural synthesis (engines, slipstream, rolling, warnings tones, one-shots, thunder). `halt()` suspends the AudioContext for a pause and refuses every one-shot; `silence()` additionally forgets queued speech. Speech itself is NOT produced here any more: `speak()` is a thin adapter onto the shared `VoiceBus` (`audio.voice`). |
 | `src/sim/atc.ts` | Fully automatic ATC <-> pilot radio: per-flight generated callsigns, ICAO/FAA phraseology by airfield country, weather-aware remarks, non-towered "Information/Traffic" fields, background-traffic chatter matched to the flight phase. `AtcRadio` only *sequences* exchanges (pilot call -> controller -> readback) and hands each line to the `VoiceBus`; it no longer touches `speechSynthesis`. |
 | `src/sim/speech.ts` | **`VoiceBus`** — the single owner of every spoken line (ATC, pilot readbacks, crew callouts, cabin PA, GPWS) plus the `WebSpeechDriver`: priorities (chatter 0 / ATC+PA+crew 1 / callouts 2 / warnings 3), preemption with replay, flight-clock TTLs, sterile-phase holds, captions + transcript log hooks, timed silent fallback. See section 7. |
@@ -228,3 +233,14 @@ To prevent garbage collection (GC) micro-stutters:
 **Adding a cue.** Add it to `CommsDirector` as a function of `CommsSnap` (fill the field in `Game.fillCommsSnap`, allocation-free), pass EN text, Indonesian text and optionally `speech` (spelled-out form for TTS). Cues read real state (flap handle, spoilers armed, gear, speed) — never a bare timer. Verify phraseology against Airbus SOP material before adding callouts.
 
 **Transcripts.** `hud.atcLive` is the line on air, `hud.atcLog` the history (GPWS words / RA callouts are live-only). Settings: `transcripts` (on) and `transcriptLang` (`en` default / `id`). Indonesian = `AtcMessage.textId` when the line has one, otherwise `translateId(text)`. The audio is never translated (ICAO: English on the frequency).
+
+---
+
+## 8. Loading screens & Volumetric Atmosphere (added)
+
+- **Two entry points, one look.** `index.html` paints a static `#boot-splash` before any JavaScript is parsed (the single-file bundle is ~4 MB); `BootLoader` removes it (cross-fade) after its own first paint. `FlightLoader` is shown when `launching || (screen === 'flight' && phase === 'loading')`. `launching` bridges the gap between pressing FLY and `Game.load()` (the OpenStreetMap runway survey in `startFlight` can take seconds) – never remove it, or the menu freezes visibly.
+- **Opaque on purpose.** The loader sits at `z-index: 60`, above the HUD/ready screen, and is fully opaque: the old 90 %-opaque blurred overlay let half-built terrain and tile pop-in show through. It stays mounted for the fade-out so the hand-over to the Ready screen is never a hard cut.
+- **Progress is real.** `flightTarget()` maps `loadState` to bands (survey + scenery 0–12 %, flight deck 12–60 % from streamed bytes, weather 60–68 %, terrain 68–98 % from `Terrain.progress()`); `useSmoothed()` eases towards it and never moves backwards.
+- **Globe gate.** `InteractiveEarthGlobe` has an `onLoadProgress` prop: it reports the 16 level-2 Esri tiles settling (loaded *or* failed) and reaches exactly 1 only after the painted texture was uploaded and a frame was rendered.
+- **Volumetric Clouds.** `volumetricClouds.ts` replaces the 2D billboards with full-screen ray-marching against the scene depth buffer. `cloudLayers.ts` groups live weather into 4 MSL altitude slabs. Allows realistic flight inside IMC clouds.
+- **DEM Retry & Coastlines.** Missing elevation tiles are retried with back-off and sample from coarser tiles in the interim. Coastal airport 3.7 km boundaries blend smoothly into the sea.
