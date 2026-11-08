@@ -1,0 +1,47 @@
+[package]
+name = "in-flight"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.87"
+description = "Native Rust port of the In-Flight A320 simulator core (6-DOF physics, autopilot, wgpu renderer)"
+license = "MIT"
+default-run = "inflight"
+
+[lib]
+name = "inflight"
+path = "src/lib.rs"
+
+[[bin]]
+name = "inflight"
+path = "src/bin/inflight.rs"
+
+[[bin]]
+name = "soak"
+path = "src/bin/soak.rs"
+
+[[bin]]
+name = "shots"
+path = "src/bin/shots.rs"
+
+[dependencies]
+wgpu = "30"
+winit = "0.30"
+glam = "0.34"
+bytemuck = { version = "1", features = ["derive"] }
+pollster = "1"
+serde_json = "1"
+ab_glyph = "0.2"
+png = "0.18"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
+panic = "abort"
+debug = false
+
+[profile.dev]
+opt-level = 1
+
+[profile.test]
+opt-level = 3

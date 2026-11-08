@@ -26,3 +26,9 @@ Thumbs.db
 *.glb
 *.gltf
 public/src/
+
+# Rust build artifacts
+target/
+rust/target/
+*.pdb
+

@@ -1,0 +1,63 @@
+# In-Flight (Rust) — native A320 simulator
+
+A native Rust desktop port of [`sansaks-jpg/in-flight`](https://github.com/sansaks-jpg/in-flight) (TypeScript / Three.js / React).
+No browser, no WebGPU-in-a-browser layer: `winit` window + `wgpu` 30 (Vulkan / Metal / DX12) + a fixed-step Rust simulation.
+
+The original repository is cloned unmodified in `../reference/in-flight/`.
+
+## Run
+
+```bash
+cargo run --release                         # menu: type ICAO codes, Enter to start
+cargo run --release -- --dep KSFO --arr KOAK --autostart     # auto take-off + autoland demo
+cargo run --release -- --uncapped           # disable vsync (benchmark)
+```
+Linux needs the usual X11/Wayland + Vulkan runtime (`libvulkan1` + your GPU driver). Press **F1** in the game for the controls.
+
+## Test
+
+```bash
+cargo test --release            # 38 unit tests + 6 full-flight integration tests (no GPU needed)
+cargo run --release --bin soak -- --flights 12 --gpu --frames 700 --size 640x360   # leak / frame-time soak
+cargo run --release --bin shots -- screenshots 1280 720                            # offscreen visual test -> PNGs
+```
+`shots` and `soak --gpu` work on any wgpu adapter, including software Vulkan (Mesa lavapipe) for CI.
+
+## What is ported (module map)
+
+| Rust | Original TypeScript | Notes |
+|---|---|---|
+| `src/physics.rs` | `sim/physics.ts` | 6-DOF rigid body, ISA atmosphere, A320 normal law + protections, engines (start / spool / reverse), aero with post-stall model, ground effect, spring-damper gear, hull contacts, auto-spoilers / autobrake |
+| `src/specs.rs` | `sim/specs.ts` | A320-200 spec (the original also filters to the A320) |
+| `src/autopilot.rs` | `sim/autopilot.ts` | auto-takeoff, LNAV, VNAV 3° path, FCU selected/managed, ILS capture, flare, rollout, speed schedule, min-safe-altitude |
+| `src/nav.rs` | `sim/lnav.ts` | leg guidance, fly-by sequencing, cruise level (semicircular rule), flight-plan builder (+ intercept fix for route reversals) |
+| `src/gpws.rs` | GPWS part of `game.ts` | sink rate, terrain look-ahead, glideslope, too-low-gear, stall, overspeed, retard, radio-altitude callouts |
+| `src/clock.rs` | `sim/clock.ts` | real UTC clock + NOAA solar position (sky, stars, night lighting follow the real sun) |
+| `src/airports.rs` | `data/airports.ts` | the original `airports.json` (8 413 airports / runways) embedded in the binary |
+| `src/geo.rs` | `sim/geo.ts` | Web-Mercator projection, great-circle maths |
+| `src/gfx/*` | Three.js scene + React HUD | wgpu renderer, WGSL shaders, glyph-atlas UI, PFD / FCU / ECAM / map |
+
+## Deliberately NOT ported (be aware)
+
+The original is ~28 000 lines including a modelled 3D A320 cockpit (EFIS/ECAM/EFB), live OSM/DEM tile streaming, live weather,
+ATC dialogue + speech synthesis, Web-Audio engine synthesis, tools windows and the React UI kit. This port is the simulation core,
+a native renderer and a cockpit HUD, not a 1:1 rewrite. In particular:
+
+* **Terrain is procedural** (deterministic, shared by physics and renderer), blended into the real airport elevations — not real DEM / satellite data.
+* **Weather is a deterministic seeded model** (wind, gusts, QNH, ΔT, visibility, cloud deck), not live METAR.
+* **No audio, no ATC, no cold-and-dark start-up procedure UI** (the engine start model exists in `physics.rs`).
+* Only the A320 is included (like the original, which filters the C172 / ATR out).
+* Heading is **true**, not magnetic (the runway numbers in the database are magnetic).
+
+## Performance design (60 FPS, no leaks)
+
+* Physics: fixed 120 Hz step with an accumulator (max 10 sub-steps, backlog dropped) — frame-rate independent. Measured 3.2 µs / step.
+* Zero heap allocation in the hot path: `step()` uses stack math only; HUD text uses one reusable `String`; geometry generators refill caller-owned `Vec`s.
+* All GPU buffers are allocated once at start-up with fixed capacity (terrain rings, scatter instances, UI, static airports); per-frame work is `write_buffer`.
+* Terrain: 8-level geometry clipmap (64×64 quads per ring, 16 m … 2 km spacing, ~130 km extent), at most 2 ring rebuilds per frame, camera-relative f32 rendering, reversed-Z infinite far plane.
+* Trees / buildings: instanced, rebuilt only when the camera moves > 110 m, only below 2 500 m AGL.
+* vsync (`Fifo`) by default → locked to the display refresh; `--uncapped` for benchmarks.
+
+## Licence / credits
+
+Original project and `airports.json`: see `../reference/in-flight`. Font: DejaVu Sans Mono Bold (`assets/DEJAVU-LICENSE.txt`).

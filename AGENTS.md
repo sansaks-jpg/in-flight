@@ -293,3 +293,13 @@ Anything new added to `world.scene` / the cockpit scene before `load()` finishes
 **Clouds (`volumetricClouds.ts`, `cloudLayers.ts`).** Low deck = separate cumulus cells with a low-frequency per-cloud height, a rounded (`sqrt`) edge profile and flat bases, billow + domain-warped erosion, 5 sun taps with three scattering octaves, powder term, sky-lit tops / ground-bounce bases. Marching uses big strides in empty space and steps back + fine steps at first contact (no banding). Extinction is deliberately soft (`EXT`) and the composite pass filters the half-resolution cloud buffer with 5 taps to remove the per-pixel jitter pattern. Cumulus depth is `550 + 1150·cover` m (flattening to ~stratocumulus near overcast). Per-quality cost knobs: `QualityProfile.cloudSteps` and the `SCALE` table (cloud buffer resolution, 0.5–0.85 of the back buffer). Test visually from below, beside and above a deck (`Game.setSkyPreview({ weather: 'scattered' | 'broken' | 'overcast', hour })`), not only headless.
 
 **Verification notes.** Headless SwiftShader renders ~1–3 fps, so ring streaming is far slower than on a real GPU and *cannot* measure frame time; use it for correctness (glitches, shapes, shading) and draw-call / CPU-per-subsystem counts only. Keep scratch harnesses outside the repository — do not add one-off screenshot scripts to `scripts/`.
+
+---
+
+## 12. Native Rust Desktop Rewrite (`rust/`)
+
+A high-performance, native desktop rewrite of the In-Flight simulation core in Rust resides in `rust/`.
+- **Rust Architecture & Guide**: See [`rust/AGENTS.md`](file:///c:/Users/WORKPLUS/Documents/WEB/in-flight/rust/AGENTS.md) for full architectural guidelines, mathematical conventions, module map, and constraints.
+- **Porting Roadmap & Task Tracker**: See [`rust/TASK.md`](file:///c:/Users/WORKPLUS/Documents/WEB/in-flight/rust/TASK.md) for tracking what has and hasn't yet been ported from the TypeScript/Three.js simulator into Rust (audio synthesis, A320 systems, EFIS displays, 3D cockpit, speech/ATC, volumetric clouds, MVT terrain).
+- **CI/CD**: Executable build is automated via `.github/workflows/rust-ci.yml`.
+
