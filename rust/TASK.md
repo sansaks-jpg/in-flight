@@ -378,3 +378,36 @@ no jump on view blends, dip-to-black timing, digit mapping + fallbacks, control 
   not from a hands-on session. Every constant is a named `const` at the top of `camera.rs` / `app.rs` for tuning.
 * The HD deck presets use TS model-space numbers; if the add-on model changes, re-measure `spec()` in `camera.rs`.
 * Possible follow-ups: gamepad right-stick look, per-view saved orbits across flights, TrackIR-style head tracking input into `LookRig`.
+
+---
+
+## 8. Cockpit Avionics & Controls Integration (EFIS, ECAM, FCU, Pedestal / MCDU)
+
+### 8.1 Integrated Modules & Capabilities
+
+1. **EFIS Flight Displays & Navaids (`navaids.rs`, `gfx/efis.rs`, `data/navaids.json`)**:
+   - Full independent Captain (side 0) & First Officer (side 1) PFD and ND with independent display transfer and brightness controls.
+   - **PFD**: Attitude indicator, flight director crossbars, airspeed tape with authentic speed bugs ($V_1$, $V_R$, $V_2$, $V_{LS}$, $V_{MAX}$), baro-corrected altitude tape with QNH / STD modes, vertical speed indicator, ILS localizer & glideslope pointers, and Flight Mode Annunciator (FMA).
+   - **ND**: ROSE LS, ROSE VOR, ROSE NAV, ARC, and PLAN modes across 6 range settings (10 to 320 NM), independent VOR / ADF pointers and DME distance readouts. Full EFIS option layers (`CSTR`, `WPT`, `VORD`, `NDB`, `ARPT`) with spatial query against global `navaids.json` and airport database.
+
+2. **ECAM System (`ecam.rs`, `ecp.rs`)**:
+   - **Engine / Warning Display (E/WD)**: Twin N1 / EGT gauges, fuel on board and fuel flow, flaps / slats indicator, landing gear status, dynamic memo and warning engine with multi-level severity colour-coding (`Red`, `Amber`, `Green`, `Cyan`, `White`), flashing unacknowledged warnings, and lamp test support.
+   - **System Display (SD)**: 12 authentic system synoptic pages (`ENG`, `BLEED`, `PRESS`, `ELEC`, `HYD`, `FUEL`, `APU`, `COND`, `DOOR`, `WHEEL`, `F/CTL`, `STS`), rendering full system states including electrical buses, hydraulic pressure, bleed air paths, and cabin pressurisation.
+   - **ECAM Control Panel (ECP)**: Complete button matrix, page selectors, `CLR`, `RCL`, `ALL` (timed page cycling), `EMER CANC`, and `T.O. CONFIG` tests with authentic momentary key mechanics.
+
+3. **Flight Control Unit (`fcu.rs`)**:
+   - Glareshield FCU panel with rotary encoders for Speed, Heading, Altitude, and Vertical Speed.
+   - Push/Pull dual mechanics: Push engages Managed guidance mode; Pull engages Selected guidance mode.
+   - 7-segment digital window readouts, managed indicator dots, `SPD/MACH` and `HDG/TRK` mode switches, `METRIC ALT`, `AP1` / `AP2`, `A/THR`, `LOC`, `APPR`, and `EXPED` push-buttons.
+
+4. **Pedestal Controls & MCDU (`mcdu.rs`, `deck.rs`, `deckhost.rs`)**:
+   - Dual Multipurpose Control & Display Units (MCDU 1 & 2): 24 x 14 CRT character scratchpad & pages (`INIT`, `F-PLN`, `DIR`, `PERF`), alphanumeric keyboards, line select keys (`LSK1L`–`6L`, `LSK1R`–`6R`), annunciator lamps, rendered into dedicated atlas cells 6 and 7.
+   - Pedestal flight controls: Engine master switches, engine start mode selector, fire push buttons, throttle quadrant with physical detents (`IDLE`, `CL`, `FLX/MCT`, `TOGA`), speedbrake lever, flaps lever, and pitch / rudder trim controls.
+   - Cockpit display atlas expanded to a 3 x 3 grid (1536 x 1536 px) covering Captain PFD/ND, E/WD, SD, F/O PFD/ND, and dual MCDUs.
+
+### 8.2 Verification
+
+* `cargo check --all-targets`: Clean with zero warnings or errors across all binaries, library, and test suites.
+* `cargo test --release`: All unit and integration test suites pass (`pedestal`, `fcu_panel`, `efis`, `efis_deck`, `deck`, `flight`, `environment`, `ui_flow`).
+* `cargo build --release`: Standalone release executable built cleanly at `rust/target/release/inflight`.
+

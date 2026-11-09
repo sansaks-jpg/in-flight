@@ -11,8 +11,10 @@
 //!   release / wheel` implement the mouse mechanics and drive [`A320Systems`] and the flight model.
 //! * `gpu_mesh` bakes everything into one vertex/index buffer sorted by material for the renderer in `gfx/deck.rs`.
 
-use crate::a320sys::{A320Systems, NdOpt, ND_MODE_NAMES, ND_RANGES};
-use crate::cockpit::{PanelV, ATLAS_SIZE, CELL_EWD, CELL_ND, CELL_PFD, CELL_SD};
+use crate::a320sys::{A320Systems, Bright, Efis, NdOpt, ND_MODE_NAMES, ND_RANGES};
+use crate::cockpit::{cell_uv, PanelV, CELL_EWD, CELL_MCDU1, CELL_MCDU2, CELL_ND, CELL_ND2, CELL_PFD, CELL_PFD2, CELL_SD};
+use crate::ecam::EcpKey;
+use crate::fcu::{self, Button as FcuButton, Knob as FcuKnob};
 use crate::game::{Action, Flight};
 use crate::glb::Glb;
 use glam::{Mat4, Vec3};
@@ -54,8 +56,15 @@ pub struct Group {
     pub axis: Option<Axis>,
     fb: Option<Axis>,
     pub pos: i32,
+    /// Click angle of a rotary encoder (rad, clockwise = positive): one detent = `fcu::CLICK_RAD`, never derived from the value.
     pub angle: f32,
     pub press: f32,
+    /// Smoothed on-screen rotation of a knob (rad, clockwise as seen by the pilot) - chases `angle` / the state target.
+    pub vis: f32,
+    /// Smoothed push / pull travel along the panel normal (metres, + = towards the pilot).
+    pub slide: f32,
+    /// Momentary plunger demand of a push / pull knob while the mouse is down: -1 pushed in, +1 pulled out, 0 at rest.
+    pub plunge: f32,
     pub label: String,
     pub steps: i32,
     pub bmin: Vec3,
@@ -197,7 +206,10 @@ const FCU_TOGGLES: &[&str] = &[
     "rev_r", "gravity_gear", "tiller", "tillerFo", "RudderTrim", "RudderTrimReset", "thr_l_button", "thr_r_button", "pfd_nd_xfr_sw", "pfd_nd_xfr_sw2", "terr_on_nd_l", "terr_on_nd_r", "iesi_btn_bugs", "iesi_btn_ls", "iesi_btn_minus", "iesi_btn_plus", "iesi_btn_rst",
     "clock_set", "et_knob", "HeadsetHangerCpt", "extinguisher", "brk_fan", "FuelXFeedBtn",
 ];
+pub const TRIM_WHEEL_RAD: f32 = 3.0;
+
 const KNOB_STEPS: &[(&str, i32)] = &[
+    ("ecam_att_hdg", 3), ("ecam_air_data", 3), ("ecam_eis_dmc", 3), ("ecam_nd_xfr", 3),
     ("IR1ModeKnb", 3), ("IR2ModeKnb", 3), ("IR3ModeKnb", 3), ("XbleedKnb", 3), ("eng_mode", 3), ("RudderTrim", 41), ("nd_mode", 5), ("nd_mode_fo", 5), ("nd_range", 6), ("nd_range_fo", 6), ("CockpitACKnb", 12), ("FwdCabinACKnb", 12), ("AftCabinACKnb", 12),
     ("ACFlowKnb", 3), ("LdgElevKnb", 12), ("LeftWiperKnb", 4), ("RightWiperKnb", 4), ("radar_mode", 4), ("radar_sys", 3), ("qnh_cpt_sw", 2), ("qnh_fo_sw", 2), ("alt-sel-mode", 2), ("spd-sel", 40), ("hdg_sel", 40), ("alt-sel", 40), ("vs-sel", 40), ("qnh_cpt_knb", 40),
     ("qnh_fo_knb", 40), ("iesi_baro_knb", 40), ("clock_knob", 3), ("LReadingLtKnb", 12), ("RReadingLtKnb", 12), ("OHPMarkLtKnb", 12),
@@ -216,10 +228,6 @@ pub const GUARD_OF: &[(&str, &str)] = &[
     ("firebtnapu", "APUFireCover"),
 ];
 const AGENT_IDX: &[(&str, usize)] = &[("Eng1FireAgt1Btn", 0), ("Eng1FireAgt2Btn", 1), ("Eng2FireAgt1Btn", 2), ("Eng2FireAgt2Btn", 3), ("APUFireAgtBtn", 4)];
-const ECP_PAGES: &[(&str, &str)] = &[
-    ("ecam_eng", "ENG"), ("ecam_bleed", "BLEED"), ("ecam_press", "PRESS"), ("ecam_elec", "ELEC"), ("ecam_hyd", "HYD"), ("ecam_fuel", "FUEL"), ("ecam_apu", "APU"), ("ecam_cond", "COND"), ("ecam_door", "DOOR"), ("ecam_wheel", "WHEEL"), ("ecam_fctl", "F/CTL"),
-    ("ecam_sts", "STS"),
-];
 const LEADER: &[(&str, &str)] = &[("thr_l_button", "thr_l_body"), ("thr_r_button", "thr_r_body"), ("rev_l", "thr_l_body"), ("rev_r", "thr_r_body")];
 const THR_PIVOT_L: Vec3 = Vec3::new(-0.1097, -0.09, 0.0215);
 const THR_PIVOT_R: Vec3 = Vec3::new(-0.1097, -0.09, -0.0215);
@@ -366,15 +374,19 @@ pub struct Deck {
     pub efb_power: bool,
     mst_sm: [f32; 2],
     rud_sm: f32,
-    pub fcu_slots: Vec<(String, usize)>,
+    pub ecp_hold: bool,
 }
 
 fn screen_cell(n: &str) -> Option<usize> {
     Some(match n {
-        "pfd1.screen" | "pfd2.screen" => CELL_PFD,
-        "ND.screen" | "ND_R.screen" => CELL_ND,
-        "uecam.screen" | "uecam.screen2" => CELL_EWD,
-        "lecam.screen" => CELL_SD,
+        "pfd1.screen" | "PFD.screen" => CELL_PFD,
+        "pfd2.screen" | "PFD_R.screen" => CELL_PFD2,
+        "ND.screen" => CELL_ND,
+        "ND_R.screen" => CELL_ND2,
+        "uecam.screen" | "uecam.screen2" | "ECAM1.screen" => CELL_EWD,
+        "lecam.screen" | "ECAM2.screen" => CELL_SD,
+        "MCDU.screen" | "mcdu_screen_cpt" | "mcdu1.screen" => CELL_MCDU1,
+        "mcdu_screen_fo" | "mcdu2.screen" => CELL_MCDU2,
         _ => return None,
     })
 }
@@ -434,8 +446,14 @@ impl Deck {
                 continue;
             }
             if FCU_IND.contains(&nm) {
-                hidden[i] = true;
                 used[i] = true;
+                // legends (SPD / MACH, HDG / TRK, V/S / FPA, LVL/CH) and the managed dots are lit by the FCU state
+                // (`updateFcuInd` in cockpit.ts); the digit meshes, `alt.ind` and the dashes stay hidden (drawn as text)
+                if fcu::legend_lit(nm, &fcu::FcuDisplay { on: true, ..Default::default() }).is_some() && !matches!(nm, "alt.ind" | "spd.dash" | "lat.dash" | "vs.dash") {
+                    lamps.push(Lamp { mesh: i, base: format!("fcu:{nm}"), leg: None, slot: 0 });
+                } else {
+                    hidden[i] = true;
+                }
                 continue;
             }
             if r.mcdu_ann.is_match(nm) {
@@ -491,6 +509,9 @@ impl Deck {
                 pos: 0,
                 angle: 0.0,
                 press: 0.0,
+                vis: f32::NAN,
+                slide: 0.0,
+                plunge: 0.0,
                 label: prettify(id),
                 steps,
                 bmin: Vec3::splat(f32::MAX),
@@ -583,9 +604,9 @@ impl Deck {
                 }
             }
             let c = (g.bmin + g.bmax) * 0.5;
-            g.nrm = panel_normal(c);
+            g.nrm = if g.kind == Kind::Key { MCDU_KEY_NORMAL.normalize() } else { panel_normal(c) };
             g.ovh = c.y > 0.78 && c.x > -0.3;
-            g.mom = r.momentary.is_match(&g.id);
+            g.mom = r.momentary.is_match(&g.id) || momentary_extra(&g.id);
             g.pos = match g.id.as_str() {
                 "qnh_cpt_sw" | "qnh_fo_sw" | "vor-adf1" | "vor-adf2" | "vor-adf-1-right" | "vor-adf-2-right" | "audio_int_rad.cpt" | "audio_int_rad.fo" => 1,
                 "nd_mode" | "nd_mode_fo" | "nd_range" | "nd_range_fo" => 3,
@@ -627,7 +648,6 @@ impl Deck {
                 screens.push(ScreenDef { node: m.name.clone(), cell, center: (mn + mx) * 0.5, size: [0.0, 0.0] });
             }
         }
-        let fcu_slots = ["spd.ind", "hdg.ind", "alt.ind", "vs.ind"].iter().filter_map(|n| names.get(n).map(|&i| (n.to_string(), i))).collect();
         let mut d = Deck {
             glb,
             groups,
@@ -644,7 +664,7 @@ impl Deck {
             efb_power: true,
             mst_sm: [0.0; 2],
             rud_sm: 0.0,
-            fcu_slots,
+            ecp_hold: false,
         };
         for g in 0..d.groups.len() {
             d.groups[g].xf = Mat4::IDENTITY;
@@ -654,6 +674,23 @@ impl Deck {
 
     pub fn group(&self, id: &str) -> Option<&Group> {
         self.by_id.get(id).map(|&i| &self.groups[i])
+    }
+
+    /// Lamp / legend node lookup (tests + diagnostics): lit state of lamp `base` (`"ap1"`, `"fcu:spd.ind"` ...), `None` if the model has no such lamp.
+    pub fn lamp_lit(&self, base: &str, s: &A320Systems, f: &Flight) -> Option<bool> {
+        self.lamps.iter().any(|l| l.base == base).then(|| self.led_lit(base, s, f).0)
+    }
+
+    /// GPU slot index of the first lamp node called `base` (index into the vector filled by [`Deck::slots`]).
+    pub fn lamp_slot(&self, base: &str) -> Option<usize> {
+        self.lamps.iter().find(|l| l.base == base).map(|l| l.slot as usize)
+    }
+
+    /// Mechanical axis (pivot, direction) used to pose control `id` - the manifest axis or the derived fallback.
+    pub fn pose_axis(&mut self, id: &str) -> Option<(Vec3, Vec3)> {
+        let gi = *self.by_id.get(id)?;
+        let a = self.axis_of(gi);
+        Some((a.pivot, a.dir))
     }
 
     pub fn kind_counts(&self) -> HashMap<Kind, usize> {
@@ -671,6 +708,17 @@ impl Deck {
             return a;
         }
         let c = (g.bmin + g.bmax) * 0.5;
+        // the F/O ADF-OFF-VOR levers have no manifest axis: they swing about the captain's lever axis at their own z
+        let twin = match g.id.as_str() {
+            "vor-adf-1-right" => Some("vor-adf1"),
+            "vor-adf-2-right" => Some("vor-adf2"),
+            _ => None,
+        };
+        if let Some(src) = twin.and_then(|t| self.by_id.get(t)).and_then(|&i| self.groups[i].axis) {
+            let a = Axis { pivot: Vec3::new(src.pivot.x, src.pivot.y, c.z), dir: src.dir };
+            self.groups[gi].fb = Some(a);
+            return a;
+        }
         let sz = g.bmax - g.bmin;
         let n = g.nrm;
         let half = 0.5 * (n.x.abs() * sz.x + n.y.abs() * sz.y + n.z.abs() * sz.z);
@@ -778,6 +826,19 @@ impl Deck {
         let g = &self.groups[gi];
         let ctl = &f.fm.ctl;
         let id = g.id.as_str();
+        if let Some((side, func)) = efis_fn(id) {
+            return efis_text(func, side, s);
+        }
+        if let Some(v) = brightness_of(id, s) {
+            return if !s.du_on(v) { "OFF".into() } else { format!("BRT {}%", (v * 100.0).round()) };
+        }
+        if g.kind == Kind::Key {
+            let m = &s.mcdu[(id.starts_with("F:")) as usize];
+            return if !m.powered { "MCDU OFF".into() } else { format!("{}  [{}]", m.page.title(), m.scratch) };
+        }
+        if crate::ecp::is_key(id) {
+            return if s.ecp.lit(id) { "SELECTED (lit)" } else { "released" }.into();
+        }
         match id {
             "BatteryBtn1" => return if s.bat[0] { "AUTO" } else { "OFF" }.into(),
             "BatteryBtn2" => return if s.bat[1] { "AUTO" } else { "OFF" }.into(),
@@ -794,11 +855,25 @@ impl Deck {
             "rev_l" | "rev_r" => return if ctl.reverse { "REV DEPLOYED" } else { "STOWED" }.into(),
             "gear_lever" => return if ctl.gear_down { "DOWN" } else { "UP" }.into(),
             "ParkBrk" => return if ctl.parking { "ON" } else { "OFF" }.into(),
-            "spd-sel" => return format!("{} kt", f.ap.spd.round()),
-            "hdg_sel" => return format!("{} deg", f.ap.hdg.round()),
-            "alt-sel" => return format!("{} ft", f.ap.alt_ft.round()),
-            "vs-sel" => return if s.vs_mode { format!("{} fpm", s.vs_target) } else { "LEVEL CH".into() },
-            "ap1" => return if f.ap.on { "ENGAGED" } else { "OFF" }.into(),
+            "spd-sel" | "hdg_sel" | "alt-sel" | "vs-sel" => {
+                let d = fcu::display(f, s);
+                let managed = |m: bool| if m { "MANAGED (push)" } else { "SELECTED (pull)" };
+                return match id {
+                    "spd-sel" => format!("{}{} - {}", d.spd, if d.mach { " M" } else { " kt" }, managed(s.spd_managed)),
+                    "hdg_sel" => format!("{}{} - {}", d.hdg, if d.trk { " TRK" } else { " deg" }, managed(s.hdg_managed)),
+                    "alt-sel" => format!("{} ft - {} - step {}", d.alt, managed(s.alt_managed), if s.alt_step_1000 { "1000" } else { "100" }),
+                    _ => format!("{}{} - {}", d.vs, if d.fpa { " deg" } else { " fpm" }, if s.vs_mode { "V/S ENGAGED" } else { "LEVEL CH / HOLD" }),
+                };
+            }
+            "alt-sel-mode" => return if s.alt_step_1000 { "1000 ft per click" } else { "100 ft per click" }.into(),
+            "ap1" => return if s.ap_eng[0] && f.ap.on { "ENGAGED" } else { "OFF" }.into(),
+            "ap2" => return if s.ap_eng[1] && f.ap.on { "ENGAGED" } else { "OFF" }.into(),
+            "a-thr" => return if s.athr_armed || f.ap.on { "ARMED / ACTIVE" } else { "OFF" }.into(),
+            "loc" => return if s.loc_armed { "ARMED" } else { "OFF" }.into(),
+            "exped" => return if s.exped { "ENGAGED" } else { "OFF" }.into(),
+            "hdg-vs" | "trk-fpa" => return if s.trk_fpa { "TRK / FPA" } else { "HDG / V/S" }.into(),
+            "spd-mach" => return if s.spd_mach { "MACH" } else { "SPD" }.into(),
+            "metric_alt" => return if s.metric { "METRIC ON" } else { "OFF" }.into(),
             "appr" => return if f.ap.appr { "ARMED" } else { "OFF" }.into(),
             "thr_l_body" => return thr_detent_name(ctl.throttle, ctl.reverse),
             "thr_r_body" => return thr_detent_name((ctl.throttle + ctl.thr_offset).clamp(0.0, 1.0), ctl.reverse),
@@ -840,6 +915,34 @@ impl Deck {
 
     pub fn hint(&self, gi: usize) -> &'static str {
         let g = &self.groups[gi];
+        if let Some((_, func)) = efis_fn(&g.id) {
+            let t = efis_hint(func);
+            if !t.is_empty() {
+                return t;
+            }
+        }
+        match EcpKey::from_id(&g.id) {
+            Some(EcpKey::All) => return "Hold: SD steps through all pages (1 page / s)",
+            Some(EcpKey::Rcl) => return "Click: recall - hold 3 s: recall EMER CANC cautions",
+            Some(EcpKey::Page(_)) => return "Click to show - click the lit key again for automatic",
+            Some(_) => return "Click to press",
+            None => {}
+        }
+        if g.id.starts_with("ecam_brt_") {
+            return "Wheel / drag to turn - fully anticlockwise = OFF";
+        }
+        if is_src_knob(&g.id) {
+            return "Click / wheel: CAPT 3 - NORM - F/O 3 (right-click = back)";
+        }
+        match g.id.as_str() {
+            "spd-sel" | "hdg_sel" | "alt-sel" | "vs-sel" => return "Wheel / drag = turn - click = PUSH (managed) - right-click / Shift+click = PULL (selected) - Shift = coarse",
+            "alt-sel-mode" => return "Click or wheel = ALT step 100 / 1000 ft",
+            "qnh_cpt_knb" | "qnh_fo_knb" => return "Wheel / drag = set pressure - click = PUSH (QNH) - right-click / Shift+click = PULL (STD)",
+            "qnh_cpt_sw" | "qnh_fo_sw" => return "Click or wheel = hPa / inHg",
+            "nd_mode" | "nd_mode_fo" | "nd_range" | "nd_range_fo" => return "Wheel / drag to rotate - click = next - right-click = previous",
+            "vor-adf1" | "vor-adf2" | "vor-adf-1-right" | "vor-adf-2-right" => return "Click: OFF - VOR - ADF - OFF - right-click reverses",
+            _ => {}
+        }
         match g.kind {
             Kind::Knob => "Wheel / drag to turn - click = push - right-click = pull",
             Kind::Lever => "Drag or wheel to move - detents snap",
@@ -930,17 +1033,36 @@ impl Deck {
                 self.active = Some(Active { group: gi, kind: 2, v0, ..Default::default() });
             }
             _ if kind == Kind::Key => {
-                self.groups[gi].press = 1.0;
-                s.say(&format!("MCDU key {}", id.split(':').nth(1).unwrap_or("")));
-            }
-            _ if id.starts_with("ecam_") && ECP_PAGES.iter().any(|p| p.0 == id) => {
-                let page = ECP_PAGES.iter().find(|p| p.0 == id).map(|p| p.1);
-                self.ecam_page = if self.ecam_page == page { None } else { page };
+                // MCDU keyboard: `C:<key>` (captain) / `F:<key>` (first officer); the key stays depressed while the button is held
                 self.groups[gi].press = 1.0;
                 self.active = Some(Active { group: gi, kind: 3, ..Default::default() });
+                let (side, key) = id.split_once(':').unwrap_or(("C", ""));
+                let i = (side == "F") as usize;
+                let k = if key.is_empty() { "." } else { key };
+                let f_ptr: &mut Flight = f;
+                s.mcdu[i].key(k, f_ptr);
+            }
+            _ if EcpKey::from_id(&id).is_some() || crate::ecp::is_key(&id) => {
+                self.groups[gi].press = 1.0;
+                self.active = Some(Active { group: gi, kind: 3, ..Default::default() });
+                if let Some(k) = EcpKey::from_id(&id) {
+                    s.ecp_down(k);
+                }
+                if crate::ecp::is_key(&id) {
+                    let (mut mw, mut lt) = (s.master_warn, s.lamp_test);
+                    s.ecp.press(&id, &mut mw, &mut lt);
+                    s.master_warn = mw;
+                    s.lamp_test = lt;
+                    self.ecp_hold = id == "ecam_all";
+                }
             }
             _ if RING.contains(&id.as_str()) => {
-                let d = if self.groups[gi].pos != 0 { -1 } else { 1 };
+                // a click flips the two-position ring; the direction comes from the real state, never from a stale pose
+                let d = match id.as_str() {
+                    "qnh_cpt_sw" => if s.efis[0].unit_in_hg { 1 } else { -1 },
+                    "qnh_fo_sw" => if s.efis[1].unit_in_hg { 1 } else { -1 },
+                    _ => if s.alt_step_1000 { -1 } else { 1 },
+                };
                 self.step_knob(gi, d, false, f, s);
                 self.groups[gi].press = 1.0;
             }
@@ -950,7 +1072,15 @@ impl Deck {
                     self.groups[gi].press = 1.0;
                     self.activate_knob(gi, button == 2 || shift, f, s);
                 } else {
-                    let dir = if button == 2 { -1 } else { 1 };
+                    let dir = if is_src_knob(&id) {
+                        let d = src_click_dir(button, self.groups[gi].pos, self.groups[gi].angle);
+                        self.groups[gi].angle = d as f32;
+                        d
+                    } else if button == 2 {
+                        -1
+                    } else {
+                        1
+                    };
                     self.step_knob(gi, dir, shift, f, s);
                 }
             }
@@ -1019,14 +1149,25 @@ impl Deck {
         true
     }
 
-    pub fn release(&mut self, f: &mut Flight) {
-        self.active = None;
+    pub fn release(&mut self, f: &mut Flight, s: &mut A320Systems) {
+        self.ecp_hold = false;
+        if let Some(a) = self.active.take() {
+            if let Some(k) = EcpKey::from_id(&self.groups[a.group].id) {
+                s.ecp_up(k);
+            }
+        }
         if f.fm.ctl.thr_offset.abs() < 0.03 {
             f.fm.ctl.thr_offset = 0.0;
         }
         for g in self.groups.iter_mut() {
             g.press = 0.0;
+            g.plunge = 0.0;
         }
+    }
+
+    pub fn release_flight(&mut self, f: &mut Flight) {
+        let mut dummy = A320Systems::default();
+        self.release(f, &mut dummy);
     }
 
     /// Scroll wheel over a control: turns knobs, steps levers. Returns true when a control consumed it.
@@ -1045,6 +1186,13 @@ impl Deck {
                 }
                 "thr_r_body" => c.thr_offset = step_detent(c.throttle + c.thr_offset, d) - c.throttle,
                 "FlapsLever" => c.flaps_idx = (c.flaps_idx as i32 + if dy > 0.0 { -1 } else { 1 }).clamp(0, 4) as usize,
+                // speed-brake lever: ARM (forward) - RET - 25 % steps - FULL; wheel up moves it forward
+                "SpdBrk" => {
+                    let cur = if c.spoilers_armed { -1 } else { (c.speedbrake * 4.0).round() as i32 };
+                    let n = (cur + if dy > 0.0 { -1 } else { 1 }).clamp(-1, 4);
+                    c.spoilers_armed = n < 0;
+                    c.speedbrake = n.max(0) as f64 / 4.0;
+                }
                 _ => return false,
             }
             return true;
@@ -1066,110 +1214,27 @@ impl Deck {
     }
 
     // ------------------------------------------------------------------ control effects
+    /// PUSH (`pull = false`) / PULL (`pull = true`) of a rotary encoder. The four FCU window knobs are handled by
+    /// [`fcu::push_pull`]; the EFIS BARO knobs: push = QNH, pull = STD. The knob plunges while the mouse button is down.
     fn activate_knob(&mut self, gi: usize, pull: bool, f: &mut Flight, s: &mut A320Systems) {
         let id = self.groups[gi].id.clone();
+        self.groups[gi].plunge = if pull { 1.0 } else { -1.0 };
+        if let Some(k) = FcuKnob::from_id(&id) {
+            fcu::push_pull(k, pull, f, s);
+            return;
+        }
         match id.as_str() {
-            "spd-sel" => {
-                if !pull {
-                    s.spd_managed = true;
-                    f.ap.spd_selected = false;
-                    s.say("SPEED: managed (FMGS)");
-                } else {
-                    s.spd_managed = false;
-                    f.ap.spd_selected = true;
-                    s.say("SPEED: selected");
-                }
-            }
-            "hdg_sel" => {
-                if !pull {
-                    s.hdg_managed = true;
-                    if f.ap.on && !f.ap.nav {
-                        f.apply(Action::ApToggleNav);
-                    }
-                    s.say(if f.ap.on { "NAV: managed lateral guidance" } else { "NAV armed (engage AP)" });
-                } else {
-                    s.hdg_managed = false;
-                    if f.ap.on && f.ap.nav {
-                        f.apply(Action::ApToggleNav);
-                    }
-                    s.say("HDG: selected heading");
-                }
-            }
-            "alt-sel" => {
-                if !pull {
-                    s.alt_managed = true;
-                    f.ap.alt_selected = false;
-                    s.say("ALT: managed climb / descent (VNAV profile)");
-                } else {
-                    s.alt_managed = false;
-                    f.ap.alt_selected = true;
-                    s.say("ALT: open climb / descent to FCU altitude");
-                }
-            }
-            "vs-sel" => {
-                if !f.ap.on {
-                    s.say("V/S: engage AP1 / AP2 first");
-                } else {
-                    s.vs_mode = true;
-                    if !pull {
-                        s.vs_target = 0.0;
-                        s.fpa_target = 0.0;
-                        f.ap.vs_hold_fpm = Some(0.0);
-                        s.say("V/S 0 - level off");
-                    } else {
-                        self.apply_vs(f, s);
-                        s.say("V/S mode engaged");
-                    }
-                }
-            }
             "qnh_cpt_knb" => s.efis_baro_set(0, pull),
             "qnh_fo_knb" => s.efis_baro_set(1, pull),
             _ => {}
         }
     }
 
-    fn apply_vs(&self, f: &mut Flight, s: &A320Systems) {
-        f.ap.vs_hold_fpm = Some(if s.trk_fpa { ((s.fpa_target.to_radians()).tan() * f.fm.gs.max(51.0) * 1.9438 * 60.0 / 100.0).round() * 100.0 } else { s.vs_target });
-    }
-
+    /// One detent of an FCU window encoder: the knob turns by exactly one click, the logic lives in [`fcu::turn`].
     fn fcu_turn(&mut self, gi: usize, dir: i32, shift: bool, f: &mut Flight, s: &mut A320Systems) {
-        self.groups[gi].angle += dir as f32 * std::f32::consts::PI / 16.0;
-        let id = self.groups[gi].id.clone();
-        let d = dir as f64;
-        match id.as_str() {
-            "spd-sel" => {
-                let step = if shift { 10.0 } else { 1.0 };
-                f.ap.spd_selected = !s.spd_managed;
-                f.ap.spd = (f.ap.spd + d * step).clamp(100.0, 399.0);
-            }
-            "hdg_sel" => {
-                let step = if shift { 10.0 } else { 1.0 };
-                f.ap.hdg = (f.ap.hdg + d * step).rem_euclid(360.0);
-                if f.ap.nav && f.ap.on && !s.hdg_managed {
-                    f.ap.set_lateral_mode_nav(false);
-                }
-            }
-            "alt-sel" => {
-                let step = if shift || s.alt_step_1000 { 1000.0 } else { 100.0 };
-                f.ap.alt_ft = (((f.ap.alt_ft + d * step) / 100.0).round() * 100.0).clamp(100.0, 49000.0);
-                f.ap.alt_selected = !s.alt_managed;
-                if s.alt_managed && f.ap.on && f.ap.nav {
-                    s.alt_managed = false;
-                    f.ap.alt_selected = true;
-                    s.say("ALT: FCU target set - open climb / descent (push ALT for managed)");
-                }
-            }
-            "vs-sel" => {
-                if s.trk_fpa {
-                    s.fpa_target = ((s.fpa_target + d * 0.1).clamp(-9.9, 9.9) * 10.0).round() / 10.0;
-                } else {
-                    s.vs_target = (s.vs_target + d * if shift { 500.0 } else { 100.0 }).clamp(-6000.0, 6000.0);
-                }
-                if s.vs_mode {
-                    self.apply_vs(f, s);
-                }
-            }
-            _ => {}
+        self.groups[gi].angle += dir.signum() as f32 * fcu::CLICK_RAD;
+        if let Some(k) = FcuKnob::from_id(&self.groups[gi].id) {
+            fcu::turn(k, dir, shift, f, s);
         }
     }
 
@@ -1184,8 +1249,9 @@ impl Deck {
                 return;
             }
             "qnh_cpt_sw" | "qnh_fo_sw" => {
+                // ring left (counter-clockwise) = inHg, right (clockwise) = hPa
                 s.efis_baro_unit(side("qnh_fo_sw"), dir < 0);
-                self.groups[gi].pos = if dir < 0 { 1 } else { 0 };
+                self.groups[gi].pos = if dir < 0 { 0 } else { 1 };
                 return;
             }
             "iesi_baro_knb" => {
@@ -1195,13 +1261,16 @@ impl Deck {
                 return;
             }
             "alt-sel-mode" => {
+                // ALT increment ring: left = 100 ft per click, right = 1000 ft per click
                 self.groups[gi].pos = (dir > 0) as i32;
-                s.alt_step_1000 = dir > 0;
+                if s.alt_step_1000 != (dir > 0) {
+                    fcu::set_alt_step(s, dir > 0);
+                }
                 return;
             }
             "fcu_integ_knb1" | "fcu_integ_knb2" => {
-                s.bright.fcu = (s.bright.fcu + dir as f32 * 0.1).clamp(0.2, 1.0);
-                self.groups[gi].angle += dir as f32 * 0.3;
+                s.bright.fcu = ((s.bright.fcu + dir as f32 * 0.1) * 10.0).round() / 10.0;
+                s.bright.fcu = s.bright.fcu.clamp(0.2, 1.0);
                 return;
             }
             "nd_range" | "nd_range_fo" => {
@@ -1220,6 +1289,11 @@ impl Deck {
                 let m = (s.eng_mode as i32 + dir).clamp(0, 2) as u8;
                 s.set_eng_mode(m, &mut f.fm);
                 self.groups[gi].pos = s.eng_mode as i32;
+                return;
+            }
+            "trim_1" => {
+                f.apply(if dir > 0 { Action::TrimUp } else { Action::TrimDown });
+                self.groups[gi].angle += dir as f32 * 0.1;
                 return;
             }
             "RudderTrim" => {
@@ -1339,41 +1413,12 @@ impl Deck {
                 let m = ((s.eng_mode as i32 + if dir > 0 { 1 } else { 2 }) % 3) as u8;
                 s.set_eng_mode(m, &mut f.fm);
             }
-            "ap1" | "ap2" => {
-                let i = (id == "ap2") as usize;
-                let other = s.ap_eng[1 - i];
-                if s.ap_eng[i] {
-                    s.ap_eng[i] = false;
-                    if !other && f.ap.on {
-                        f.apply(Action::ApToggle);
-                    }
-                } else {
-                    if !f.ap.on {
-                        f.apply(Action::ApToggle);
-                    }
-                    if f.ap.on {
-                        s.ap_eng[i] = true;
-                    }
+            // FCU push-buttons: AP1 / AP2 / A/THR / APPR / LOC / EXPED / HDG-VS (TRK-FPA) / SPD-MACH / METRIC ALT
+            "ap1" | "ap2" | "a-thr" | "appr" | "loc" | "exped" | "hdg-vs" | "trk-fpa" | "spd-mach" | "metric_alt" => {
+                if let Some(b) = FcuButton::from_id(&id) {
+                    fcu::button(b, f, s);
                 }
             }
-            "a-thr" => s.athr_armed = !s.athr_armed,
-            "appr" => f.apply(Action::ApToggleAppr),
-            "loc" => {
-                s.loc_armed = !s.loc_armed;
-                if s.loc_armed && !f.ap.on {
-                    s.say("LOC armed - engage AP1 / AP2 to capture the localizer");
-                }
-            }
-            "exped" => {
-                s.exped = !s.exped;
-                f.ap.expedite = s.exped;
-                if s.exped {
-                    s.vs_mode = false;
-                }
-            }
-            "hdg-vs" | "trk-fpa" => s.trk_fpa = !s.trk_fpa,
-            "spd-mach" => s.spd_mach = !s.spd_mach,
-            "metric_alt" => s.metric = !s.metric,
             "fd1" | "fd2" => {
                 let e = &mut s.efis[(id == "fd2") as usize];
                 e.fd = !e.fd;
@@ -1410,7 +1455,7 @@ impl Deck {
                 self.groups[gi].pos = (s.efis[side].nav[i] + 1) as i32;
             }
             "iesi_btn_rst" => s.isis_std = !s.isis_std,
-            "master_warning" => s.master_warn = false,
+            "master_warning" => s.acknowledge_master_warning(),
             "master_caution" => s.master_caut = false,
             "chrono_btn" => {
                 s.chrono_run = !s.chrono_run;
@@ -1469,6 +1514,7 @@ impl Deck {
             self.mst_sm[i] += ((if s.master[i] { 0.0 } else { 1.0 }) - self.mst_sm[i]) * k;
         }
         self.rud_sm += (ctl.rud_trim as f32 - self.rud_sm) * (dt * 12.0).min(1.0);
+        self.animate_knobs(dt, s);
         let order: Vec<usize> = {
             let mut v: Vec<usize> = (0..self.groups.len()).collect();
             v.sort_by_key(|&i| !LEADER.iter().any(|l| l.1 == self.groups[i].id));
@@ -1513,21 +1559,22 @@ impl Deck {
                     let g = &self.groups[gi];
                     let knobby = kind == Kind::Knob || PUSHPULL.contains(&id.as_str());
                     if knobby {
-                        let n = g.steps as f32;
-                        let a = if n >= 40.0 { g.angle + g.pos as f32 * 0.26 } else if n >= 12.0 { (g.pos as f32 - (n - 1.0) / 2.0) * (4.71 / (n - 1.0)) } else { (g.pos as f32 - (n - 1.0) / 2.0) * if n <= 3.0 { 0.7 } else { 0.5 } };
-                        let extra = match id.as_str() {
-                            "hdg_sel" => (f.ap.hdg as f32).to_radians(),
-                            "alt-sel" => f.ap.alt_ft as f32 / 100.0 * 0.26,
-                            "spd-sel" => f.ap.spd as f32 * 0.26,
-                            _ => 0.0,
-                        };
                         let ax = self.axis_of(gi);
-                        rot_about(ax.pivot, ax.dir, a + extra)
+                        let g = &self.groups[gi];
+                        // glareshield knobs turn exactly as the pilot sees them: clockwise on screen whatever the axis direction
+                        // (a positive turn about an axis pointing at the pilot's eye is counter-clockwise from the seat)
+                        let sign = if cw_driven(&id) && ax.dir.dot(EYE_M - ax.pivot) > 0.0 { -1.0 } else { 1.0 };
+                        // push / pull travel rides on the panel normal (towards the pilot = pulled)
+                        Mat4::from_translation(g.nrm * g.slide) * rot_about(ax.pivot, ax.dir, sign * g.vis)
                     } else if kind == Kind::Switch {
                         let n = if SWITCH3.contains(&id.as_str()) || id.starts_with("audio_int_rad") { 3.0 } else { 2.0 };
                         let sg = self.lever_sign(gi);
                         let (pos, ax) = (self.groups[gi].pos as f32, self.axis_of(gi));
-                        rot_about(ax.pivot, ax.dir, sg * (pos - (n - 1.0) / 2.0) * if n == 2.0 { 0.8 } else { 0.42 })
+                        if id.starts_with("vor-adf") {
+                            rot_about(ax.pivot, ax.dir, self.groups[gi].vis)
+                        } else {
+                            rot_about(ax.pivot, ax.dir, sg * (pos - (n - 1.0) / 2.0) * if n == 2.0 { 0.8 } else { 0.42 })
+                        }
                     } else if kind == Kind::Guard {
                         let (pos, ax) = (g.pos, self.axis_of(gi));
                         rot_about(ax.pivot, ax.dir, if pos != 0 { 1.7 } else { 0.0 })
@@ -1548,6 +1595,47 @@ impl Deck {
                 xf = self.groups[*lead].xf * xf;
             }
             self.groups[gi].xf = xf;
+        }
+    }
+
+    /// State -> pose of every rotary control: re-sync the two/three-position EFIS switches with the systems state, then chase the
+    /// target angle / plunger travel with a critically damped-looking exponential (knobs never teleport).
+    fn animate_knobs(&mut self, dt: f32, s: &A320Systems) {
+        for (id, side, i) in [("vor-adf1", 0, 0), ("vor-adf2", 0, 1), ("vor-adf-1-right", 1, 0), ("vor-adf-2-right", 1, 1)] {
+            if let Some(&gi) = self.by_id.get(id) {
+                self.groups[gi].pos = (s.efis[side].nav[i] + 1) as i32;
+            }
+        }
+        for (id, side) in [("pfd_nd_xfr_sw", 0), ("pfd_nd_xfr_sw2", 1)] {
+            if let Some(&gi) = self.by_id.get(id) {
+                self.groups[gi].pos = s.efis[side].xfr as i32;
+            }
+        }
+        for (id, side) in [("qnh_cpt_sw", 0), ("qnh_fo_sw", 1)] {
+            if let Some(&gi) = self.by_id.get(id) {
+                self.groups[gi].pos = !s.efis[side].unit_in_hg as i32;
+            }
+        }
+        if let Some(&gi) = self.by_id.get("alt-sel-mode") {
+            self.groups[gi].pos = s.alt_step_1000 as i32;
+        }
+        let kr = (1.0 - (-dt * 26.0).exp()).clamp(0.0, 1.0);
+        let kp = (1.0 - (-dt * 30.0).exp()).clamp(0.0, 1.0);
+        for g in self.groups.iter_mut() {
+            let rotary = g.kind == Kind::Knob || PUSHPULL.contains(&g.id.as_str()) || (g.kind == Kind::Switch && g.id.starts_with("vor-adf"));
+            if !rotary {
+                continue;
+            }
+            let target = knob_target(g, s);
+            if g.vis.is_nan() {
+                g.vis = target;
+            } else {
+                g.vis += (target - g.vis) * kr;
+                if (target - g.vis).abs() < 1e-4 {
+                    g.vis = target;
+                }
+            }
+            g.slide += (plunger_target(g, s) - g.slide) * kp;
         }
     }
 
@@ -1585,10 +1673,36 @@ impl Deck {
         let amber = [1.0, 0.69, 0.0];
         let green = [0.25, 1.0, 0.38];
         let white = [0.94, 0.96, 1.0];
+        if let Some(name) = base.strip_prefix("fcu:") {
+            let d = fcu::flags(f, s);
+            return (fcu::legend_lit(name, &d).unwrap_or(false), white);
+        }
+        // MCDU annunciators: MSG (message waiting), RDY, FM1 / FM2 (the FMGC in use), FAIL / FM (never failed here)
+        if let Some(rest) = base.strip_prefix("mcdu_ann_") {
+            let side = rest.ends_with(".fo") as usize;
+            let m = &s.mcdu[side];
+            let (lit, col) = match rest.trim_end_matches(".cpt").trim_end_matches(".fo") {
+                "msg" => (m.has_msg(), white),
+                "rdy" => (m.powered && !m.has_msg(), green),
+                "fm1" => (m.powered && side == 0, green),
+                "fm2" => (m.powered && side == 1, green),
+                "fail" | "fm" => (false, amber),
+                _ => (false, white),
+            };
+            return (lit || (s.lamp_test > 0.0 && m.powered), col);
+        }
+        // ECP key lamps
+        if let Some(k) = EcpKey::from_id(base) {
+            return (s.ecp_lit(k), white);
+        }
+        if crate::ecp::page_of(base).is_some() || base == "ecam_all" {
+            return (s.ecp.lit(base), white);
+        }
         let lit = match base {
             "ap1" => (s.ap_eng[0] && f.ap.on, green),
             "ap2" => (s.ap_eng[1] && f.ap.on, green),
-            "a-thr" => (s.athr_armed, green),
+            // A/THR is lit while the autothrust is armed or the autopilot is flying the speed (cockpit.ts `ledOn`)
+            "a-thr" => (s.athr_armed || f.ap.on, green),
             "appr" => (f.ap.appr, green),
             "loc" => (s.loc_armed, green),
             "exped" => (s.exped, green),
@@ -1616,6 +1730,33 @@ impl Deck {
         (lit.0 || (s.lamp_test > 0.0 && matches!(base, "master_warning" | "master_caution")), lit.1)
     }
 
+    /// Atlas cell shown on each screen mesh (`self.screens` order). The ECAM / ND XFR knob routes the lower ECAM (SD) onto the
+    /// captain's (CAPT) or first officer's (F/O) navigation display.
+    pub fn screen_cells(&self, s: &A320Systems, out: &mut Vec<usize>) {
+        out.clear();
+        for sc in &self.screens {
+            out.push(match sc.node.as_str() {
+                "ND.screen" if s.switching[3] == 0 => CELL_SD,
+                "ND_R.screen" if s.switching[3] == 2 => CELL_SD,
+                _ => sc.cell,
+            });
+        }
+    }
+
+    /// Display-quad vertices for the given routing (same count / order as `GpuMesh::screen_v`, only the UVs differ).
+    pub fn screen_vertices(&self, cells: &[usize]) -> Vec<PanelV> {
+        let (mut v, mut idx) = (Vec::new(), Vec::new());
+        for (i, m) in self.glb.meshes.iter().enumerate() {
+            if self.hidden[i] || m.idx.is_empty() {
+                continue;
+            }
+            if let Some(&si) = self.screen_mesh.get(&i) {
+                self.bake_screen(m, cells.get(si).copied().unwrap_or(self.screens[si].cell), &mut v, &mut idx);
+            }
+        }
+        v
+    }
+
     /// Fill `out` (slot 0 = static geometry, then groups, then lamp nodes).
     pub fn slots(&self, s: &A320Systems, f: &Flight, out: &mut Vec<Slot>) {
         out.clear();
@@ -1636,7 +1777,10 @@ impl Deck {
                 None => self.led_lit(&l.base, s, f),
             };
             // legends keep their printed texture, lit ones glow; LED nodes are only visible when lit
-            let (mul, add) = if l.leg.is_some() {
+            let (mul, add) = if l.base.starts_with("fcu:") {
+                // FCU legend meshes keep their own material, they are simply shown / hidden
+                (if lit { [1.0; 4] } else { [0.0; 4] }, [0.0; 4])
+            } else if l.leg.is_some() {
                 (if lit { [1.0; 4] } else { [0.35, 0.35, 0.35, 1.0] }, if lit { [c[0] * 0.8, c[1] * 0.8, c[2] * 0.8, 0.0] } else { [0.0; 4] })
             } else {
                 ([c[0], c[1], c[2], if lit { 1.0 } else { 0.0 }], if lit { [c[0] * 0.7, c[1] * 0.7, c[2] * 0.7, 0.0] } else { [0.0; 4] })
@@ -1712,13 +1856,12 @@ impl Deck {
             v0 = v0.min(w);
             v1 = v1.max(w);
         }
-        let (cu, cv) = ((cell % 2) as f32 * 0.5, (cell / 2) as f32 * 0.5);
-        let e = 0.5 / ATLAS_SIZE as f32;
+        let [u0_c, v0_c, u1_c, v1_c] = cell_uv(cell);
         let base = v.len() as u32;
         for p in &pts {
             let (u, w) = (((*p - c0).dot(right) - u0) / (u1 - u0).max(1e-6), ((*p - c0).dot(up) - v0) / (v1 - v0).max(1e-6));
             let body = self.to_body.transform_point3(*p + n * 0.0015);
-            v.push(PanelV { pos: body.to_array(), uv: [cu + e + u * (0.5 - 2.0 * e), cv + e + (1.0 - w) * (0.5 - 2.0 * e)] });
+            v.push(PanelV { pos: body.to_array(), uv: [u0_c + u * (u1_c - u0_c), v0_c + (1.0 - w) * (v1_c - v0_c)] });
         }
         // wind triangles so they face the pilot after the model->body transform (the panel pipeline is double-sided anyway)
         idx.extend(m.idx.iter().map(|x| x + base));
@@ -1741,6 +1884,78 @@ impl Deck {
     }
 }
 
+/// Controls whose pose is a pure function of the systems state / click angle and which are rotated *clockwise as seen by the pilot*.
+fn cw_driven(id: &str) -> bool {
+    matches!(
+        id,
+        "spd-sel" | "hdg_sel" | "alt-sel" | "vs-sel" | "alt-sel-mode" | "qnh_cpt_knb" | "qnh_fo_knb" | "qnh_cpt_sw" | "qnh_fo_sw" | "iesi_baro_knb" | "nd_mode" | "nd_mode_fo" | "nd_range" | "nd_range_fo"
+            | "pfd_brt_cpt" | "pfd_brt_fo" | "brightness_nd_2_cpt" | "brightness_nd_2_fo" | "brightness_nd_1_cpt" | "brightness_nd_1_fo" | "fcu_integ_knb1" | "fcu_integ_knb2"
+            | "ecam_brt_upper" | "ecam_brt_lower" | "ecam_att_hdg" | "ecam_air_data" | "ecam_eis_dmc" | "ecam_nd_xfr"
+    )
+}
+
+/// Target rotation (radians) of a rotary control. For [`cw_driven`] controls it is clockwise-positive as seen by the pilot:
+/// * FCU window encoders / BARO knobs / ISIS baro: the accumulated click angle (32 detents per turn, independent of the value);
+/// * ALT 100 / 1000 ring and the EFIS hPa / inHg ring: two stops left / right;
+/// * ND MODE (LS-VOR-NAV-ARC-PLAN) and ND RANGE (10 .. 320): 45 deg per detent from the first stop;
+/// * brightness dimmers: 270 deg sweep, fully counter-clockwise = OFF.
+fn knob_target(g: &Group, s: &A320Systems) -> f32 {
+    let side = |a: &str| (g.id == a) as usize;
+    let sweep = |v: f32| (-135.0 + 270.0 * v.clamp(0.0, 1.0)).to_radians();
+    match g.id.as_str() {
+        "spd-sel" | "hdg_sel" | "alt-sel" | "vs-sel" | "qnh_cpt_knb" | "qnh_fo_knb" | "iesi_baro_knb" => g.angle,
+        "alt-sel-mode" => if s.alt_step_1000 { 0.45 } else { -0.45 },
+        "qnh_cpt_sw" | "qnh_fo_sw" => (if s.efis[side("qnh_fo_sw")].unit_in_hg { -40.0f32 } else { 40.0 }).to_radians(),
+        "nd_mode" | "nd_mode_fo" => (s.efis[side("nd_mode_fo")].nd_mode as f32 * 45.0).to_radians(),
+        "nd_range" | "nd_range_fo" => (s.efis[side("nd_range_fo")].nd_range as f32 * 45.0).to_radians(),
+        "pfd_brt_cpt" | "pfd_brt_fo" => sweep(s.bright.pfd[side("pfd_brt_fo")]),
+        "brightness_nd_2_cpt" | "brightness_nd_2_fo" => sweep(s.bright.nd[side("brightness_nd_2_fo")]),
+        "brightness_nd_1_cpt" | "brightness_nd_1_fo" => sweep(s.bright.nd_outer[side("brightness_nd_1_fo")]),
+        "fcu_integ_knb1" | "fcu_integ_knb2" => sweep((s.bright.fcu - 0.2) / 0.8),
+        "ecam_brt_upper" => sweep(s.bright.uecam),
+        "ecam_brt_lower" => sweep(s.bright.lecam),
+        "ecam_att_hdg" => (s.switching[0] as f32 - 1.0) * 0.785,
+        "ecam_air_data" => (s.switching[1] as f32 - 1.0) * 0.785,
+        "ecam_eis_dmc" => (s.switching[2] as f32 - 1.0) * 0.785,
+        "ecam_nd_xfr" => (s.switching[3] as f32 - 1.0) * 0.785,
+        // ADF (-1) / OFF (0) / VOR (+1) lever: positive turn about the manifest axis swings it towards ADF
+        id if id.starts_with("vor-adf") => {
+            let (side, i) = match id {
+                "vor-adf1" => (0, 0),
+                "vor-adf2" => (0, 1),
+                "vor-adf-1-right" => (1, 0),
+                _ => (1, 1),
+            };
+            -0.5 * s.efis[side].nav[i] as f32
+        }
+        _ => {
+            let n = g.steps as f32;
+            if n >= 40.0 {
+                g.angle + g.pos as f32 * 0.26
+            } else if n >= 12.0 {
+                (g.pos as f32 - (n - 1.0) / 2.0) * (4.71 / (n - 1.0))
+            } else {
+                (g.pos as f32 - (n - 1.0) / 2.0) * if n <= 3.0 { 0.7 } else { 0.5 }
+            }
+        }
+    }
+}
+
+/// Push / pull travel (metres along the panel normal, + = towards the pilot): a push-pull knob dips 2.5 mm when pushed and
+/// comes out 4 mm when pulled while the mouse is down; the EFIS BARO knob stays 4 mm out while STD is selected.
+fn plunger_target(g: &Group, s: &A320Systems) -> f32 {
+    if !PUSHPULL.contains(&g.id.as_str()) {
+        return 0.0;
+    }
+    let held = if g.plunge < 0.0 { -0.0025 } else if g.plunge > 0.0 { 0.004 } else { 0.0 };
+    let std_out = match g.id.as_str() {
+        "qnh_cpt_knb" => s.efis[0].std,
+        "qnh_fo_knb" => s.efis[1].std,
+        _ => false,
+    };
+    if held != 0.0 { held } else if std_out { 0.004 } else { 0.0 }
+}
+
 fn thr_angle(t: f64, reverse: bool) -> f32 {
     if reverse {
         -(0.17 + 0.18 * t.clamp(0.0, 1.0) as f32)
@@ -1750,17 +1965,19 @@ fn thr_angle(t: f64, reverse: bool) -> f32 {
 }
 
 fn is_mcdu_key(k: &str) -> bool {
-    const NAMED: [&str; 28] = [
-        "init", "f-pln", "f-pln2", "radnav", "fuel-pred", "prog", "perf", "data", "dir", "airport", "clr", "sp", "left", "right", "up", "down", "opt1", "opt2", "overfly", "+/-", "/", ".", "mcdu", "sec-fpln", "BRT", "DIM", "", "",
-    ];
-    if NAMED.contains(&k) {
-        return true;
-    }
-    if k.len() == 1 && k.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()) {
-        return true;
-    }
-    let b = k.as_bytes();
-    b.len() == 2 && (b[0] == b'L' || b[0] == b'R') && (b'1'..=b'6').contains(&b[1])
+    k == "atc_comm" || crate::mcdu::is_key_name(k)
+}
+
+/// Keys of the MCDU keyboard sit on a surface tilted ~10 deg towards the pilot (measured on the model: 1.6 cm rise over 9.4 cm).
+const MCDU_KEY_NORMAL: Vec3 = Vec3::new(0.17, 0.985, 0.0);
+
+/// Controls that spring back (only move while held) although the TS naming regex does not list them.
+fn momentary_extra(id: &str) -> bool {
+    matches!(id, "thr_l_button" | "thr_r_button" | "RudderTrimReset" | "chrono_reset" | "master_warning" | "master_caution" | "iesi_btn_rst" | "iesi_btn_bugs" | "iesi_btn_ls" | "iesi_btn_minus" | "iesi_btn_plus" | "clock_set" | "et_knob")
+        || crate::ecp::is_key(id)
+        || EcpKey::from_id(id).is_some()
+        || id.starts_with("C:")
+        || id.starts_with("F:")
 }
 
 fn panel_normal(c: Vec3) -> Vec3 {
@@ -1796,11 +2013,182 @@ fn switch_labels(id: &str) -> Option<&'static [&'static str]> {
     })
 }
 
-/// FCU read-outs shown over the glareshield windows (the model's own digit meshes are hidden).
-pub fn fcu_readouts(f: &Flight, s: &A320Systems) -> [(&'static str, String); 4] {
-    let spd = if s.spd_managed { "---".to_string() } else if s.spd_mach { format!("{:.2}", f.ap.spd / 661.5) } else { format!("{:03}", f.ap.spd.round() as i32) };
-    let hdg = if s.hdg_managed || f.ap.nav && f.ap.on { "---".to_string() } else { format!("{:03}", f.ap.hdg.round().rem_euclid(360.0) as i32) };
-    let alt = format!("{:05}", f.ap.alt_ft.round() as i32);
-    let vs = if s.vs_mode { format!("{:+05}", s.vs_target as i32) } else { "-----".to_string() };
-    [("spd.ind", spd), ("hdg.ind", hdg), ("alt.ind", alt), ("vs.ind", vs)]
+/// Centres (model frame, metres) of the four FCU windows and the two EFIS BARO windows on the glareshield panel plane
+/// (measured on the model, same numbers as `buildFcu` in `cockpit.ts`): `(x, y, z)` of the plane origin, panel normal.
+pub const FCU_PLANE_ORIGIN: Vec3 = Vec3::new(-0.3795, 0.505, 0.0);
+pub const FCU_NORMAL: Vec3 = Vec3::new(0.957, 0.289, 0.0);
+/// z (model frame) of the SPD, HDG, ALT and V/S windows.
+pub const FCU_WINDOW_Z: [f32; 4] = [0.0985, 0.0575, -0.0435, -0.0895];
+/// EFIS BARO windows: captain (z = 0.251) and first officer (z = -0.2397), size (m).
+pub const BARO_WINDOW: [(Vec3, [f32; 2]); 2] = [(Vec3::new(-0.3722, 0.4967, 0.251), [0.0306, 0.0136]), (Vec3::new(-0.3722, 0.4967, -0.2397), [0.0306, 0.0136])];
+/// Character height of the FCU digits (m): the strip is 17 mm high, digits fill 68 % of it.
+pub const FCU_DIGIT_H: f32 = 0.0116;
+
+/// Display unit brightness knob -> brightness value (0..1).
+pub fn brightness_of(id: &str, s: &A320Systems) -> Option<f32> {
+    Some(match id {
+        "ecam_brt_upper" => s.bright.uecam,
+        "ecam_brt_lower" => s.bright.lecam,
+        "pfd_brt_cpt" => s.bright.pfd[0],
+        "pfd_brt_fo" => s.bright.pfd[1],
+        "brightness_nd_2_cpt" => s.bright.nd[0],
+        "brightness_nd_2_fo" => s.bright.nd[1],
+        "brightness_nd_1_cpt" => s.bright.nd_outer[0],
+        "brightness_nd_1_fo" => s.bright.nd_outer[1],
+        _ => return None,
+    })
+}
+
+/// What a glareshield / pedestal control does on an EFIS side (`EfisFn` of `cockpit.ts`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum EfisFn {
+    Fd,
+    Ls,
+    Opt(NdOpt),
+    Mode,
+    Range,
+    Baro,
+    Unit,
+    Nav0,
+    Nav1,
+    Xfr,
+    Pfd,
+    Nd,
+    NdOuter,
+    Terr,
+}
+
+pub fn efis_fn(id: &str) -> Option<(usize, EfisFn)> {
+    use EfisFn::*;
+    Some(match id {
+        "fd1" => (0, Fd),
+        "fd2" => (1, Fd),
+        "ils" => (0, Ls),
+        "ils2" => (1, Ls),
+        "cstr" => (0, Opt(NdOpt::Cstr)),
+        "cstr.001" => (1, Opt(NdOpt::Cstr)),
+        "wpt" => (0, Opt(NdOpt::Wpt)),
+        "wpt.001" => (1, Opt(NdOpt::Wpt)),
+        "vord" => (0, Opt(NdOpt::Vord)),
+        "vord.001" => (1, Opt(NdOpt::Vord)),
+        "ndb" => (0, Opt(NdOpt::Ndb)),
+        "ndb.001" => (1, Opt(NdOpt::Ndb)),
+        "arpt" => (0, Opt(NdOpt::Arpt)),
+        "arpt.001" => (1, Opt(NdOpt::Arpt)),
+        "nd_mode" => (0, Mode),
+        "nd_mode_fo" => (1, Mode),
+        "nd_range" => (0, Range),
+        "nd_range_fo" => (1, Range),
+        "qnh_cpt_knb" => (0, Baro),
+        "qnh_fo_knb" => (1, Baro),
+        "qnh_cpt_sw" => (0, Unit),
+        "qnh_fo_sw" => (1, Unit),
+        "vor-adf1" => (0, Nav0),
+        "vor-adf2" => (0, Nav1),
+        "vor-adf-1-right" => (1, Nav0),
+        "vor-adf-2-right" => (1, Nav1),
+        "pfd_nd_xfr_sw" => (0, Xfr),
+        "pfd_nd_xfr_sw2" => (1, Xfr),
+        "pfd_brt_cpt" => (0, Pfd),
+        "pfd_brt_fo" => (1, Pfd),
+        "brightness_nd_2_cpt" => (0, Nd),
+        "brightness_nd_2_fo" => (1, Nd),
+        "brightness_nd_1_cpt" => (0, NdOuter),
+        "brightness_nd_1_fo" => (1, NdOuter),
+        "terr_on_nd_l" => (0, Terr),
+        "terr_on_nd_r" => (1, Terr),
+        _ => return None,
+    })
+}
+
+/// The ND MODE / RANGE meshes rest on their FIRST detent (LS / 10 NM): TS `KNOB_REST_DEG`, verified against a straight-on render.
+pub fn knob_rest_deg(id: &str) -> f32 {
+    match id {
+        "nd_mode" | "nd_mode_fo" | "nd_range" | "nd_range_fo" => -90.0,
+        _ => 0.0,
+    }
+}
+
+/// Lever direction of the ADF / OFF / VOR switches (positive turn about the manifest axis swings the lever to the captain's left = ADF).
+pub const NAV_SWITCH_SIGN: f32 = -1.0;
+
+/// Pointer angle of an EFIS rotary (degrees clockwise from 12 o'clock): detents 45 deg apart starting at -90, brightness knobs sweep
+/// 270 deg (-135 .. +135, fully anticlockwise = display OFF), the hPa / inHg ring tilts +-40 deg, the baro knob follows `baro_angle` (rad).
+pub fn efis_phi_deg(func: EfisFn, e: &Efis, br: &Bright, side: usize, baro_angle: f32) -> f32 {
+    match func {
+        EfisFn::Mode => -90.0 + e.nd_mode as f32 * 45.0,
+        EfisFn::Range => -90.0 + e.nd_range as f32 * 45.0,
+        EfisFn::Baro => baro_angle.to_degrees(),
+        EfisFn::Unit => if e.unit_in_hg { -40.0 } else { 40.0 },
+        EfisFn::Pfd => -135.0 + 270.0 * br.pfd[side],
+        EfisFn::Nd => -135.0 + 270.0 * br.nd[side],
+        EfisFn::NdOuter => -135.0 + 270.0 * br.nd_outer[side],
+        _ => 0.0,
+    }
+}
+
+/// Mesh rotation (rad) about the manifest axis for a pointer angle. A positive turn about an axis pointing at the pilot is
+/// counter-clockwise, so the clockwise pointer angle is mapped with the sign of the axis direction.
+pub fn efis_knob_theta(phi_deg: f32, rest_deg: f32, axis_dir_x: f32) -> f32 {
+    (if axis_dir_x > 0.0 { -1.0 } else { 1.0 }) * (phi_deg - rest_deg).to_radians()
+}
+
+/// Rotation (rad) of an ADF(-1) / OFF(0) / VOR(1) lever.
+pub fn nav_lever_theta(nav: i8) -> f32 {
+    NAV_SWITCH_SIGN * nav as f32 * 0.5
+}
+
+/// Hover read-out of an EFIS control (`efisText`).
+pub fn efis_text(func: EfisFn, side: usize, s: &A320Systems) -> String {
+    let e = &s.efis[side];
+    let b = |v: f32| if v < 0.03 { "OFF".to_string() } else { format!("{} %", (v * 100.0).round()) };
+    let onoff = |v: bool| if v { "ON" } else { "OFF" }.to_string();
+    let nav = |v: i8| ["ADF", "OFF", "VOR"][(v + 1).clamp(0, 2) as usize].to_string();
+    match func {
+        EfisFn::Fd => if e.fd { "ON - bars shown" } else { "OFF - bars removed" }.into(),
+        EfisFn::Ls => if e.ls { "ON - LOC/GS scales" } else { "OFF" }.into(),
+        EfisFn::Opt(k) => onoff(e.opt == Some(k)),
+        EfisFn::Mode => ND_MODE_NAMES[e.nd_mode.min(4)].into(),
+        EfisFn::Range => format!("{} NM", ND_RANGES[e.nd_range.min(5)]),
+        EfisFn::Baro => if e.std { "STD (pulled)".into() } else if e.unit_in_hg { format!("{:.2} inHg (QNH)", e.in_hg as f64 / 100.0) } else { format!("{} hPa (QNH)", e.hpa) },
+        EfisFn::Unit => if e.unit_in_hg { "inHg" } else { "hPa" }.into(),
+        EfisFn::Nav0 => nav(e.nav[0]),
+        EfisFn::Nav1 => nav(e.nav[1]),
+        EfisFn::Xfr => if e.xfr { "PFD / ND SWAPPED" } else { "NORM" }.into(),
+        EfisFn::Pfd => b(s.bright.pfd[side]),
+        EfisFn::Nd => b(s.bright.nd[side]),
+        EfisFn::NdOuter => b(s.bright.nd_outer[side]),
+        EfisFn::Terr => onoff(s.terr_on_nd[side]),
+    }
+}
+
+/// Mouse hint of an EFIS control (`efisHint`); empty = use the generic hint.
+pub fn efis_hint(func: EfisFn) -> &'static str {
+    match func {
+        EfisFn::Baro => "Wheel / drag = set pressure - left-click = PUSH (QNH) - right-click or Shift = PULL (STD)",
+        EfisFn::Unit => "Click or wheel = hPa / inHg",
+        EfisFn::Mode | EfisFn::Range => "Wheel / drag to rotate - click = next - right-click = previous",
+        EfisFn::Nav0 | EfisFn::Nav1 => "Click: OFF -> VOR -> ADF -> OFF - right-click reverses",
+        EfisFn::Pfd | EfisFn::Nd | EfisFn::NdOuter => "Wheel / drag to rotate - fully counter-clockwise = OFF",
+        _ => "",
+    }
+}
+
+/// Source-switching knobs on the pedestal (`SRC_KNOBS`): ATT HDG, AIR DATA, EIS DMC, ND XFR.
+pub fn is_src_knob(id: &str) -> bool {
+    matches!(id, "ecam_att_hdg" | "ecam_air_data" | "ecam_eis_dmc" | "ecam_nd_xfr")
+}
+
+/// Direction of a click on a 3-position source-switching knob: right-click reverses, the end stops bounce back, the middle
+/// continues in the direction it last moved (`g.angle` remembers it).
+pub fn src_click_dir(button: u8, pos: i32, last: f32) -> i32 {
+    if button == 2 || pos >= 2 {
+        -1
+    } else if pos <= 0 {
+        1
+    } else if last < 0.0 {
+        -1
+    } else {
+        1
+    }
 }

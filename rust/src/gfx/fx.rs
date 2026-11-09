@@ -5,7 +5,7 @@ use super::deck_gpu::{DeckGpu, DeckPipes};
 use super::geom::MeshBuilder;
 use super::ui::{self, Ui, MAX_UI_VERTS};
 use super::{buf_init, uniform_entry, ModelU, ScreenU, DEPTH_FORMAT};
-use crate::cockpit::{build_cockpit, build_screens, PanelV, ATLAS_SIZE};
+use crate::cockpit::{build_cockpit, build_screens, PanelV, ATLAS_H, ATLAS_W};
 use crate::game::Flight;
 use wgpu::util::DeviceExt;
 
@@ -121,7 +121,7 @@ impl Fx {
         // ---- display units: panel pipeline + render-to-texture atlas ----
         let disp_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("displays"),
-            size: wgpu::Extent3d { width: ATLAS_SIZE, height: ATLAS_SIZE, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d { width: ATLAS_W, height: ATLAS_H, depth_or_array_layers: 1 },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -182,7 +182,7 @@ impl Fx {
 
         // 2D batch that targets the atlas (own screen uniform = atlas size, shares the glyph atlas)
         let disp_screen = buf_init(device, "disp_screen", wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, std::mem::size_of::<ScreenU>());
-        queue.write_buffer(&disp_screen, 0, bytemuck::bytes_of(&ScreenU { size: [ATLAS_SIZE as f32, ATLAS_SIZE as f32], pad: [0.0; 2] }));
+        queue.write_buffer(&disp_screen, 0, bytemuck::bytes_of(&ScreenU { size: [ATLAS_W as f32, ATLAS_H as f32], pad: [0.0; 2] }));
         let disp_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("disp_ui"),
             layout: ui_bgl,
@@ -242,6 +242,12 @@ impl Fx {
         }
     }
 
+    pub fn set_deck_screens(&self, queue: &wgpu::Queue, verts: &[crate::cockpit::PanelV]) {
+        if let Some(d) = &self.deck {
+            d.update_screens(queue, verts);
+        }
+    }
+
     /// The depth texture is recreated on resize: rebind it for the cloud pass.
     pub fn rebind_depth(&mut self, device: &wgpu::Device, depth_view: &wgpu::TextureView) {
         self.depth_bg = device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("cloud_depth"), layout: &self.depth_bgl, entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(depth_view) }] });
@@ -256,9 +262,9 @@ impl Fx {
     }
 
     /// Draw the six display units into the atlas (their own render pass, before the main scene).
-    pub fn render_displays(&mut self, enc: &mut wgpu::CommandEncoder, queue: &wgpu::Queue, ui_pipe: &wgpu::RenderPipeline, f: &Flight, time: f64) {
-        self.disp_ui.begin(ATLAS_SIZE as f32, ATLAS_SIZE as f32);
-        super::displays::draw_atlas(&mut self.disp_ui, f, time);
+    pub fn render_displays(&mut self, enc: &mut wgpu::CommandEncoder, queue: &wgpu::Queue, ui_pipe: &wgpu::RenderPipeline, f: &Flight, sys: &crate::a320sys::A320Systems, time: f64) {
+        self.disp_ui.begin(ATLAS_W as f32, ATLAS_H as f32);
+        super::displays::draw_atlas(&mut self.disp_ui, f, sys, time);
         self.disp_ui.end();
         queue.write_buffer(&self.disp_vb, 0, bytemuck::cast_slice(&self.disp_ui.verts));
         let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -277,14 +283,14 @@ impl Fx {
         rp.set_pipeline(ui_pipe);
         rp.set_bind_group(0, &self.disp_bg, &[]);
         rp.set_vertex_buffer(0, self.disp_vb.slice(..));
-        let n = ATLAS_SIZE;
+        let (nw, nh) = (ATLAS_W, ATLAS_H);
         for c in self.disp_ui.cmds.iter().filter(|c| !c.globe) {
             match c.scissor {
                 Some([x, y, sw, sh]) => {
-                    let (x, y) = (x.min(n - 1), y.min(n - 1));
-                    rp.set_scissor_rect(x, y, sw.min(n - x), sh.min(n - y));
+                    let (x, y) = (x.min(nw - 1), y.min(nh - 1));
+                    rp.set_scissor_rect(x, y, sw.min(nw - x), sh.min(nh - y));
                 }
-                None => rp.set_scissor_rect(0, 0, n, n),
+                None => rp.set_scissor_rect(0, 0, nw, nh),
             }
             rp.draw(c.start..c.start + c.count, 0..1);
         }

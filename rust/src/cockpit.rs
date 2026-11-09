@@ -43,12 +43,37 @@ pub struct Screen {
 }
 
 /// Atlas cells: 0 = PFD, 1 = ND, 2 = E/WD, 3 = SD (each ATLAS_CELL px square in a 2x2 sheet).
+/// Atlas cells (each ATLAS_CELL px square in a 3 x 3 sheet):
+/// Row 0: 0 = CAPT PFD, 1 = CAPT ND, 2 = E/WD
+/// Row 1: 3 = SD, 4 = FO PFD, 5 = FO ND
+/// Row 2: 6 = CAPT MCDU, 7 = FO MCDU, 8 = spare
 pub const CELL_PFD: usize = 0;
 pub const CELL_ND: usize = 1;
 pub const CELL_EWD: usize = 2;
 pub const CELL_SD: usize = 3;
+pub const CELL_PFD2: usize = 4;
+pub const CELL_ND2: usize = 5;
+pub const CELL_MCDU1: usize = 6;
+pub const CELL_MCDU2: usize = 7;
 pub const ATLAS_CELL: u32 = 512;
-pub const ATLAS_SIZE: u32 = ATLAS_CELL * 2;
+pub const ATLAS_COLS: u32 = 3;
+pub const ATLAS_ROWS: u32 = 3;
+pub const ATLAS_W: u32 = ATLAS_CELL * ATLAS_COLS;
+pub const ATLAS_H: u32 = ATLAS_CELL * ATLAS_ROWS;
+pub const ATLAS_SIZE: u32 = ATLAS_W;
+
+/// Pixel origin of an atlas cell.
+pub fn cell_origin(cell: usize) -> [f32; 2] {
+    [(cell as u32 % ATLAS_COLS * ATLAS_CELL) as f32, (cell as u32 / ATLAS_COLS * ATLAS_CELL) as f32]
+}
+
+/// UV rectangle `[u0, v0, u1, v1]` of a cell, inset by half a texel so bilinear filtering never bleeds into the neighbouring cell.
+pub fn cell_uv(cell: usize) -> [f32; 4] {
+    let [ox, oy] = cell_origin(cell);
+    let (w, h) = (ATLAS_W as f32, ATLAS_H as f32);
+    let c = ATLAS_CELL as f32;
+    [(ox + 0.5) / w, (oy + 0.5) / h, (ox + c - 0.5) / w, (oy + c - 0.5) / h]
+}
 /// Main panel face plane (body z, m).
 pub const PANEL_Z: f32 = -13.80;
 
@@ -57,8 +82,8 @@ pub const SCREENS: [Screen; 6] = [
     Screen { name: "CPT ND", center: [-0.36, 1.07, PANEL_Z + 0.004], size: 0.215, cell: CELL_ND },
     Screen { name: "E/WD", center: [-0.02, 1.11, PANEL_Z + 0.004], size: 0.215, cell: CELL_EWD },
     Screen { name: "SD", center: [-0.02, 0.885, PANEL_Z + 0.004], size: 0.215, cell: CELL_SD },
-    Screen { name: "FO ND", center: [0.32, 1.07, PANEL_Z + 0.004], size: 0.215, cell: CELL_ND },
-    Screen { name: "FO PFD", center: [0.56, 1.07, PANEL_Z + 0.004], size: 0.215, cell: CELL_PFD },
+    Screen { name: "FO ND", center: [0.32, 1.07, PANEL_Z + 0.004], size: 0.215, cell: CELL_ND2 },
+    Screen { name: "FO PFD", center: [0.56, 1.07, PANEL_Z + 0.004], size: 0.215, cell: CELL_PFD2 },
 ];
 
 /// Textured display vertex (position in body frame + atlas uv).
@@ -76,10 +101,7 @@ pub fn build_screens(v: &mut Vec<PanelV>, idx: &mut Vec<u32>) {
     for s in SCREENS {
         let b = v.len() as u32;
         let h = s.size * 0.5;
-        let (cu, cv) = ((s.cell % 2) as f32 * 0.5, (s.cell / 2) as f32 * 0.5);
-        // inset by half a texel so bilinear filtering never bleeds into the neighbouring cell
-        let e = 0.5 / ATLAS_SIZE as f32;
-        let (u0, u1, v0, v1) = (cu + e, cu + 0.5 - e, cv + e, cv + 0.5 - e);
+        let [u0, v0, u1, v1] = cell_uv(s.cell);
         let [x, y, z] = s.center;
         v.push(PanelV { pos: [x - h, y + h, z], uv: [u0, v0] });
         v.push(PanelV { pos: [x + h, y + h, z], uv: [u1, v0] });
@@ -170,7 +192,7 @@ mod tests {
         assert_eq!((v.len(), i.len()), (24, 36));
         assert!(v.iter().all(|p| (0.0..=1.0).contains(&p.uv[0]) && (0.0..=1.0).contains(&p.uv[1])));
         // all four atlas cells are used and the screens are in front of the captain, below the glareshield
-        for cell in 0..4 {
+        for cell in [CELL_PFD, CELL_ND, CELL_EWD, CELL_SD, CELL_PFD2, CELL_ND2] {
             assert!(SCREENS.iter().any(|s| s.cell == cell));
         }
         for s in SCREENS {

@@ -3,7 +3,9 @@
 //! ray, hover tooltip + FCU read-out overlay.
 
 use crate::a320sys::A320Systems;
+use crate::cockpit::PanelV;
 use crate::deck::{self, Deck, GpuMesh, Hit, Hover, Slot};
+use crate::fcu;
 use crate::game::Flight;
 use crate::glb::{self, Image};
 use crate::gfx::ui::Ui;
@@ -43,6 +45,10 @@ pub struct DeckHost {
     pub last_toast: Option<(String, f64)>,
     /// the last load attempt failed (do not retry every frame; reset when the Marketplace downloads again)
     pub failed: bool,
+    /// atlas cell currently baked into the GPU display quads, per screen (ND XFR re-routes them)
+    cells_applied: Vec<usize>,
+    cells_tmp: Vec<usize>,
+    pending_screens: Option<Vec<PanelV>>,
 }
 
 impl DeckHost {
@@ -74,6 +80,9 @@ impl DeckHost {
             Ok(Ok(l)) => {
                 self.rx = None;
                 self.status = format!("HD flight deck ready: {} controls", l.deck.groups.len());
+                // the freshly baked quads use each screen's default cell
+                self.cells_applied = l.deck.screens.iter().map(|s| s.cell).collect();
+                self.pending_screens = None;
                 self.deck = Some(l.deck);
                 Some((l.mesh, l.images))
             }
@@ -109,6 +118,10 @@ impl DeckHost {
     /// Per-frame: systems, control poses, GPU slot data.
     pub fn update(&mut self, dt: f64, f: &mut Flight) {
         self.sys.update(dt, &mut f.fm);
+        self.sys.follow_qnh(f.weather.qnh);
+        self.sys.update_ecam(dt, f);
+        // FCU bookkeeping (pre-selection time-outs, AP channels, V/S + LOC capture, selected / managed mirror)
+        crate::fcu::sync(dt, f, &mut self.sys);
         if let Some(t) = self.sys.toast.take() {
             self.last_toast = Some((t, 3.0));
         }
@@ -118,10 +131,30 @@ impl DeckHost {
                 self.last_toast = None;
             }
         }
+        // pedestal units: MCDU CRTs (powered from the DC buses) and the ECAM control panel
+        let powered = self.sys.dc;
+        for m in self.sys.mcdu.iter_mut() {
+            m.update(dt as f32, powered, f);
+        }
+        if let Some(d) = &self.deck {
+            self.sys.ecp.set_all_held(d.ecp_hold);
+        }
+        self.sys.ecp.update(dt as f32);
         if let Some(d) = self.deck.as_mut() {
             d.update(dt as f32, f, &self.sys);
             d.slots(&self.sys, f, &mut self.slots);
+            // ND XFR: re-aim the display quads when the routing changed
+            d.screen_cells(&self.sys, &mut self.cells_tmp);
+            if self.cells_tmp != self.cells_applied {
+                self.pending_screens = Some(d.screen_vertices(&self.cells_tmp));
+                std::mem::swap(&mut self.cells_applied, &mut self.cells_tmp);
+            }
         }
+    }
+
+    /// New display-quad vertices to upload to the GPU (only after the screen routing changed).
+    pub fn take_screen_update(&mut self) -> Option<Vec<PanelV>> {
+        self.pending_screens.take()
     }
 
     /// Mouse interaction for one frame. `mouse` / `size` in physical pixels. Returns true when the cursor is over a control.
@@ -142,7 +175,7 @@ impl DeckHost {
             if left_down {
                 deck.drag(delta[0], delta[1], f, &mut self.sys);
             } else if !left_pressed && !right_pressed {
-                deck.release(f);
+                deck.release(f, &mut self.sys);
                 self.captured = false;
             }
         }
@@ -174,23 +207,54 @@ impl DeckHost {
     pub fn draw_overlay(&self, ui: &mut Ui, f: &Flight, cam: &Camera, mouse: [f32; 2]) {
         let (w, h) = (ui.w, ui.h);
         if let Some(deck) = &self.deck {
-            // FCU windows: digits anchored to the real window meshes of the glareshield
-            let Some(q) = Some(f.fm.quat) else { return };
             let vp = view_proj(cam, w / h);
-            for (node, text) in deck::fcu_readouts(f, &self.sys) {
-                if let Some((c, size)) = deck.node_body_box(node) {
-                    let world = f.fm.pos + q * glam::DVec3::new(c.x as f64, c.y as f64, c.z as f64);
-                    let rel = (world - cam.pos).as_vec3();
-                    let clip = vp * Vec4::new(rel.x, rel.y, rel.z, 1.0);
-                    if clip.w <= 0.0 {
-                        continue;
+            let q = f.fm.quat;
+            // model-space point -> (screen x, screen y, pixels per metre at that depth); None when behind the camera
+            let project = |p: Vec3| -> Option<(f32, f32, f32)> {
+                let b = deck.to_body.transform_point3(p);
+                let world = f.fm.pos + q * glam::DVec3::new(b.x as f64, b.y as f64, b.z as f64);
+                let rel = (world - cam.pos).as_vec3();
+                let clip = vp * Vec4::new(rel.x, rel.y, rel.z, 1.0);
+                if clip.w <= 0.0 {
+                    return None;
+                }
+                let ppm = 0.5 * h / (cam.fov_deg.to_radians() * 0.5).tan() / clip.w;
+                Some(((clip.x / clip.w * 0.5 + 0.5) * w, (0.5 - clip.y / clip.w * 0.5) * h, ppm))
+            };
+            let on_screen = |sx: f32, sy: f32| sx > 0.0 && sx < w && sy > 0.0 && sy < h;
+            let fcu = fcu::display(f, &self.sys);
+            if fcu.on && fcu.brightness > 0.05 {
+                // the four FCU windows: digits sit on the glareshield strip exactly where the model's seven-segment windows are
+                let alpha = 0.4 + 0.6 * fcu.brightness;
+                let texts = [fcu.spd.as_str(), fcu.hdg.as_str(), fcu.alt.as_str(), fcu.vs.as_str()];
+                for (k, text) in texts.iter().enumerate() {
+                    let c = deck::FCU_PLANE_ORIGIN + deck::FCU_NORMAL.normalize() * 0.0012 + Vec3::new(0.0, 0.0, deck::FCU_WINDOW_Z[k]);
+                    if let Some((sx, sy, ppm)) = project(c) {
+                        let px = (deck::FCU_DIGIT_H / 0.73 * ppm).clamp(5.0, 90.0);
+                        if px > 7.0 && on_screen(sx, sy) {
+                            let tw = Ui::text_width(px, text.chars().count());
+                            ui.text(sx - tw * 0.5, sy - px * 0.5, px, [1.0, 0.70, 0.24, alpha], text);
+                        }
                     }
-                    let (sx, sy) = ((clip.x / clip.w * 0.5 + 0.5) * w, (0.5 - clip.y / clip.w * 0.5) * h);
-                    // pixel height of the window ~ model height projected
-                    let px = (size.y.max(size.z).max(0.012) / clip.w * 0.5 * h / (cam.fov_deg.to_radians() * 0.5).tan()).clamp(5.0, 60.0);
-                    if px > 7.0 && sx > 0.0 && sx < w && sy > 0.0 && sy < h && self.sys.bright.fcu > 0.1 {
-                        let tw = Ui::text_width(px, text.chars().count());
-                        ui.text(sx - tw * 0.5, sy - px * 0.5, px, [1.0, 0.70, 0.12, 0.95], &text);
+                }
+            }
+            // EFIS BARO windows (blank in the model): QNH in hPa / inHg, or "Std"
+            if self.sys.dc {
+                for (side, (c, size)) in deck::BARO_WINDOW.iter().enumerate() {
+                    let e = &self.sys.efis[side];
+                    let text = if e.std {
+                        "Std".to_string()
+                    } else if e.unit_in_hg {
+                        format!("{:.2}", e.in_hg as f64 / 100.0)
+                    } else {
+                        format!("{:4}", e.hpa)
+                    };
+                    if let Some((sx, sy, ppm)) = project(*c) {
+                        let px = (size[1] * 0.62 / 0.73 * ppm).clamp(5.0, 70.0);
+                        if px > 7.0 && on_screen(sx, sy) {
+                            let tw = Ui::text_width(px, text.chars().count());
+                            ui.text(sx - tw * 0.5, sy - px * 0.35, px, [0.81, 0.91, 1.0, 0.95], &text);
+                        }
                     }
                 }
             }

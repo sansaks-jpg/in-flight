@@ -3,6 +3,7 @@
 
 pub mod deck_gpu;
 pub mod displays;
+pub mod efis;
 pub mod fx;
 pub mod geom;
 pub mod ui;
@@ -70,6 +71,7 @@ pub struct Camera {
 
 pub struct FrameParams<'a> {
     pub flight: Option<&'a Flight>,
+    pub sys: Option<&'a crate::a320sys::A320Systems>,
     pub cam: Camera,
     pub utc: f64,
     pub time: f32,
@@ -429,6 +431,10 @@ impl Renderer {
         self.fx.has_deck()
     }
 
+    pub fn set_deck_screens(&self, verts: &[crate::cockpit::PanelV]) {
+        self.fx.set_deck_screens(&self.queue, verts);
+    }
+
     pub fn set_deck_slots(&self, slots: &[crate::deck::Slot]) {
         self.fx.set_deck_slots(&self.queue, slots);
     }
@@ -639,7 +645,15 @@ impl Renderer {
         let t3 = Instant::now();
         let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
         if let (true, Some(f)) = (p.cockpit, p.flight) {
-            self.fx.render_displays(&mut enc, &self.queue, &self.ui_pipe, f, p.time as f64);
+            let dflt;
+            let sys = match p.sys {
+                Some(s) => s,
+                None => {
+                    dflt = crate::a320sys::A320Systems::default();
+                    &dflt
+                }
+            };
+            self.fx.render_displays(&mut enc, &self.queue, &self.ui_pipe, f, sys, p.time as f64);
         }
         {
             let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {

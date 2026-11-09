@@ -192,7 +192,7 @@ impl DeckGpu {
             })
             .collect();
         let opaque_n = mesh.draws.iter().take_while(|d| mesh.materials[d.mat as usize].mode != 2).count();
-        let scr_vb = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("deck_scr_vb"), contents: bytemuck::cast_slice(&mesh.screen_v), usage: wgpu::BufferUsages::VERTEX });
+        let scr_vb = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("deck_scr_vb"), contents: bytemuck::cast_slice(&mesh.screen_v), usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST });
         let scr_ib = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("deck_scr_ib"), contents: bytemuck::cast_slice(&mesh.screen_i), usage: wgpu::BufferUsages::INDEX });
         Self {
             vb,
@@ -207,6 +207,13 @@ impl DeckGpu {
             scr_n: mesh.screen_i.len() as u32,
             slot_count: mesh.slot_count,
             triangles: (mesh.indices.len() / 3) as u32,
+        }
+    }
+
+    /// Re-aim the display quads (same vertex count, new UVs) after the ECAM / ND XFR routing changed.
+    pub fn update_screens(&self, queue: &wgpu::Queue, verts: &[crate::cockpit::PanelV]) {
+        if !verts.is_empty() && (verts.len() * std::mem::size_of::<crate::cockpit::PanelV>()) as u64 == self.scr_vb.size() {
+            queue.write_buffer(&self.scr_vb, 0, bytemuck::cast_slice(verts));
         }
     }
 

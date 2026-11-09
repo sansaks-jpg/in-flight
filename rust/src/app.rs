@@ -748,6 +748,9 @@ impl App {
             }
             if self.host.ready() {
                 gpu.renderer.set_deck_slots(&self.host.slots);
+                if let Some(v) = self.host.take_screen_update() {
+                    gpu.renderer.set_deck_screens(&v);
+                }
             }
         } else {
             self.host.hover = None;
@@ -783,7 +786,7 @@ impl App {
         let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
         let info = HudInfo { fps: self.fps, frame_ms: self.frame_ms, sim_ms: self.sim_ms, view: self.view, cam_label: self.cam.label(self.view), paused: self.paused, help: self.help, time, panels3d: in_flight && self.view.is_interior() };
         let flight_ref = if in_flight { self.flight.as_ref() } else { None };
-        let fp = FrameParams { flight: flight_ref, cam, utc, time: time as f32, lat, lon, vis_km: vis, cloud_base: cb, cloud_cover: cc, show_aircraft: show_ac, cockpit: in_flight && self.view.is_interior() };
+        let fp = FrameParams { flight: flight_ref, sys: if in_flight { Some(&self.host.sys) } else { None }, cam, utc, time: time as f32, lat, lon, vis_km: vis, cloud_base: cb, cloud_cover: cc, show_aircraft: show_ac, cockpit: in_flight && self.view.is_interior() };
         let fps = self.fps;
         let help = self.help;
         let wall_utc = unix_now();

@@ -761,7 +761,15 @@ mod tests {
         let parent = TileKey::new(0, 8, 10, 10);
         let child = TileKey::new(0, 9, 20, 20);
         hub.ensure(parent, 0.0);
-        assert!(pump_all(&hub, 1, 3000));
+        // wait for the parent tile itself (ensure() also queues its ancestors, which may arrive first)
+        let mut up = Vec::new();
+        assert!(wait_for(
+            || {
+                hub.take_uploads(TILE_BYTES * 8, &mut up);
+                hub.ensure(parent, 0.0).map_or(false, |b| b.0 == parent)
+            },
+            3000
+        ));
         hub.ensure(child, 0.0); // first attempt: z9 -> 404
         assert!(wait_for(|| hub.is_failed(child), 3000));
         let n = f.calls.lock().unwrap().len();

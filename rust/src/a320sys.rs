@@ -7,6 +7,9 @@
 //! parts that act on the flight model (ENG MASTER -> starter, battery -> `ctl.battery`, autobrake, ground spoilers) are pushed
 //! into `FlightModel` there.
 
+use crate::ecam::{Ecam, EcamPage, EcpKey, Effects};
+use crate::game::Flight;
+use crate::gpws::Alert;
 use crate::physics::{EngState, FlightModel};
 use std::collections::HashMap;
 
@@ -112,6 +115,8 @@ pub struct A320Systems {
     pub isis_hpa: i32,
     pub isis_std: bool,
     pub terr_on_nd: [bool; 2],
+    /// the crew has turned / pulled / pushed this side's baro knob: the reference no longer follows the live QNH (ATIS)
+    pub baro_touched: [bool; 2],
     pub bright: Bright,
     pub lights: Lights,
     /// FCU
@@ -129,6 +134,13 @@ pub struct A320Systems {
     pub alt_managed: bool,
     pub ap_eng: [bool; 2],
     pub loc_armed: bool,
+    /// Pre-selection made while the window is managed (dashes): remaining display time in seconds + the pre-selected value
+    /// (FCOM DSC-22_10: 10 s for SPD, 45 s for HDG and V/S).
+    pub spd_pre: f64,
+    pub hdg_pre: f64,
+    pub vs_pre: f64,
+    pub spd_pre_val: f64,
+    pub hdg_pre_val: f64,
     pub switching: [u8; 4], // ATT HDG, AIR DATA, EIS DMC, ND XFR (0 CAPT3, 1 NORM, 2 F/O3)
     pub master_warn: bool,
     pub master_caut: bool,
@@ -136,8 +148,21 @@ pub struct A320Systems {
     pub chrono_t: f64,
     pub chrono_show: bool,
     pub lamp_test: f64,
+    /// ECAM control panel state machine (page keys, ALL / STS / CLR / RCL / EMER CANC / T.O CONFIG) - see `ecam.rs`
+    pub ecam: Ecam,
+    /// flight-phase SD page (used while no ECP key / failure selects one)
+    pub page_auto: EcamPage,
+    /// number of times the aural alert was cancelled (MASTER WARN / EMER CANC); an audio layer can poll this counter
+    pub aural_acks: u32,
+    prev_warns: Vec<&'static str>,
+    warn_buf: Vec<&'static str>,
+    cfg_buf: Vec<&'static str>,
     /// last human-readable notification (consumed by the UI toast)
     pub toast: Option<String>,
+    /// captain's / first officer's MCDU (pedestal keyboard + CRT)
+    pub mcdu: [crate::mcdu::Mcdu; 2],
+    /// ECAM control panel (pedestal): page selection, ALL / STS / CLR / RCL / EMER CANC / T.O. CONFIG
+    pub ecp: crate::ecp::Ecp,
 }
 
 impl Default for A320Systems {
@@ -178,6 +203,7 @@ impl Default for A320Systems {
             isis_hpa: 1013,
             isis_std: false,
             terr_on_nd: [false, false],
+            baro_touched: [false, false],
             bright: Bright { pfd: [0.8; 2], nd: [0.8; 2], nd_outer: [0.5; 2], uecam: 1.0, lecam: 1.0, integ: 1.0, fcu: 1.0, flood: 0.7 },
             lights: Lights { nav: true, strobe: false, land: false, beacon: true, seatbelt: false },
             athr_armed: false,
@@ -194,6 +220,11 @@ impl Default for A320Systems {
             alt_managed: true,
             ap_eng: [false, false],
             loc_armed: false,
+            spd_pre: 0.0,
+            hdg_pre: 0.0,
+            vs_pre: 0.0,
+            spd_pre_val: 0.0,
+            hdg_pre_val: 0.0,
             switching: [1, 1, 1, 1],
             master_warn: false,
             master_caut: false,
@@ -201,7 +232,15 @@ impl Default for A320Systems {
             chrono_t: 0.0,
             chrono_show: false,
             lamp_test: 0.0,
+            ecam: Ecam::default(),
+            page_auto: EcamPage::Door,
+            aural_acks: 0,
+            prev_warns: Vec::new(),
+            warn_buf: Vec::new(),
+            cfg_buf: Vec::new(),
             toast: None,
+            mcdu: [crate::mcdu::Mcdu::new(), crate::mcdu::Mcdu::new()],
+            ecp: crate::ecp::Ecp::default(),
         }
     }
 }
@@ -229,10 +268,11 @@ impl A320Systems {
     // ---------------- EFIS control panel logic (per side) ----------------
     /// Baro knob rotation: 1 hPa (or 0.01 inHg) per click. Ignored while STD is selected, like the real FCU.
     pub fn efis_baro_turn(&mut self, side: usize, dir: i32) {
-        let e = &mut self.efis[side];
-        if e.std {
+        if self.efis[side].std {
             return;
         }
+        self.baro_touched[side] = true;
+        let e = &mut self.efis[side];
         if e.unit_in_hg {
             e.in_hg = (e.in_hg + dir).clamp(2200, 3248);
         } else {
@@ -243,6 +283,7 @@ impl A320Systems {
     /// Pull = STD (1013 / 29.92), push = back to the selected QNH.
     pub fn efis_baro_set(&mut self, side: usize, std: bool) {
         self.efis[side].std = std;
+        self.baro_touched[side] = true;
     }
 
     /// Outer ring: hPa / inHg. The setting is converted so the same pressure stays selected.
@@ -251,6 +292,7 @@ impl A320Systems {
         if e.unit_in_hg == in_hg {
             return;
         }
+        self.baro_touched[side] = true;
         if in_hg {
             e.in_hg = (e.hpa as f64 / HPA_PER_INHG * 100.0).round() as i32;
         } else {
@@ -281,9 +323,189 @@ impl A320Systems {
         v > 0.04
     }
 
+    /// Display unit switched on? (`duOn` of the TS systems: a BRT knob turned fully anticlockwise switches the DU off.)
+    pub fn pfd_on(&self, side: usize) -> bool {
+        self.du_on(self.bright.pfd[side])
+    }
+    pub fn nd_on(&self, side: usize) -> bool {
+        self.du_on(self.bright.nd[side])
+    }
+
+    /// While the crew has not touched a baro knob the reference follows the live QNH, as if it had been set from the ATIS.
+    pub fn follow_qnh(&mut self, qnh: f64) {
+        if !(qnh > 800.0 && qnh < 1100.0) {
+            return;
+        }
+        for i in 0..2 {
+            if !self.baro_touched[i] {
+                self.efis[i].hpa = qnh.round() as i32;
+                self.efis[i].in_hg = (qnh / HPA_PER_INHG * 100.0).round() as i32;
+                self.efis[i].std = false;
+            }
+        }
+        self.isis_hpa = qnh.round() as i32;
+    }
+
+    /// What the baro-set altimeter reads for a true altitude (about 27 ft per hPa), `indicatedAlt` of the TS systems.
+    pub fn indicated_alt(&self, side: usize, true_ft: f64, qnh: f64) -> f64 {
+        true_ft + (self.baro_setting_hpa(side) - qnh) * 27.0
+    }
+
+    /// Baro reference text of the EFIS window / PFD (`baroText`): STD, 29.92 (inHg) or 1013 (hPa).
+    pub fn baro_text(&self, side: usize) -> String {
+        let e = &self.efis[side];
+        if e.std {
+            "STD".into()
+        } else if e.unit_in_hg {
+            format!("{:.2}", e.in_hg as f64 / 100.0)
+        } else {
+            format!("{}", e.hpa)
+        }
+    }
+
+    /// Selected ND range in NM.
+    pub fn nd_range_nm(&self, side: usize) -> u32 {
+        ND_RANGES[self.efis[side].nd_range.min(5)]
+    }
+
     /// MASTER WARN: lit while a red warning is active (stall / GPWS) and not acknowledged.
     pub fn warn_lit(&self) -> bool {
-        self.master_warn
+        self.master_warn || self.ecam.warn_pending()
+    }
+
+    // ---------------- ECAM control panel ----------------
+    fn apply_effects(&mut self, fx: Effects) {
+        if fx.clear_master_warn {
+            self.master_warn = false;
+        }
+        if fx.clear_master_caut {
+            self.master_caut = false;
+        }
+        if fx.ack_aural {
+            self.aural_acks += 1;
+        }
+        if let Some(t) = fx.toast {
+            self.say(t);
+        }
+    }
+
+    /// An ECP key went down (page keys act immediately, ALL / RCL keep running while held - release with [`A320Systems::ecp_up`]).
+    pub fn ecp_down(&mut self, key: EcpKey) {
+        let fx = self.ecam.down(key);
+        self.apply_effects(fx);
+    }
+
+    pub fn ecp_up(&mut self, key: EcpKey) {
+        self.ecam.up(key);
+    }
+
+    /// MASTER WARN pushed: light out, aural alert of the displayed red warnings cancelled (messages stay).
+    pub fn acknowledge_master_warning(&mut self) {
+        let fx = self.ecam.acknowledge_master();
+        self.apply_effects(fx);
+    }
+
+    /// Page the lower ECAM really shows (ECP selection > failure page > flight-phase page).
+    pub fn sd_page(&self) -> EcamPage {
+        self.ecam.shown_page()
+    }
+
+    /// Lamp of an ECP key / its white bar (needs DC power; every lamp lights during a lamp test).
+    pub fn ecp_lit(&self, key: EcpKey) -> bool {
+        self.dc && (self.lamp_test > 0.0 || self.ecam.lit(key))
+    }
+
+    /// Display unit ON / OFF-BRT knob: fully anticlockwise (<= 0.04) switches the unit off.
+    pub fn uecam_on(&self) -> bool {
+        self.du_on(self.bright.uecam)
+    }
+
+    pub fn lecam_on(&self) -> bool {
+        self.du_on(self.bright.lecam)
+    }
+
+    /// Alert texts the warning computer raises right now (E/WD message area).
+    pub fn collect_warnings(f: &Flight, out: &mut Vec<&'static str>) {
+        let fm = &f.fm;
+        out.clear();
+        let g = f.gpws_out.alert;
+        if g != Alert::None {
+            out.push(g.text());
+        }
+        if (fm.stall_warn || fm.stalled) && !out.contains(&"STALL") {
+            out.push("STALL");
+        }
+        let lim = fm.limits();
+        if lim.flap_over {
+            out.push("FLAP OVERSPEED");
+        }
+        if lim.gear_over {
+            out.push("L/G SPEED LIMIT");
+        }
+        if fm.fuel < 1500.0 {
+            out.push("FUEL LOW");
+        }
+        if fm.eng.iter().any(|e| e.state == EngState::Off) && fm.airborne_time > 5.0 {
+            out.push("ENG FAIL");
+        }
+        if fm.wow && fm.gs < 40.0 && fm.ctl.flaps_idx == 0 && fm.ctl.throttle > 0.6 {
+            out.push("CONFIG FLAPS");
+        }
+    }
+
+    /// CONFIG problems the T.O CONFIG test would report (FCOM DSC-31-15): flaps outside CONF 1+F..3, speedbrakes not retracted.
+    pub fn to_config_issues(fm: &FlightModel, out: &mut Vec<&'static str>) {
+        out.clear();
+        if fm.ctl.flaps_idx < 1 || fm.ctl.flaps_idx > 3 {
+            out.push("FLAPS NOT IN T.O CONFIG");
+        }
+        if fm.ctl.speedbrake > 0.03 {
+            out.push("SPD BRK NOT RETRACTED");
+        }
+    }
+
+    /// Flight-phase SD page (`autoPage` in `systems.ts`).
+    pub fn auto_page(&self, fm: &FlightModel) -> EcamPage {
+        let off = [fm.eng[0].state == EngState::Off, fm.eng[1].state == EngState::Off];
+        if self.apu_rpm > 5.0 && off[0] && off[1] {
+            return EcamPage::Apu;
+        }
+        if fm.eng.iter().any(|e| e.state == EngState::Starting) {
+            return EcamPage::Eng;
+        }
+        if fm.wow && fm.gs < 1.0 && !fm.any_engine_running() {
+            return EcamPage::Door;
+        }
+        if fm.wow && fm.gs < 40.0 && fm.ctl.throttle < 0.6 {
+            return EcamPage::Wheel;
+        }
+        if !fm.wow && fm.agl < 1500.0 * crate::geo::FT {
+            return EcamPage::Wheel;
+        }
+        EcamPage::Crz
+    }
+
+    /// Per-frame ECAM update: samples the warning computer, runs the ECP state machine, re-arms the master lights on a new alert.
+    pub fn update_ecam(&mut self, dt: f64, f: &Flight) {
+        let mut warns = std::mem::take(&mut self.warn_buf);
+        let mut cfg = std::mem::take(&mut self.cfg_buf);
+        Self::collect_warnings(f, &mut warns);
+        Self::to_config_issues(&f.fm, &mut cfg);
+        if warns != self.prev_warns {
+            if !warns.is_empty() {
+                self.master_caut = true;
+            }
+            if warns.iter().any(|w| !self.prev_warns.contains(w) && crate::ecam::is_red(w)) {
+                self.master_warn = true;
+            }
+            self.prev_warns.clear();
+            self.prev_warns.extend_from_slice(&warns);
+        }
+        self.page_auto = self.auto_page(&f.fm);
+        let any_engine = f.fm.any_engine_running() || f.fm.eng.iter().any(|e| e.state == EngState::Starting);
+        self.ecam.update(dt, &warns, &cfg, f.fm.wow, any_engine, self.page_auto);
+        self.warn_buf = warns;
+        self.cfg_buf = cfg;
     }
 
     // ---------------- engine / APU actions ----------------
@@ -382,8 +604,6 @@ impl A320Systems {
             self.chrono_t += dt;
         }
         self.lamp_test = (self.lamp_test - dt).max(0.0);
-        // master warning follows stall / GPWS-type alerts raised by the flight model
-        self.master_warn = fm.stall_warn || fm.stalled;
         // engines that were shut down while the master is on (e.g. FIRE pb) keep the lever consistent
         for i in 0..2 {
             if self.master[i] && fm.eng[i].state == EngState::Off && self.eng_mode != 2 && !run[i] && self.fire_out[i] {
@@ -448,5 +668,104 @@ mod tests {
         assert!(s.agent_disch[1]);
         s.discharge(4);
         assert!(!s.agent_disch[4], "APU agent needs the APU FIRE pb");
+    }
+
+    #[test]
+    fn baro_follows_qnh_until_touched() {
+        let mut s = A320Systems::default();
+        s.follow_qnh(1021.4);
+        assert_eq!(s.efis[0].hpa, 1021);
+        assert_eq!(s.efis[1].hpa, 1021);
+        assert_eq!(s.isis_hpa, 1021);
+        s.efis_baro_turn(0, 2); // CAPT touches the knob -> his setting is now his own
+        s.follow_qnh(1005.0);
+        assert_eq!(s.efis[0].hpa, 1023, "touched side keeps its setting");
+        assert_eq!(s.efis[1].hpa, 1005, "untouched side keeps following");
+        s.follow_qnh(500.0); // nonsense QNH is ignored
+        assert_eq!(s.efis[1].hpa, 1005);
+    }
+
+    #[test]
+    fn indicated_altitude_and_baro_text() {
+        let mut s = A320Systems::default();
+        s.efis[0].hpa = 1013;
+        assert!((s.indicated_alt(0, 5000.0, 1013.0) - 5000.0).abs() < 1e-9);
+        // QNH 1003 but 1013 set: altimeter over-reads by 27 ft / hPa
+        assert!((s.indicated_alt(0, 5000.0, 1003.0) - 5270.0).abs() < 1e-6);
+        assert_eq!(s.baro_text(0), "1013");
+        s.efis_baro_unit(0, true);
+        assert_eq!(s.baro_text(0), "29.91", "1013 hPa converts to 29.91 inHg (29.92 = 1013.25)");
+        s.efis_baro_set(0, true);
+        assert_eq!(s.baro_text(0), "STD");
+        assert!((s.indicated_alt(0, 5000.0, 1013.25) - 5000.0).abs() < 1e-6, "STD = 1013.25");
+    }
+
+    #[test]
+    fn display_units_switch_off_at_the_stop() {
+        let mut s = A320Systems::default();
+        assert!(s.pfd_on(0) && s.nd_on(1));
+        s.bright.pfd[0] = 0.0;
+        s.bright.nd[1] = 0.03;
+        assert!(!s.pfd_on(0) && s.pfd_on(1) && !s.nd_on(1));
+        assert_eq!(s.nd_range_nm(0), 80);
+    }
+
+    #[test]
+    fn ecp_keys_apply_their_effects_to_the_master_lights() {
+        use crate::airports::AirportDb;
+        let mut f = crate::game::Flight::new(&AirportDb::embedded(), "KSFO", "KOAK", 1_718_884_800.0).unwrap();
+        let mut s = A320Systems::default();
+        s.update_ecam(0.1, &f);
+        assert!(!s.master_caut && !s.warn_lit());
+        // a caution: MASTER CAUT lights, CLR (only cautions left) cancels it
+        f.fm.fuel = 500.0;
+        s.update_ecam(0.1, &f);
+        assert!(s.master_caut);
+        s.ecp_down(EcpKey::ClrL);
+        s.ecp_up(EcpKey::ClrL);
+        assert!(!s.master_caut);
+        // a warning: MASTER WARN lights until acknowledged, the message stays
+        f.fm.stalled = true;
+        s.update_ecam(0.1, &f);
+        assert!(s.warn_lit() && s.master_warn);
+        s.acknowledge_master_warning();
+        s.update_ecam(0.1, &f);
+        assert!(!s.warn_lit(), "aural + light cancelled");
+        assert_eq!(s.aural_acks, 1);
+        assert!(s.ecam.alerts().any(|a| a.text == "STALL"), "the message itself stays");
+        // lamps need DC power; lamp test lights everything
+        let key = EcpKey::Page(s.sd_page());
+        assert!(s.ecp_lit(key));
+        s.dc = false;
+        assert!(!s.ecp_lit(key));
+        s.dc = true;
+        s.lamp_test = 1.0;
+        assert!(s.ecp_lit(EcpKey::EmerCanc));
+    }
+
+    #[test]
+    fn automatic_sd_page_follows_the_flight_phase() {
+        use crate::airports::AirportDb;
+        let mut f = crate::game::Flight::new(&AirportDb::embedded(), "KSFO", "KOAK", 1_718_884_800.0).unwrap();
+        let mut s = A320Systems::default();
+        f.fm.eng[0].state = EngState::Off;
+        f.fm.eng[1].state = EngState::Off;
+        f.fm.wow = true;
+        f.fm.gs = 0.0;
+        assert_eq!(s.auto_page(&f.fm), EcamPage::Door);
+        s.apu_rpm = 50.0;
+        assert_eq!(s.auto_page(&f.fm), EcamPage::Apu);
+        f.fm.eng[0].state = EngState::Starting;
+        assert_eq!(s.auto_page(&f.fm), EcamPage::Eng);
+        f.fm.eng[0].state = EngState::Running;
+        f.fm.eng[1].state = EngState::Running;
+        f.fm.gs = 10.0;
+        f.fm.ctl.throttle = 0.1;
+        assert_eq!(s.auto_page(&f.fm), EcamPage::Wheel);
+        f.fm.wow = false;
+        f.fm.agl = 5000.0;
+        assert_eq!(s.auto_page(&f.fm), EcamPage::Crz);
+        f.fm.agl = 100.0;
+        assert_eq!(s.auto_page(&f.fm), EcamPage::Wheel);
     }
 }

@@ -64,6 +64,7 @@ fn main() {
             cloud_cover: f.weather.cloud_cover as f32,
             show_aircraft: third || menu.is_some(),
             cockpit: view.is_interior() && menu.is_none(),
+            sys: None,
         };
         let info = HudInfo { fps: 60.0, frame_ms: 16.6, sim_ms: 0.4, view, cam_label: cs.label(view), paused: false, help, time: t, panels3d: view.is_interior() };
         let t0 = Instant::now();
