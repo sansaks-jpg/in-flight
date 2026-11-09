@@ -181,7 +181,7 @@ impl Ui {
         let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
         let l = (dx * dx + dy * dy).sqrt().max(1e-4);
         let (nx, ny) = (-dy / l * th * 0.5, dx / l * th * 0.5);
-        self.quad([[a[0] + nx, a[0] + ny], [b[0] + nx, b[0] + ny], [b[0] - nx, b[0] - ny], [a[0] - nx, a[1] - ny]], col);
+        self.quad([[a[0] + nx, a[1] + ny], [b[0] + nx, b[1] + ny], [b[0] - nx, b[1] - ny], [a[0] - nx, a[1] - ny]], col);
     }
     pub fn circle(&mut self, c: [f32; 2], r: f32, col: Col) {
         for k in 0..16 {
@@ -840,4 +840,20 @@ pub fn draw_menu(ui: &mut Ui, m: &MenuState, time: f64, fps: f32) {
     tf!(ui, w * 0.5, y0 + base * 20.0, base * 0.9, C_GREY, 1, "presets: F2 KSFO>KOAK  F3 KLAX>KSAN  F4 EGLL>EGKK  F5 KJFK>KEWR  F6 EDDF>EDDM");
     tf!(ui, w * 0.5, y0 + base * 21.4, base * 0.9, C_GREY, 1, "F7 KSEA>KPDX  F8 LFPG>LFPO  F9 YSSY>YMML  [F1] controls  [ESC] quit");
     tf!(ui, w - 10.0, h - base * 1.6, base * 0.9, C_GREY, 2, "{:.0} FPS", fps);
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ui_line_quad_vertices() {
+        let mut ui = Ui::new();
+        ui.line([10.0, 10.0], [110.0, 10.0], 4.0, C_WHITE);
+        assert_eq!(ui.verts.len(), 6);
+        for v in &ui.verts {
+            assert!(v.pos[1] >= 8.0 && v.pos[1] <= 12.0, "y coordinate {} outside expected bounds [8, 12]", v.pos[1]);
+        }
+    }
 }

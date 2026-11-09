@@ -9,16 +9,16 @@ use crate::geo::*;
 use crate::ui::{self as pre_ui, screens, Input, Key, Outcome, PreFlight};
 use crate::gfx::ui::{self, HudInfo, View};
 use crate::gfx::{Camera, FrameParams, Renderer};
-use glam::{DQuat, DVec3, Vec3};
+use glam::{DQuat, DVec3, Quat, Vec3};
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
-use winit::window::{Fullscreen, Window, WindowId};
+use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
 
 #[derive(Clone, Debug)]
 pub struct Options {
@@ -40,6 +40,38 @@ pub use crate::cockpit::CamState;
 /// Camera for `view` (see `cockpit::rig`).
 pub fn make_camera(f: &Flight, view: View, cs: &mut CamState, dt: f64, orbit: Option<f64>) -> (Camera, bool) {
     crate::cockpit::rig(f, view, cs, dt, orbit)
+}
+
+// ---------------------------------------------------------------- camera control tuning
+
+/// Head-look (cockpit / panel / wing / tower) in degrees per pixel (or per raw mouse count) of drag.
+const LOOK_DEG_PER_PX: f64 = 0.14;
+/// Exterior orbit (chase) in degrees per pixel of drag.
+const ORBIT_DEG_PER_PX: f64 = 0.28;
+/// Numpad look speed expressed as an equivalent drag speed (px / s).
+const KEY_LOOK_PX_PER_S: f64 = 650.0;
+
+/// Mouse-drag / numpad look in *screen space* (dx right, dy down), interpreted per view:
+/// * Chase: free orbit around the aircraft - the full 360 degrees (yaw wraps, it is NOT limited by neck limits),
+///   dragging down raises the camera.
+/// * Cockpit / Panel / Wing / Tower: head-look with the real neck limits (drag right = look right, drag down = look down).
+fn drag_look(cam: &mut CamState, view: View, dx: f64, dy: f64) {
+    match view {
+        View::Chase => {
+            cam.head.yaw = wrap180(cam.head.yaw + dx * ORBIT_DEG_PER_PX);
+            cam.head.pitch = clamp(cam.head.pitch + dy * ORBIT_DEG_PER_PX, -70.0, 70.0);
+        }
+        _ => cam.head.apply(1.0, dx * LOOK_DEG_PER_PX, -dy * LOOK_DEG_PER_PX, 0.0),
+    }
+}
+
+/// Zoom by `notches` wheel notches (positive = zoom in): chase changes the orbit distance, every other view changes the
+/// field of view (cockpit / wing through `HeadLook::zoom`, tower through the same factor applied in `App::redraw`).
+fn zoom_view(cam: &mut CamState, view: View, notches: f64) {
+    match view {
+        View::Chase => cam.dist = clamp(cam.dist * (1.0 - notches * 0.08), 0.35, 6.0),
+        _ => cam.head.apply(1.0, 0.0, 0.0, notches * 0.12),
+    }
 }
 
 struct Gpu {
@@ -97,6 +129,14 @@ pub struct App {
     prev_right: bool,
     /// departure airport whose ground tiles were last queued for disk-cache warm-up
     prefetched: String,
+    /// raw (device) mouse motion accumulated since the last frame: keeps look / orbit alive at the screen edge
+    raw_delta: [f32; 2],
+    /// active camera drag: `Some(true)` = started with the right button, `Some(false)` = with the left button
+    look_btn: Option<bool>,
+    /// cursor is currently confined + hidden for a camera drag
+    grabbed: bool,
+    /// the cursor was over an interactive deck control at the end of the last frame
+    over_ctl: bool,
 }
 
 
@@ -157,6 +197,10 @@ impl App {
             host: DeckHost::default(),
             prev_right: false,
             prefetched: String::new(),
+            raw_delta: [0.0, 0.0],
+            look_btn: None,
+            grabbed: false,
+            over_ctl: false,
         }
     }
 
@@ -177,6 +221,8 @@ impl App {
                 self.logged = false;
                 self.cam = CamState { cockpit_fov: self.pre.settings.fov, ..CamState::default() };
                 self.cam.yaw = f.fm.heading.to_radians();
+                self.look_btn = None;
+                self.over_ctl = false;
                 if self.opts.autostart {
                     f.apply(Action::ApAutoTakeoff);
                 }
@@ -224,6 +270,7 @@ impl App {
     fn return_to_menu(&mut self) {
         self.flight = None;
         self.mode = Mode::Pre;
+        self.look_btn = None;
         self.pre.goto(pre_ui::Screen::Menu);
     }
 
@@ -244,23 +291,112 @@ impl App {
         let format = caps.formats.iter().copied().find(|f| f.is_srgb()).unwrap_or(caps.formats[0]);
         let want = if self.opts.uncapped { [wgpu::PresentMode::Immediate, wgpu::PresentMode::Mailbox] } else { [wgpu::PresentMode::Fifo, wgpu::PresentMode::Fifo] };
         let present_mode = want.into_iter().find(|m| caps.present_modes.contains(m)).unwrap_or(wgpu::PresentMode::Fifo);
+        // Several passes (sky, globe tiles, clouds, UI) write non-1.0 alpha. On Windows the first advertised alpha mode can be
+        // a pre/post-multiplied one, which composites the window with the desktop (see-through / smeared output). Always
+        // prefer an opaque swap-chain.
+        let alpha_mode = if caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::Opaque) { wgpu::CompositeAlphaMode::Opaque } else { caps.alpha_modes[0] };
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
             width: size.width.max(1),
             height: size.height.max(1),
             present_mode,
-            alpha_mode: caps.alpha_modes[0],
+            alpha_mode,
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
             color_space: wgpu::SurfaceColorSpace::Auto,
         };
         surface.configure(&device, &config);
         let renderer = Renderer::new(device, queue, format, config.width, config.height);
-        println!("GPU: {} ({:?}), present mode {:?}, format {:?}", info.name, info.backend, present_mode, format);
+        println!("GPU: {} ({:?}), present mode {:?}, alpha {:?}, format {:?}", info.name, info.backend, present_mode, alpha_mode, format);
         self.gpu = Some(Gpu { surface, config, renderer, adapter_name: info.name });
     }
 
+    /// Keeps the swap-chain, the depth buffer and the UI screen uniform in step with the real window size. `Resized` can be
+    /// missed or coalesced on Windows (maximise, DPI change, monitor switch); a stale surface presents a stretched frame.
+    fn sync_surface(&mut self) {
+        let Some(win) = self.window.as_ref() else { return };
+        let s = win.inner_size();
+        if s.width == 0 || s.height == 0 {
+            return;
+        }
+        if let Some(g) = self.gpu.as_mut() {
+            if g.config.width != s.width || g.config.height != s.height {
+                g.config.width = s.width;
+                g.config.height = s.height;
+                g.surface.configure(&g.renderer.device, &g.config);
+                g.renderer.resize(s.width, s.height);
+            }
+        }
+    }
+
+    /// Confines + hides the cursor while a camera drag is active (so the drag never stalls at the window edge).
+    fn set_look_grab(&mut self, on: bool) {
+        if self.grabbed == on {
+            return;
+        }
+        self.grabbed = on;
+        if let Some(w) = &self.window {
+            if on {
+                let _ = w.set_cursor_grab(CursorGrabMode::Confined).or_else(|_| w.set_cursor_grab(CursorGrabMode::Locked));
+                w.set_cursor_visible(false);
+            } else {
+                let _ = w.set_cursor_grab(CursorGrabMode::None);
+                w.set_cursor_visible(true);
+            }
+        }
+    }
+
+    /// Camera input for one frame - runs BEFORE the camera rig is evaluated so the view follows the mouse with no frame lag.
+    /// * left or right drag starts a look / orbit (interior: only when the press is not on a flight-deck control)
+    /// * numpad 4 6 8 2 look, 5 centre, + / - zoom (the controls advertised in F1)
+    fn update_look(&mut self, dt: f64) {
+        let raw = std::mem::take(&mut self.raw_delta);
+        if !(matches!(self.mode, Mode::Flight) && self.flight.is_some()) {
+            self.look_btn = None;
+            self.set_look_grab(false);
+            return;
+        }
+        // ---- keyboard look / zoom ----
+        let (nl, nr, nu, nd) = (self.keys.contains(&KeyCode::Numpad4), self.keys.contains(&KeyCode::Numpad6), self.keys.contains(&KeyCode::Numpad8), self.keys.contains(&KeyCode::Numpad2));
+        let (kx, ky) = ((nr as i32 - nl as i32) as f64, (nd as i32 - nu as i32) as f64);
+        if kx != 0.0 || ky != 0.0 {
+            drag_look(&mut self.cam, self.view, kx * KEY_LOOK_PX_PER_S * dt, ky * KEY_LOOK_PX_PER_S * dt);
+        }
+        if self.keys.contains(&KeyCode::Numpad5) {
+            self.cam.head.reset();
+        }
+        let (zin, zout) = (self.keys.contains(&KeyCode::NumpadAdd), self.keys.contains(&KeyCode::NumpadSubtract));
+        if zin || zout {
+            zoom_view(&mut self.cam, self.view, (zin as i32 - zout as i32) as f64 * 6.0 * dt);
+        }
+
+        // ---- mouse drag ----
+        let right_pressed = self.inp.right_down && !self.prev_right;
+        let left_pressed = self.inp.pressed;
+        let mut started = false;
+        if self.look_btn.is_none() && (left_pressed || right_pressed) {
+            // on the flight deck a press on a control belongs to the control, anywhere else it starts a look
+            let blocked = self.view.is_interior() && (self.over_ctl || self.host.captured);
+            if !blocked {
+                self.look_btn = Some(!left_pressed);
+                started = true;
+            }
+        }
+        if let Some(right) = self.look_btn {
+            let held = if right { self.inp.right_down } else { self.inp.down };
+            if !held {
+                self.look_btn = None;
+            } else if !started {
+                // raw device motion keeps working when the cursor is pinned at the edge of the window / screen;
+                // fall back to the cursor delta where raw input is unavailable (remote desktop, some VMs)
+                let d = if raw != [0.0, 0.0] { raw } else { self.inp.delta };
+                drag_look(&mut self.cam, self.view, d[0] as f64, d[1] as f64);
+            }
+        }
+        let on = self.look_btn.is_some();
+        self.set_look_grab(on);
+    }
 
     fn key_pressed(&mut self, el: &ActiveEventLoop, code: KeyCode) {
         // window-level shortcuts available everywhere
@@ -305,6 +441,7 @@ impl App {
                         self.view = self.view.next();
                         self.cam.spot = None;
                         self.cam.head.reset();
+                        self.look_btn = None;
                     }
                     KeyCode::KeyG => f.apply(Action::ToggleGear),
                     KeyCode::KeyF => f.apply(Action::FlapsUp),
@@ -364,12 +501,25 @@ impl App {
     }
 
     fn redraw(&mut self, el: &ActiveEventLoop) {
+        // minimised (0x0 client area): nothing to draw, and do not spin the CPU at 100 %
+        if let Some(w) = &self.window {
+            let s = w.inner_size();
+            if s.width == 0 || s.height == 0 {
+                self.last = Instant::now();
+                self.inp.end_frame();
+                std::thread::sleep(Duration::from_millis(16));
+                return;
+            }
+        }
+        self.sync_surface();
+
         let now = Instant::now();
         let dt = (now - self.last).as_secs_f64().min(0.25);
         self.last = now;
         self.frame_ms += (dt as f32 * 1000.0 - self.frame_ms) * 0.05;
         self.fps = 1000.0 / self.frame_ms.max(0.01);
         self.update_input(dt);
+        self.update_look(dt);
         self.service_addons();
 
         // ---- warm the tile disk cache around a newly chosen departure airport (idle-priority, never blocks) ----
@@ -426,7 +576,7 @@ impl App {
         let Some(gpu) = self.gpu.as_mut() else { return };
         let time = self.start.elapsed().as_secs_f64();
         let in_flight = matches!(self.mode, Mode::Flight);
-        let (cam, show_ac, params_data) = match (&self.flight, in_flight) {
+        let (mut cam, show_ac, params_data) = match (&self.flight, in_flight) {
             (Some(f), true) => {
                 let (cam, third) = make_camera(f, self.view, &mut self.cam, dt, None);
                 (cam, third, (f.utc(), f.lat, f.lon, f.weather.vis_km as f32, f.weather.cloud_base_m as f32, f.weather.cloud_cover as f32))
@@ -434,9 +584,19 @@ impl App {
             // pre-flight screens paint their own opaque background; the 3D pass only needs a harmless sky camera
             _ => (Camera { pos: DVec3::new(0.0, 100.0, 0.0), fwd: Vec3::new(0.0, 0.1, -1.0).normalize(), up: Vec3::Y, fov_deg: 60.0, near: 0.5 }, false, (unix_now(), 0.0, 0.0, 30.0f32, 3000.0f32, 0.0f32)),
         };
+        // Tower: the rig re-aims at the aircraft every frame, so the pilot's look offset + zoom are applied on top of it
+        if in_flight && self.view == View::Tower {
+            let h = self.cam.head;
+            let right = cam.fwd.cross(cam.up).normalize_or_zero();
+            if (h.yaw != 0.0 || h.pitch != 0.0) && right.length_squared() > 1e-6 {
+                let q = Quat::from_axis_angle(Vec3::Y, (-h.yaw).to_radians() as f32) * Quat::from_axis_angle(right, h.pitch.to_radians() as f32);
+                cam.fwd = (q * cam.fwd).normalize();
+            }
+            cam.fov_deg = (cam.fov_deg / h.zoom as f32).clamp(3.0, 70.0);
+        }
         let (utc, lat, lon, vis, cb, cc) = params_data;
 
-        // ---- interactive flight deck: cursor picking, press / drag / wheel, free-look on the right button ----
+        // ---- interactive flight deck: cursor picking, press / drag / wheel (look gestures: see `update_look`) ----
         let interior = in_flight && self.view.is_interior();
         let cam_copy = Camera { pos: cam.pos, fwd: cam.fwd, up: cam.up, fov_deg: cam.fov_deg, near: cam.near };
         let deck_active = interior && self.host.ready();
@@ -446,9 +606,12 @@ impl App {
             let size = gpu.config.width as f32;
             let size = (size, gpu.config.height as f32);
             let over = self.host.mouse(f, &cam_copy, self.inp.mouse, size, self.inp.pressed, self.inp.down, right_pressed, self.inp.delta, shift);
-            if self.inp.right_down && !self.host.captured && !(over && right_pressed) {
-                self.cam.head.apply(1.0, self.inp.delta[0] as f64 * 0.12, -(self.inp.delta[1] as f64) * 0.12, 0.0);
+            self.over_ctl = over;
+            if self.look_btn.is_some() {
+                // no tooltip while the head is turning
+                self.host.hover = None;
             }
+            // wheel left over by the deck (nothing under the cursor to turn) zooms the view
             if self.host.wheel != 0.0 {
                 self.cam.head.apply(1.0, 0.0, 0.0, self.host.wheel as f64 * 0.12);
                 self.host.wheel = 0.0;
@@ -459,17 +622,32 @@ impl App {
         } else {
             self.host.hover = None;
             self.host.captured = false;
+            self.host.wheel = 0.0;
+            self.over_ctl = false;
         }
         self.prev_right = self.inp.right_down;
 
         // ---- acquire frame ----
+        let mut reconfigure = false;
         let frame = match gpu.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
+            wgpu::CurrentSurfaceTexture::Success(t) => t,
+            // still presentable, but the surface no longer matches the window: reconfigure after presenting
+            wgpu::CurrentSurfaceTexture::Suboptimal(t) => {
+                reconfigure = true;
+                t
+            }
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
                 gpu.surface.configure(&gpu.renderer.device, &gpu.config);
+                // a skipped frame must not leave a huge pointer delta / wheel burst for the next one
+                self.inp.delta = [0.0, 0.0];
+                self.inp.wheel = 0.0;
                 return;
             }
-            _ => return,
+            _ => {
+                self.inp.delta = [0.0, 0.0];
+                self.inp.wheel = 0.0;
+                return;
+            }
         };
         let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
         let info = HudInfo { fps: self.fps, frame_ms: self.frame_ms, sim_ms: self.sim_ms, view: self.view, paused: self.paused, help: self.help, time, panels3d: in_flight && self.view.is_interior() };
@@ -514,6 +692,9 @@ impl App {
             });
         }
         gpu.renderer.queue.present(frame);
+        if reconfigure {
+            gpu.surface.configure(&gpu.renderer.device, &gpu.config);
+        }
         let stats = gpu.renderer.stats;
         self.inp.end_frame();
 
@@ -559,6 +740,14 @@ impl ApplicationHandler for App {
         }
     }
 
+    /// Raw mouse motion (not clipped by the window / screen edge, no pointer acceleration): drives camera drags.
+    fn device_event(&mut self, _el: &ActiveEventLoop, _id: DeviceId, event: DeviceEvent) {
+        if let DeviceEvent::MouseMotion { delta } = event {
+            self.raw_delta[0] += delta.0 as f32;
+            self.raw_delta[1] += delta.1 as f32;
+        }
+    }
+
     fn window_event(&mut self, el: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => el.exit(),
@@ -571,6 +760,20 @@ impl ApplicationHandler for App {
                         g.renderer.resize(s.width, s.height);
                     }
                 }
+            }
+            // focus lost (alt-tab, window switch): the matching key / button release events never arrive, which left
+            // keys, mouse buttons and a camera drag "stuck" after coming back
+            WindowEvent::Focused(false) => {
+                self.keys.clear();
+                self.inp.down = false;
+                self.inp.pressed = false;
+                self.inp.released = false;
+                self.inp.right_down = false;
+                self.prev_right = false;
+                self.last_mouse = None;
+                self.look_btn = None;
+                self.raw_delta = [0.0, 0.0];
+                self.set_look_grab(false);
             }
             WindowEvent::CursorMoved { position, .. } => {
                 let p = [position.x as f32, position.y as f32];
@@ -601,15 +804,15 @@ impl ApplicationHandler for App {
                             if matches!(self.mode, Mode::Pre) {
                                 if let Some(k) = map_key(code) {
                                     self.inp.keys.push(k);
-                                } else if let Some(n) = match code {
-                                    KeyCode::F2 => Some(2u8),
-                                    _ => None,
-                                } {
-                                    let _ = n;
                                 }
                                 if let Some(t) = event.text.as_ref() {
-                                    if !self.keys.contains(&KeyCode::ControlLeft) {
-                                        self.inp.typed.push_str(t.as_str());
+                                    let ctrl = self.keys.contains(&KeyCode::ControlLeft) || self.keys.contains(&KeyCode::ControlRight);
+                                    if !ctrl {
+                                        // Enter / Tab / Esc / Backspace also carry a control character in `text`;
+                                        // those are handled as keys and must not end up in the text fields (drawn as '?')
+                                        for ch in t.chars().filter(|c| !c.is_control()) {
+                                            self.inp.typed.push(ch);
+                                        }
                                     }
                                 }
                                 if !event.repeat && code == KeyCode::F11 {
@@ -632,9 +835,11 @@ impl ApplicationHandler for App {
                 };
                 if matches!(self.mode, Mode::Flight) {
                     if self.view.is_interior() {
+                        // first offered to the control under the cursor (knobs / levers); the rest zooms the head view
                         self.host.wheel += y as f32;
+                    } else {
+                        zoom_view(&mut self.cam, self.view, y);
                     }
-                    self.cam.dist = clamp(self.cam.dist * (1.0 - y * 0.08), 0.35, 6.0);
                 } else {
                     self.inp.wheel += y as f32;
                 }

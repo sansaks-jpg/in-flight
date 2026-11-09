@@ -106,3 +106,89 @@ Setelah penggabungan paralel antara modul **UI/UX Pra-Penerbangan** dan modul **
 ---
 
 
+
+
+## 6. Windows glitch + camera-control audit (fix log)
+
+> **Append this section to `rust/TASK.md`.** It was written as a separate file because the existing `TASK.md` (sections 3 and 4
+> are referenced from `README.md`) must not be overwritten.
+>
+> **Verification status - read this first.** The audit was done by reading the sources of `app.rs`, `cockpit.rs`, `deckhost.rs`,
+> `gfx/mod.rs`, `gfx/fx.rs`, `gfx/ui.rs`, `gfx/ui.wgsl`, `tiles/gpu.rs`, `tiles/*.wgsl`, `ui/mod.rs`, `ui/globe.rs`.
+> The environment had **no shell**: nothing was cloned, compiled or run. `cargo check --all-targets` and `cargo test --release`
+> have **not** been run, and none of the fixes has been tried on Windows (DX12 / Vulkan). Section 6.3 (patches in other
+> files) is **not applied**.
+
+### 6.1 Root causes
+
+| # | Area | Root cause | File |
+|---|------|------------|------|
+| G1 | Glitch (menu + game) | `Ui::line()` builds its quad with `a[0]` / `b[0]` where the **y** coordinate should be (`[a[0]+nx, a[0]+ny]`, `[b[0]+nx, b[0]+ny]`, `[b[0]-nx, b[0]-ny]`). Three of the four corners lie on the line `y = x`, so every line is drawn as a long skewed sliver. Lines are used by the globe graticule, terminator, route arc, PFD tapes / attitude ticks, the moving map and the ND, so the artefacts start on the boot / menu globe and continue into the cockpit displays. | `gfx/ui.rs` (patch 6.3-A) |
+| G2 | Glitch (Windows) | The swap-chain used `caps.alpha_modes[0]`. On Windows this can be a pre- or post-multiplied mode. The sky, globe-tile (`ALPHA_BLENDING`) and cloud passes write alpha < 1, so the window is composited with the desktop. | `app.rs` |
+| G3 | Glitch (resize / maximise / DPI) | The surface and depth buffer were only reconfigured from `WindowEvent::Resized`. `Suboptimal` frames were presented as if fine and never reconfigured, so the frame was stretched until the next resize. | `app.rs` |
+| G4 | Glitch (menu text) | In the pre-flight screens `event.text` was pushed to `Input::typed` unfiltered. Enter / Tab / Esc / Backspace carry a control character, which the glyph batcher draws as `?`. | `app.rs` |
+| G5 | Stutter / jump | Early returns on `Outdated` / `Lost` / `Occluded` skipped `Input::end_frame()`, so pointer delta and wheel accumulated and were applied as one burst on the next frame (globe jump). A minimised window also spun the redraw loop at 100 % CPU. | `app.rs` |
+| C1 | Camera (exterior) | **Exterior views had no mouse handling at all.** The drag code ran only when `view.is_interior()`, and the chase `orbit_yaw` is driven by `cam.head.yaw`, which nothing ever changed outside the cockpit. Wing / Tower look and orbit were dead. | `app.rs` |
+| C2 | Camera (interior) | Free-look worked only on the **right** button, and was blocked while the deck had `captured` a control. Dragging also stalled at the window / screen edge because only `CursorMoved` deltas were used. | `app.rs` |
+| C3 | Camera (lag) | Head-look was applied **after** `make_camera()`, so the view lagged the mouse by one frame and the deck pick ray used the stale camera. | `app.rs` |
+| C4 | Camera (zoom) | The wheel always scaled `cam.dist` (chase only), even in the cockpit. This corrupted the chase distance later. Wing and Tower never zoomed. Chase yaw was clamped to +-150 deg by `HeadLook::apply`, leaving a 60 deg blind spot. | `app.rs` |
+| C5 | Camera (stuck input) | There was no `Focused(false)` handling. After alt-tab, keys and mouse buttons stayed "down" (throttle / roll stuck, camera drag stuck). | `app.rs` |
+| C6 | Camera (documented but missing) | F1 advertises `Num 4 6 8 2` / `Num 5` / `Num + -`, but nothing handled them. | `app.rs` |
+
+### 6.2 Fixes applied (all in `rust/src/app.rs`)
+
+* **Surface:** opaque `alpha_mode` when offered (G2). `sync_surface()` compares `window.inner_size()` with the surface config every
+  frame and reconfigures the surface, the depth buffer (`Renderer::resize`) and the UI screen uniform (G3). `Suboptimal`
+  reconfigures after `present`. A minimised window sleeps instead of spinning. Skipped frames clear the pointer delta and wheel
+  (G5).
+* **Text input:** control characters are filtered out of `Input::typed`, and both Ctrl keys suppress text (G4).
+* **Camera gestures (`App::update_look`, runs before the rig):**
+  * Left **or** right drag starts a look / orbit. On the flight deck a press on a control still belongs to the control
+    (`over_ctl` / `host.captured`); a press anywhere else looks around.
+  * Cockpit / Panel / Wing: head-look with the neck limits, as before. Chase: a free 360 deg orbit (`yaw` wraps, pitch +-70,
+    drag down raises the camera). Tower: look-around offset plus zoom, applied on top of the rig in `redraw`.
+  * Drag deltas come from raw `DeviceEvent::MouseMotion`, with a fallback to the cursor delta when no raw input is present
+    (RDP / VMs). The cursor is confined and hidden during a drag, so it never stalls at an edge.
+  * The look is applied before `make_camera()`, so there is no one-frame lag (C3). The tooltip is hidden while looking.
+* **Zoom (`zoom_view`):** the wheel zooms by view. Chase changes the distance. Wing and Tower change the FOV. The cockpit
+  first offers the wheel to the control under the cursor and the remainder zooms the head view. `cam.dist` is no longer
+  touched in the cockpit (C4).
+* **Input hygiene:** `Focused(false)` clears keys, buttons, drag state and the cursor grab (C5). Numpad 4 6 8 2 look, 5 centres,
+  + / - zoom (C6). `KeyCode::KeyC` and leaving the flight cancel any active drag.
+
+### 6.3 Patches still to apply in other files (not applied)
+
+**A. `rust/src/gfx/ui.rs` - `Ui::line` (root cause G1, the main visual glitch)**
+
+```rust
+// find
+self.quad([[a[0] + nx, a[0] + ny], [b[0] + nx, b[0] + ny], [b[0] - nx, b[0] - ny], [a[0] - nx, a[1] - ny]], col);
+// replace with
+self.quad([[a[0] + nx, a[1] + ny], [b[0] + nx, b[1] + ny], [b[0] - nx, b[1] - ny], [a[0] - nx, a[1] - ny]], col);
+```
+
+Suggested regression test in the `gfx/ui.rs` tests (or a new `#[cfg(test)]` block): draw `line([10.0, 10.0], [110.0, 10.0], 4.0, C_WHITE)`
+and assert that every vertex has `y` in `8.0..=12.0`.
+
+**B. Items found while reading, not changed (check on a Windows machine)**
+
+* `gfx/mod.rs` was truncated in the middle of the audit (`Renderer::resize`, `ensure_airports`, `new_flight`). Confirm that `resize`
+  recreates `depth_view`, calls `fx.rebind_depth(...)` (the cloud pass samples it) and rewrites `screen_buf`.
+* `tiles/hub.rs` / `tiles/ground.rs` were not read. Check that a page-table entry is only marked valid (`e2.w`) after its
+  `write_texture` was queued in `TileAtlas::pump`. Otherwise the ground shows the previous tile of a recycled atlas layer for a
+  frame. `ground.wgsl` falls back to a neutral colour only when `e2.w < 0.5`.
+* `globe.rs`: `g.inp.pressed` starts a drag without checking `Gui::mute_click`. If a bento tile overlaps `view.clip`, a click on
+  it also starts a drag. This needs a look at `ui/screens.rs`.
+* `ground.wgsl` uses `@builtin(instance_index)` as the clipmap level (`draw_indexed(.., l..l+1)`). That is fine on wgpu / DX12
+  (first-instance is added by wgpu), but a per-ring uniform or vertex attribute would be more robust across backends.
+
+### 6.4 Manual test plan
+
+1. Menu / boot: the globe graticule, terminator and route arc are thin lines (no diagonal slivers). Drag spins the globe, the
+   wheel zooms, clicking the map-layer chips does not start a globe drag.
+2. Cockpit (`C` cycles): drag with either button looks around, the wheel zooms, a press on a deck control still operates it,
+   and no hover tooltip appears while looking.
+3. Chase: drag orbits a full 360 deg, the wheel changes the distance. Wing: drag looks, the wheel zooms. Tower: drag looks,
+   the wheel zooms.
+4. Alt-tab while holding W / the mouse button: nothing is stuck after coming back. Maximise / restore: no stretched frame.
+5. `cargo check --all-targets && cargo test --release` (not yet run, see the status note at the top).
