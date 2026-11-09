@@ -341,6 +341,9 @@ pub struct PreFlight {
     pub deck_ready: bool,
     /// last Marketplace interaction (the app consumes it: preload / unload the model)
     pub market_event: market::MarketEvent,
+    /// the route-selection screen (or a flight) needs the airport database: the app loads it off-thread on demand. The
+    /// boot screen and the main menu run without it (a bare rotating globe, no markers)
+    pub airports_requested: bool,
 }
 
 impl PreFlight {
@@ -361,6 +364,7 @@ impl PreFlight {
             addons: crate::addons::AddonManager::new(),
             deck_ready: false,
             market_event: market::MarketEvent::default(),
+            airports_requested: false,
         }
     }
 
@@ -374,9 +378,21 @@ impl PreFlight {
 
     pub fn goto(&mut self, s: Screen) {
         if self.screen != s {
+            if s == Screen::Menu && self.screen != Screen::Boot {
+                // back from route selection: the globe returns to a bare rotating Earth
+                self.globe.reset_to_menu();
+            }
+            if matches!(s, Screen::Planner | Screen::Briefing) {
+                self.airports_requested = true;
+            }
             self.screen = s;
             self.fade = 1.0;
         }
+    }
+
+    /// True while the airport database is needed but has not been delivered yet.
+    pub fn waiting_for_airports(&self, db: &AirportDb) -> bool {
+        db.is_empty() && matches!(self.screen, Screen::Planner | Screen::Briefing)
     }
 
     /// Runs one UI frame: updates state from `inp` and draws everything. `utc` is the real-time clock (unix seconds).
@@ -410,6 +426,9 @@ impl PreFlight {
 
         let had_modal = self.modal.is_some();
         g.block = had_modal;
+        // the boot / menu globe is a bare rotating Earth: airports only exist on the route-selection screens
+        self.globe.markers = matches!(self.screen, Screen::Planner | Screen::Briefing);
+        let loading = self.waiting_for_airports(db);
         match self.screen {
             Screen::Boot => {
                 if screens::draw_boot(&mut g, &mut self.boot, db, &mut self.globe, &mut self.planner, dt) {
@@ -430,6 +449,11 @@ impl PreFlight {
                     screens::MenuAction::Controls => self.modal = Some(ModalKind::Controls),
                     screens::MenuAction::Marketplace => self.modal = Some(ModalKind::Marketplace),
                     screens::MenuAction::Quit => out = Outcome::Quit,
+                }
+            }
+            Screen::Planner | Screen::Briefing if loading => {
+                if planner::draw_loading(&mut g, &mut self.globe, utc, dt) {
+                    self.goto(Screen::Menu);
                 }
             }
             Screen::Planner => {

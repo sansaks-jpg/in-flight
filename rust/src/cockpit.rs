@@ -1,84 +1,17 @@
-//! Cockpit + external camera rigs and the 3D flight-deck geometry (reference: `src/sim/cockpit.ts`,
-//! `src/sim/a320/proceduralCockpit.ts`, `src/sim/a320/cockpitRender.ts`).
+//! Flight-deck geometry + display layout (reference: `src/sim/cockpit.ts`, `src/sim/a320/proceduralCockpit.ts`,
+//! `src/sim/a320/cockpitRender.ts`). The camera rigs live in `camera.rs`.
 //!
-//! * `rig()` builds the camera for every view: **Cockpit** (captain's eye with head-look, G-load head motion and zoom),
-//!   **Panel** (captain leaning towards the glareshield / displays), **Wing** (starboard wing-tip), **Chase** (smoothed
-//!   orbit around the aircraft) and **Tower** (fixed ground spot that re-hops as the aircraft leaves).
 //! * `build_cockpit()` creates the opaque interior (glareshield, main panel, pedestal, window posts, overhead, floor) in
 //!   aircraft body coordinates (+X right, +Y up, -Z forward) - it is drawn with the aircraft model matrix, so it rolls /
 //!   pitches with the aircraft while the camera moves relative to it (real parallax when the head moves).
 //! * `SCREENS` places the six display units (CPT/FO PFD + ND, E/WD, SD). Each is a quad textured from one cell of a
 //!   1024x1024 render-to-texture atlas that `gfx/displays.rs` draws with the 2D UI batcher every frame.
 
-use crate::game::Flight;
-use crate::geo::{clamp, wrap180};
+use crate::geo::clamp;
 use crate::gfx::geom::MeshBuilder;
-use crate::gfx::ui::View;
-use crate::gfx::Camera;
 use crate::physics::FlightModel;
 use glam::{DVec3, Vec3, Vec4};
 
-/// Camera rig state: smoothed chase yaw, tower spot, orbit zoom and the pilot's head-look.
-pub struct CamState {
-    pub yaw: f64,
-    pub spot: Option<DVec3>,
-    pub dist: f64,
-    pub head: HeadLook,
-    pub cockpit_fov: f32,
-}
-
-impl Default for CamState {
-    fn default() -> Self {
-        Self { yaw: 0.0, spot: None, dist: 1.0, head: HeadLook::default(), cockpit_fov: 62.0 }
-    }
-}
-
-/// Head-look relative to the aircraft (cockpit views) or orbit offset around it (chase view). Degrees.
-#[derive(Clone, Copy, Debug)]
-pub struct HeadLook {
-    pub yaw: f64,
-    pub pitch: f64,
-    pub zoom: f64,
-}
-
-impl Default for HeadLook {
-    fn default() -> Self {
-        Self { yaw: 0.0, pitch: 0.0, zoom: 1.0 }
-    }
-}
-
-impl HeadLook {
-    pub fn reset(&mut self) {
-        *self = Self::default();
-    }
-    /// Apply a look-rate (deg/s) and zoom-rate (1/s) for `dt` seconds with the real neck limits.
-    pub fn apply(&mut self, dt: f64, yaw_rate: f64, pitch_rate: f64, zoom_rate: f64) {
-        self.yaw = clamp(self.yaw + yaw_rate * dt, -150.0, 150.0);
-        self.pitch = clamp(self.pitch + pitch_rate * dt, -70.0, 70.0);
-        self.zoom = clamp(self.zoom * (1.0 + zoom_rate * dt), 0.7, 4.0);
-    }
-}
-
-impl View {
-    pub const ALL: [View; 5] = [View::Cockpit, View::Panel, View::Wing, View::Chase, View::Tower];
-    pub fn next(self) -> View {
-        let i = View::ALL.iter().position(|v| *v == self).unwrap_or(0);
-        View::ALL[(i + 1) % View::ALL.len()]
-    }
-    /// Interior (flight deck + working displays) is visible.
-    pub fn is_interior(self) -> bool {
-        matches!(self, View::Cockpit | View::Panel)
-    }
-    pub fn label(self) -> &'static str {
-        match self {
-            View::Cockpit => "CAPTAIN",
-            View::Panel => "PANEL",
-            View::Wing => "WING",
-            View::Chase => "CHASE",
-            View::Tower => "TOWER",
-        }
-    }
-}
 
 /// Captain's seat in body coordinates (m).
 pub fn eye_body(fm: &FlightModel) -> DVec3 {
@@ -96,72 +29,6 @@ pub fn look_dirs(yaw_deg: f64, pitch_deg: f64) -> (DVec3, DVec3) {
     let fwd = DVec3::new(y.sin() * p.cos(), p.sin(), -y.cos() * p.cos());
     let right = fwd.cross(DVec3::Y).normalize_or(DVec3::X);
     (fwd, right.cross(fwd))
-}
-
-/// Camera for `view`. Returns (camera, aircraft-model-visible).
-pub fn rig(f: &Flight, view: View, cs: &mut CamState, dt: f64, orbit: Option<f64>) -> (Camera, bool) {
-    let fm = &f.fm;
-    let q = fm.quat;
-    if let Some(t) = orbit {
-        // menu: slow orbit around the aircraft on the runway
-        let a = t * 0.12;
-        let pos = fm.pos + DVec3::new(a.sin() * 75.0, 14.0 + 4.0 * (t * 0.3).sin(), a.cos() * 75.0);
-        let target = fm.pos + DVec3::new(0.0, 2.5, 0.0);
-        let fwd = (target - pos).normalize().as_vec3();
-        return (Camera { pos, fwd, up: Vec3::Y, fov_deg: 50.0, near: 0.5 }, true);
-    }
-    match view {
-        View::Cockpit | View::Panel => {
-            let panel = view == View::Panel;
-            let (mut yaw, mut pitch) = (cs.head.yaw, cs.head.pitch);
-            let mut zoom = cs.head.zoom;
-            let mut lean = DVec3::ZERO;
-            if panel {
-                // lean in and look down at the display units
-                pitch -= 21.0;
-                yaw += 9.0;
-                zoom *= 1.45;
-                lean = DVec3::new(0.22, -0.05, -0.30);
-            }
-            yaw = clamp(yaw, -170.0, 170.0);
-            let (fwd_b, up_b) = look_dirs(yaw, clamp(pitch, -85.0, 85.0));
-            let pos = fm.pos + q * (eye_body(fm) + lean + head_motion(fm));
-            let fwd = (q * fwd_b).as_vec3();
-            let up = (q * up_b).as_vec3();
-            (Camera { pos, fwd, up, fov_deg: (cs.cockpit_fov as f64 / zoom).clamp(14.0, 90.0) as f32, near: 0.08 }, false)
-        }
-        View::Wing => {
-            let pos = fm.pos + q * DVec3::new(16.2, 3.0, 5.2);
-            let (fwd_b, _) = look_dirs(-24.0 + cs.head.yaw, -4.0 + cs.head.pitch);
-            ((Camera { pos, fwd: (q * fwd_b).as_vec3(), up: (q * DVec3::Y).as_vec3(), fov_deg: (68.0 / cs.head.zoom) as f32, near: 0.3 }), true)
-        }
-        View::Chase => {
-            let target_yaw = if fm.gs > 15.0 { fm.track.to_radians() } else { fm.heading.to_radians() };
-            let d = wrap180((target_yaw - cs.yaw).to_degrees()).to_radians();
-            cs.yaw += d * (1.0 - (-dt * 2.5).exp());
-            let orbit_yaw = cs.yaw + cs.head.yaw.to_radians();
-            let back = DVec3::new(-orbit_yaw.sin(), 0.0, orbit_yaw.cos());
-            let lift = 14.0 + 6.0 * cs.dist + cs.head.pitch * 0.6 * cs.dist;
-            let pos = fm.pos + back * (62.0 * cs.dist) + DVec3::new(0.0, lift.max(3.0), 0.0);
-            let target = fm.pos + DVec3::new(0.0, 2.0, 0.0);
-            let fwd = (target - pos).normalize().as_vec3();
-            (Camera { pos, fwd, up: Vec3::Y, fov_deg: 55.0, near: 0.5 }, true)
-        }
-        View::Tower => {
-            let ahead = if fm.gs > 10.0 { DVec3::new(fm.vel.x, 0.0, fm.vel.z).normalize() } else { DVec3::new(fm.forward().x, 0.0, fm.forward().z).normalize_or(DVec3::NEG_Z) };
-            let need_new = cs.spot.map_or(true, |s| (s - fm.pos).length() > 1800.0 || (s - fm.pos).dot(ahead) < -150.0);
-            if need_new {
-                let right = DVec3::new(-ahead.z, 0.0, ahead.x);
-                let p = fm.pos + ahead * 700.0 + right * 120.0;
-                let gy = f.terrain.height(p.x, p.z) + 3.0;
-                cs.spot = Some(DVec3::new(p.x, gy, p.z));
-            }
-            let pos = cs.spot.unwrap();
-            let fwd = (fm.pos - pos).normalize().as_vec3();
-            let dist = (fm.pos - pos).length();
-            (Camera { pos, fwd, up: Vec3::Y, fov_deg: (35.0 - (dist / 120.0).min(25.0)).max(8.0) as f32, near: 0.5 }, true)
-        }
-    }
 }
 
 // ---------------------------------------------------------------- displays layout
@@ -283,18 +150,6 @@ pub fn build_cockpit(mb: &mut MeshBuilder) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::airports::AirportDb;
-
-    #[test]
-    fn head_look_has_real_limits() {
-        let mut h = HeadLook::default();
-        h.apply(100.0, 90.0, 90.0, 1.0);
-        assert!(h.yaw <= 150.0 && h.pitch <= 70.0 && h.zoom <= 4.0);
-        h.apply(100.0, -90.0, -90.0, -1.0);
-        assert!(h.yaw >= -150.0 && h.pitch >= -70.0 && h.zoom >= 0.7);
-        h.reset();
-        assert_eq!((h.yaw, h.pitch, h.zoom), (0.0, 0.0, 1.0));
-    }
 
     #[test]
     fn look_dirs_are_orthonormal_and_forward_is_minus_z() {
@@ -306,45 +161,6 @@ mod tests {
         }
         let (f, _) = look_dirs(90.0, 0.0);
         assert!(f.x > 0.99, "positive yaw looks right (+X)");
-    }
-
-    #[test]
-    fn view_cycle_visits_every_view() {
-        let mut v = View::Cockpit;
-        let mut seen = vec![v];
-        for _ in 0..View::ALL.len() {
-            v = v.next();
-            if !seen.contains(&v) {
-                seen.push(v);
-            }
-        }
-        assert_eq!(seen.len(), View::ALL.len());
-        assert_eq!(v, View::Cockpit, "cycle closes");
-    }
-
-    #[test]
-    fn rig_places_the_cameras_sensibly() {
-        let db = AirportDb::embedded();
-        let f = Flight::new(&db, "KSFO", "KOAK", 1_718_914_200.0).unwrap();
-        let mut cs = CamState { yaw: f.fm.heading.to_radians(), ..Default::default() };
-        let (cap, third) = rig(&f, View::Cockpit, &mut cs, 0.016, None);
-        assert!(!third);
-        let eye = f.fm.pos + f.fm.quat * eye_body(&f.fm);
-        assert!((cap.pos - eye).length() < 0.1, "captain camera sits at the eye point");
-        let (pan, _) = rig(&f, View::Panel, &mut cs, 0.016, None);
-        assert!(pan.fov_deg < cap.fov_deg * 0.75, "panel view zooms in");
-        assert!(pan.fwd.y < cap.fwd.y - 0.2, "panel view looks down");
-        let (wing, third) = rig(&f, View::Wing, &mut cs, 0.016, None);
-        assert!(third && (wing.pos - f.fm.pos).length() > 15.0);
-        let (chase, _) = rig(&f, View::Chase, &mut cs, 0.016, None);
-        assert!((chase.pos - f.fm.pos).length() > 50.0);
-        let (tw, _) = rig(&f, View::Tower, &mut cs, 0.016, None);
-        assert!(tw.fwd.is_finite() && tw.fov_deg > 5.0);
-        // head look to the right turns the camera to the aircraft's right
-        cs.head.yaw = 90.0;
-        let (r, _) = rig(&f, View::Cockpit, &mut cs, 0.016, None);
-        let right = (f.fm.quat * DVec3::X).as_vec3();
-        assert!(r.fwd.dot(right) > 0.95);
     }
 
     #[test]

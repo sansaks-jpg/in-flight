@@ -91,6 +91,8 @@ fn boot_finishes_and_reaches_the_menu() {
 fn menu_renders_globe_and_tiles() {
     let mut r = Rig::new();
     r.boot();
+    // look at the sunlit side (the menu globe carries no airport lights any more, so a night-side view is nearly black)
+    r.pre.globe.snap_to(23.0, -122.0, 1.0);
     r.steps(5);
     let img = r.paint();
     assert!(img.mean_luma(780, 250, 200, 200) > img.mean_luma(620, 640, 80, 40) * 2.0);
@@ -247,4 +249,223 @@ fn flight_honours_dispatched_runways_and_cruise_level() {
     }
     let f = Flight::new_with_runways(&db, "KSFO", "KLAX", UTC, Some("99X"), None, None).unwrap();
     assert!(!f.dep_end.ident.is_empty());
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+//  Menu globe: bare rotating Earth -> zoom / pan hands over to route selection, where the airports are loaded
+// ---------------------------------------------------------------------------------------------------------------
+
+const GLOBE_XY: [f32; 2] = [900.0, 360.0];
+
+fn wheel(r: &mut Rig, w: f32) {
+    r.inp.mouse = GLOBE_XY;
+    r.step();
+    r.inp.wheel = w;
+    r.step();
+}
+
+#[test]
+fn menu_globe_is_bare_and_rotating() {
+    let mut r = Rig::new();
+    r.boot();
+    assert_eq!(r.pre.screen, Screen::Menu);
+    assert!(!r.pre.globe.markers, "no airport markers on the menu globe");
+    assert!(r.pre.globe.auto_rotate);
+    let lon0 = r.pre.globe.lon;
+    r.steps(120);
+    assert_eq!(r.pre.screen, Screen::Menu, "idle frames never leave the menu");
+    assert!((r.pre.globe.lon - lon0).abs() > 0.01, "the globe rotates by itself");
+    assert!(!r.pre.airports_requested, "the menu never asks for the airport database");
+}
+
+#[test]
+fn menu_globe_draws_no_airports_but_route_selection_does() {
+    let mut r = Rig::new();
+    r.boot();
+    // same camera on both screens: only the markers differ
+    r.pre.globe.auto_rotate = false;
+    r.pre.globe.snap_to(40.0, -100.0, 6.0);
+    let menu_verts = {
+        r.steps(2);
+        r.ui.verts.len()
+    };
+    assert!(!r.pre.globe.markers);
+    // draw the very same globe with markers on
+    let mut ui = Ui::new();
+    let inp = Input::default();
+    let mut verts = [0usize; 2];
+    for (i, markers) in [false, true].into_iter().enumerate() {
+        ui.begin(W, H);
+        let mut g = Gui::new(&mut ui, &inp, 0.0);
+        r.pre.globe.markers = markers;
+        let view = inflight::ui::globe::GlobeView { cx: 800.0, cy: 360.0, r: 260.0, clip: [452.0, 52.0, 816.0, 608.0] };
+        r.pre.globe.run(&mut g, view, UTC, &r.db, Default::default(), false, 0.0);
+        ui.end();
+        verts[i] = ui.verts.len();
+    }
+    assert!(verts[1] > verts[0] + 200, "airports add geometry: {} vs {}", verts[1], verts[0]);
+    let _ = menu_verts;
+}
+
+#[test]
+fn zooming_the_menu_globe_opens_route_selection() {
+    let mut r = Rig::new();
+    r.boot();
+    r.steps(3);
+    wheel(&mut r, 1.0);
+    assert_eq!(r.pre.screen, Screen::Planner, "wheel zoom on the globe replaces the menu with route selection");
+    assert!(r.pre.airports_requested);
+    assert!(r.pre.globe.zoom > 1.0, "the zoom the user started is kept: {}", r.pre.globe.zoom);
+    r.steps(3);
+    assert!(r.pre.globe.markers, "route selection shows the airports");
+}
+
+#[test]
+fn panning_the_menu_globe_opens_route_selection() {
+    let mut r = Rig::new();
+    r.boot();
+    r.inp.mouse = GLOBE_XY;
+    r.step();
+    r.inp.pressed = true;
+    r.inp.down = true;
+    r.step();
+    assert_eq!(r.pre.screen, Screen::Menu, "pressing alone is not a pan");
+    r.inp.down = true;
+    r.inp.mouse = [GLOBE_XY[0] + 3.0, GLOBE_XY[1]];
+    r.inp.delta = [3.0, 0.0];
+    r.step();
+    assert_eq!(r.pre.screen, Screen::Menu, "a 3 px jitter is still a click");
+    r.inp.mouse = [GLOBE_XY[0] + 40.0, GLOBE_XY[1] + 10.0];
+    r.inp.delta = [37.0, 10.0];
+    r.inp.down = true;
+    r.step();
+    assert_eq!(r.pre.screen, Screen::Planner, "dragging the globe replaces the menu with route selection");
+    // the drag carries on seamlessly on the new screen
+    let lon = r.pre.globe.lon;
+    r.inp.mouse = [GLOBE_XY[0] + 80.0, GLOBE_XY[1] + 10.0];
+    r.inp.delta = [40.0, 0.0];
+    r.inp.down = true;
+    r.step();
+    assert!((r.pre.globe.lon - lon).abs() > 1e-4, "drag continues in route selection");
+}
+
+#[test]
+fn clicking_the_menu_globe_or_zooming_outside_it_stays_on_the_menu() {
+    let mut r = Rig::new();
+    r.boot();
+    r.click(GLOBE_XY[0], GLOBE_XY[1]);
+    assert_eq!(r.pre.screen, Screen::Menu);
+    // wheel over the bento grid (outside the globe area) does nothing
+    r.inp.mouse = [200.0, 200.0];
+    r.step();
+    r.inp.wheel = 2.0;
+    r.step();
+    assert_eq!(r.pre.screen, Screen::Menu);
+    // with a window open the globe is inert
+    r.pre.modal = Some(ModalKind::Controls);
+    wheel(&mut r, 1.0);
+    assert_eq!(r.pre.screen, Screen::Menu);
+}
+
+#[test]
+fn back_from_route_selection_restores_the_rotating_menu_globe() {
+    let mut r = Rig::new();
+    r.boot();
+    wheel(&mut r, 3.0);
+    assert_eq!(r.pre.screen, Screen::Planner);
+    r.steps(3);
+    assert!(r.pre.globe.zoom > 1.5);
+    r.key(Key::Escape);
+    assert_eq!(r.pre.screen, Screen::Menu);
+    r.steps(60 * 5);
+    assert!((r.pre.globe.zoom - 1.0).abs() < 0.02, "zoom eased back to the whole globe: {}", r.pre.globe.zoom);
+    assert!(r.pre.globe.auto_rotate, "idle rotation resumed");
+    assert!(!r.pre.globe.markers);
+    assert_eq!(r.pre.screen, Screen::Menu);
+}
+
+#[test]
+fn route_selection_waits_for_the_lazy_airport_database() {
+    // the app starts with an EMPTY database and only loads the real one once route selection asks for it
+    let empty = AirportDb::empty();
+    let mut pre = PreFlight::new(&empty);
+    pre.settings = Default::default();
+    let (mut ui, mut inp) = (Ui::new(), Input::default());
+    let mut step = |pre: &mut PreFlight, db: &AirportDb, inp: &mut Input| {
+        ui.begin(W, H);
+        let o = pre.frame(&mut ui, inp, db, UTC, 1.0 / 60.0, 60.0);
+        ui.end();
+        inp.end_frame();
+        o
+    };
+    let mut n = 0;
+    while pre.screen == Screen::Boot {
+        step(&mut pre, &empty, &mut inp);
+        n += 1;
+        assert!(n < 600);
+    }
+    for _ in 0..10 {
+        step(&mut pre, &empty, &mut inp);
+    }
+    assert!(!pre.airports_requested && !pre.waiting_for_airports(&empty));
+    inp.mouse = GLOBE_XY;
+    step(&mut pre, &empty, &mut inp);
+    inp.wheel = 1.0;
+    step(&mut pre, &empty, &mut inp);
+    assert_eq!(pre.screen, Screen::Planner);
+    assert!(pre.airports_requested && pre.waiting_for_airports(&empty), "route selection requests the airports");
+    for _ in 0..5 {
+        step(&mut pre, &empty, &mut inp); // loading placeholder renders without a database
+    }
+    assert!(pre.waiting_for_airports(&empty));
+    // the loader delivers: the planner works on all airports
+    let db = AirportDb::embedded();
+    for _ in 0..3 {
+        step(&mut pre, &db, &mut inp);
+    }
+    assert!(!pre.waiting_for_airports(&db));
+    assert_eq!(pre.planner.results.len(), db.airports.len(), "search index built from the delivered database");
+    // Esc on the loading screen goes back to the menu as well
+    let mut pre2 = PreFlight::new(&empty);
+    pre2.skip_boot(&empty);
+    pre2.goto(Screen::Planner);
+    step(&mut pre2, &empty, &mut inp);
+    inp.keys.push(Key::Escape);
+    step(&mut pre2, &empty, &mut inp);
+    assert_eq!(pre2.screen, Screen::Menu);
+}
+
+#[test]
+fn globe_reaches_runway_zoom_and_stays_inside_the_vertex_budget() {
+    let db = AirportDb::embedded();
+    let inp = Input::default();
+    let ksfo = db.get("KSFO").unwrap();
+    let (lat, lon, zoom) = inflight::ui::globe::frame_airport(ksfo);
+    assert!((37.5..37.8).contains(&lat) && (-122.5..-122.2).contains(&lon), "{lat},{lon}");
+    let mut globe = inflight::ui::globe::Globe::new();
+    for z in [zoom, zoom * 4.0, 2_500.0, 9_000.0, inflight::ui::globe::MAX_ZOOM] {
+        globe.snap_to(lat, lon, z);
+        let mut ui = Ui::new();
+        ui.begin(W, H);
+        let mut g = Gui::new(&mut ui, &inp, 0.0);
+        let view = inflight::ui::globe::GlobeView { cx: 800.0, cy: 360.0, r: 260.0, clip: [452.0, 52.0, 816.0, 608.0] };
+        globe.run(&mut g, view, UTC, &db, Default::default(), false, 0.016);
+        ui.end();
+        assert!(ui.verts.len() < MAX_UI_VERTS, "zoom {z}: {} verts", ui.verts.len());
+        assert!(ui.verts.iter().all(|v| v.pos[0].is_finite() && v.pos[1].is_finite()), "non-finite vertex at zoom {z}");
+    }
+    // at runway zoom the marking layer is on and adds geometry compared with the same view without markers
+    let mut count = |markers: bool| {
+        globe.markers = markers;
+        globe.snap_to(lat, lon, 6_000.0);
+        let mut ui = Ui::new();
+        ui.begin(W, H);
+        let mut g = Gui::new(&mut ui, &inp, 0.0);
+        let view = inflight::ui::globe::GlobeView { cx: 800.0, cy: 360.0, r: 260.0, clip: [452.0, 52.0, 816.0, 608.0] };
+        globe.run(&mut g, view, UTC, &db, Default::default(), false, 0.016);
+        ui.end();
+        ui.verts.len()
+    };
+    let (off, on) = (count(false), count(true));
+    assert!(on > off + 100, "runway markings drawn at runway zoom: {on} vs {off}");
 }

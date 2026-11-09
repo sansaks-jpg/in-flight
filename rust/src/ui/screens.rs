@@ -187,7 +187,7 @@ pub fn draw_boot(g: &mut Gui, boot: &mut Boot, db: &AirportDb, globe: &mut Globe
     } else {
         match boot.stage {
             0 => "Initialising graphics and flight model...",
-            1 => "Indexing airport and runway database...",
+            1 => "Preparing airport and runway database...",
             2 => "Building Earth model and night lights...",
             3 => "Building airport search index...",
             _ => "Compiling shaders and warming the GPU...",
@@ -198,9 +198,9 @@ pub fn draw_boot(g: &mut Gui, boot: &mut Boot, db: &AirportDb, globe: &mut Globe
 
     let rows: [(&str, String); 5] = [
         ("Simulator core", "wgpu 30 - winit 0.30".to_string()),
-        ("Airport database", format!("{} airports - {} runways", thousands(boot.stats.airports), thousands(boot.stats.runways))),
+        ("Airport database", if boot.stats.airports == 0 { "loads with route selection".to_string() } else { format!("{} airports - {} runways", thousands(boot.stats.airports), thousands(boot.stats.runways)) }),
         ("Earth model & night lights", format!("{:.0}% land mask", boot.land_pct)),
-        ("Airport search index", format!("{} countries", boot.stats.countries)),
+        ("Airport search index", if boot.stats.countries == 0 { "built on demand".to_string() } else { format!("{} countries", boot.stats.countries) }),
         ("Graphics pipeline - shaders & fonts", String::new()),
     ];
     for (i, (label, detail)) in rows.iter().enumerate() {
@@ -363,7 +363,12 @@ pub fn draw_menu(g: &mut Gui, globe: &mut Globe, db: &AirportDb, utc: f64, dt: f
     stars(g, g.time, 150);
 
     let view = GlobeView { cx: gcx, cy: gcy, r: h * 0.36, clip: [600.0, 32.0, (w - 600.0).max(100.0), h - 64.0] };
-    globe.run(g, view, utc, db, Marks::default(), true, dt);
+    // bare rotating Earth: no airport markers here. Zooming or panning it hands over to the route-selection screen
+    // (where the airports are loaded and shown), so the bento hub disappears as soon as the user takes hold of the globe.
+    let out = globe.run(g, view, utc, db, Marks::default(), true, dt);
+    if out.engaged && !g.block {
+        act = MenuAction::Planner;
+    }
 
     // left contrast vignette so the bento grid always has crisp contrast
     g.rect_h(0.0, 0.0, 680.0, h, [0.008, 0.016, 0.035, 0.94], [0.008, 0.016, 0.035, 0.80]);
@@ -375,8 +380,8 @@ pub fn draw_menu(g: &mut Gui, globe: &mut Globe, db: &AirportDb, utc: f64, dt: f
     g.rect(w - bar_w, 0.0, bar_w, 32.0, [0.04, 0.06, 0.09, 0.92]);
     g.line([w - bar_w, 32.0], [w, 32.0], 1.0, LINE);
     g.text(w - bar_w + 12.0, 10.0, 11.0, TEXT, 0, "IN-FLIGHT");
-    g.textf(w - bar_w + 96.0, 10.0, 11.0, ACCENT, 0, format_args!("{} AIRPORTS", thousands(db.airports.len())));
-    g.textf(w - bar_w + 240.0, 10.0, 11.0, GREEN, 0, format_args!("{} INDONESIA", db.airports.iter().filter(|a| a.country == "ID").count()));
+    g.text(w - bar_w + 96.0, 10.0, 11.0, ACCENT, 0, "LIVE EARTH");
+    g.text(w - bar_w + 190.0, 10.0, 11.0, GREEN, 0, "DRAG / ZOOM TO PLAN");
     g.textf(w - 120.0, 10.0, 11.0, DIM, 2, format_args!("CAPT. {}", settings.name.to_uppercase()));
     g.textf(w - 56.0, 10.0, 11.0, TEXT, 2, format_args!("{hh:02}:{mm:02}Z"));
     if g.btn(w - 40.0, 4.0, 34.0, 24.0, "X", super::BtnKind::Ghost) {
@@ -421,7 +426,7 @@ pub fn draw_menu(g: &mut Gui, globe: &mut Globe, db: &AirportDb, utc: f64, dt: f
     if g.btn(w - 150.0, by - 2.0, 130.0, 24.0, "ADD-ONS (F2)", super::BtnKind::Secondary) {
         act = MenuAction::Marketplace;
     }
-    g.text(24.0, by + 2.0, 10.5, MUTED, 0, "Drag the globe - Wheel zoom - Enter: Flight Planner - F1: controls - Esc: quit");
+    g.text(24.0, by + 2.0, 10.5, MUTED, 0, "Drag or zoom the globe to plan - Enter: Planner - F1: controls - Esc: quit");
     let (sl, so) = subsolar_point(utc);
     g.textf(w - 24.0, by + 2.0, 10.5, DIM, 2, format_args!("SUN OVERHEAD {:.1}{} {:.1}{}", sl.abs(), if sl >= 0.0 { "N" } else { "S" }, so.abs(), if so >= 0.0 { "E" } else { "W" }));
     let ok = fps >= 55.0 || fps == 0.0;

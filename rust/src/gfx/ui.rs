@@ -360,8 +360,6 @@ impl Default for Ui {
 pub enum View {
     /// captain's eye (3D flight deck with working displays)
     Cockpit,
-    /// leaning towards the display units
-    Panel,
     Wing,
     Chase,
     Tower,
@@ -373,6 +371,8 @@ pub struct HudInfo {
     pub frame_ms: f32,
     pub sim_ms: f32,
     pub view: View,
+    /// short camera description for the HUD (cockpit: the panel focus; external: the view name)
+    pub cam_label: &'static str,
     pub paused: bool,
     pub help: bool,
     pub time: f64,
@@ -682,7 +682,7 @@ pub fn draw_hud(ui: &mut Ui, f: &Flight, info: &HudInfo) {
     let fc = if info.fps >= 58.0 { C_GREEN } else if info.fps >= 30.0 { C_AMBER } else { C_RED };
     tf!(ui, px + 8.0, h - base * 4.4 - 4.0, base * 1.1, fc, 0, "{:.0} FPS", info.fps);
     tf!(ui, px + 8.0, h - base * 3.1 - 4.0, base * 0.85, C_GREY, 0, "frame {:.2} ms  sim {:.2} ms", info.frame_ms, info.sim_ms);
-    tf!(ui, px + 8.0, h - base * 2.1 - 4.0, base * 0.85, C_GREY, 0, "view {:?} [C]  help [F1]", info.view);
+    tf!(ui, px + 8.0, h - base * 2.1 - 4.0, base * 0.85, C_GREY, 0, "cam {} [C]  help [F1]", info.cam_label);
 
     // ---- messages (left, under the info block) ----
     let mut y = 20.0 + base * 7.2;
@@ -765,7 +765,7 @@ fn fmt_into<'a>(buf: &'a mut [u8; 16], args: std::fmt::Arguments) -> &'a str {
     std::str::from_utf8(&buf[..n]).unwrap_or("")
 }
 
-pub const HELP: [(&str, &str); 23] = [
+pub const HELP: [(&str, &str); 25] = [
     ("W / S", "pitch down / up (sidestick)"),
     ("A / D", "roll left / right"),
     ("Q / E", "rudder / nosewheel"),
@@ -782,9 +782,11 @@ pub const HELP: [(&str, &str); 23] = [
     ("N / H", "LNAV / HDG mode      L  approach (LOC/GS)"),
     ("Up / Down", "FCU altitude +-100 ft   [ ]  speed"),
     ("Left / Right", "FCU heading -+5      PgUp/PgDn  V/S"),
-    ("C", "camera: captain / panel / wing / chase / tower"),
-    ("Mouse drag / Num 4 6 8 2", "look around     Num 5 centre"),
-    ("Mouse wheel / Num + -", "zoom (chase: distance)"),
+    ("C / Y", "camera: cockpit <-> external   Y next external view"),
+    ("0-9 , .", "cockpit panels: seat FCU PFD ND ECAM MCDU EFB OVHD PED PANEL"),
+    ("Drag / Num 4 6 8 2", "look (cockpit) or orbit (external)   Num 5 / Home reset"),
+    ("R-drag / Shift-drag", "lean (cockpit) or pan (external)   Alt+click: focus control"),
+    ("Mouse wheel / Num + -", "zoom (chase: distance)   double-click: recentre"),
     ("F1", "this help"),
     ("F11", "fullscreen"),
     ("Esc", "menu / quit"),
@@ -793,7 +795,7 @@ pub const HELP: [(&str, &str); 23] = [
 
 pub fn draw_help(ui: &mut Ui, base: f32) {
     let (w, h) = (ui.w, ui.h);
-    let (pw, ph) = (base * 44.0, base * 27.5);
+    let (pw, ph) = (base * 50.0, base * 30.0);
     let (x0, y0) = (w / 2.0 - pw / 2.0, h / 2.0 - ph / 2.0);
     ui.rect(x0, y0, pw, ph, [0.02, 0.03, 0.06, 0.94]);
     ui.frame(x0, y0, pw, ph, 2.0, C_CYAN);

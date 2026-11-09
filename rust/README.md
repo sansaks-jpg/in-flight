@@ -65,10 +65,14 @@ Original project and `airports.json`: see `../reference/in-flight`. Font: DejaVu
 ## Satellite maps
 
 The pre-flight globe and the in-flight ground use real imagery streamed in the background (Esri World Imagery by default;
-Sentinel-2, OpenStreetMap, Topographic, NASA night lights and a dark chart can be picked on the globe, or cycled with `M`
+Sentinel-2, OpenStreetMap, OpenTopoMap, Aviation Chart (shaded relief), NASA night lights, dark and Voyager charts can be picked on the globe, or cycled with `M`
 in flight). Tiles are cached on disk (`$INFLIGHT_TILE_CACHE`, default platform cache dir, 2 GiB LRU). Useful environment
 variables: `INFLIGHT_OFFLINE=1` (cache only), `INFLIGHT_NO_TILES=1` (procedural world, no network), `INFLIGHT_TILE_CACHE_MB`.
 Pre-download an area with `cargo run --release --bin tilecache -- KSFO`. See `TASK.md` section 4 for the architecture.
+
+The main menu shows a bare, rotating globe (no airports; the airport database is not loaded yet). Zooming or dragging the
+globe replaces the menu with the route-selection screen, which loads all airports in the background and draws them with
+their runways (real-metre markings once zoomed in, up to about 0.5 m/px).
 
 ## Interactive 3D Cockpit & Marketplace
 
@@ -76,3 +80,9 @@ The A320 3D flight deck model (`cockpit.glb`, ~50.6 MB) can be downloaded via th
 press **F2** or click the **ADD-ONS (F2)** button on the main menu to open the Marketplace and download.
 Once downloaded, the model is cached persistently on disk and loaded in the background with 596 interactive controls
 (raycast picking, press, drag, wheel) and 6 cockpit glass displays (PFD, ND, E/WD, SD). See `TASK.md` section 3 for details.
+
+## Camera system
+Two perspectives (`C` toggles): **cockpit** (`0-9` panel presets SEAT / FCU / PFD / ND / ECAM / MCDU / EFB / OVHD / PED / PANEL, drag = look with
+momentum, right / middle / Shift-drag = lean, wheel = zoom, Alt+click a control = frame it) and **external** (`Y` cycles chase / wing / tower, drag = free
+orbit, right / middle-drag = pan, wheel = zoom, double-click or `Home` = recentre). All motion is critically-damped; a clickable hot-bar lists the
+views. Details and tuning constants: `TASK.md` section 7, code in `src/camera.rs` and `src/camera_ui.rs`.

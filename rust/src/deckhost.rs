@@ -156,6 +156,20 @@ impl DeckHost {
         hit.is_some()
     }
 
+    /// Alt + click: eye / look-at / fov (body metres, degrees) that frames the control under the cursor square-on
+    /// (`focusGroup` in `cockpit.ts`: distance 4.5x the control's size, 0.26 .. 0.62 m, 38 deg). `None` when nothing is under the cursor.
+    pub fn focus_at(&self, f: &Flight, cam: &Camera, mouse: [f32; 2], size: (f32, f32)) -> Option<(glam::DVec3, glam::DVec3, f64)> {
+        let deck = self.deck.as_ref()?;
+        let (o, d) = body_ray(f, cam, mouse, size);
+        let hit = deck.pick(o, d)?;
+        let g = &deck.groups[hit.group];
+        let c = (g.bmin + g.bmax) * 0.5;
+        let extent = (g.bmax - g.bmin).max_element();
+        let eye = c + crate::camera::panel_normal(c) * (extent * 4.5).clamp(0.26, 0.62);
+        let (eye_b, at_b) = (deck.to_body.transform_point3(eye), deck.to_body.transform_point3(c));
+        Some((eye_b.as_dvec3(), at_b.as_dvec3(), 38.0))
+    }
+
     /// Hover tooltip + FCU read-outs (screen-space overlay on top of the 3D deck).
     pub fn draw_overlay(&self, ui: &mut Ui, f: &Flight, cam: &Camera, mouse: [f32; 2]) {
         let (w, h) = (ui.w, ui.h);

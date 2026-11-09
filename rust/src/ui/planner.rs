@@ -204,6 +204,23 @@ impl PlannerState {
         self.fly(db, globe, idx);
     }
 
+    /// Globe markers for the current selection, including the briefed runway ends (outlined on the globe once zoomed in).
+    pub fn marks(&self, db: &AirportDb) -> Marks {
+        let (dep, arr) = (self.dep_idx(db), self.arr_idx(db));
+        let rwy = |idx: Option<usize>, ends: Option<&RunwayEnd>| -> Option<(usize, u8)> {
+            let (a, e) = (db.airports.get(idx?)?, ends?);
+            a.runways.iter().enumerate().find_map(|(i, r)| (r.le == e.ident).then_some((i, 0u8)).or_else(|| (r.he == e.ident).then_some((i, 1u8))))
+        };
+        let b = self.brief.as_ref();
+        Marks {
+            dep,
+            arr,
+            hover_lock: false,
+            dep_rwy: rwy(dep, b.and_then(|b| b.dep_ends.get(b.dep_sel))),
+            arr_rwy: rwy(arr, b.and_then(|b| b.arr_ends.get(b.arr_sel))),
+        }
+    }
+
     fn fly(&self, db: &AirportDb, globe: &mut Globe, focus: usize) {
         if let (Some(d), Some(a)) = (self.dep_idx(db), self.arr_idx(db)) {
             if d != a {
@@ -212,8 +229,9 @@ impl PlannerState {
                 return;
             }
         }
-        let a = &db.airports[focus];
-        globe.fly_to(a.lat, a.lon, 6.0);
+        // one airport selected: frame the whole airfield like `frameAirportView` of the TS globe
+        let (lat, lon, z) = crate::ui::globe::frame_airport(&db.airports[focus]);
+        globe.fly_to(lat, lon, z);
     }
 
     /// Validates the current pair; returns the dispatch summary when flyable.
@@ -311,6 +329,31 @@ fn airport_card(g: &mut Gui, x: f32, y: f32, w: f32, label: &str, icao: &str, db
     g.clicked(x, y, w, h)
 }
 
+/// Globe area of the route-selection screen: (x, y, w, h, view) in virtual px.
+fn planner_globe_view(w: f32, h: f32) -> (f32, f32, f32, f32, GlobeView) {
+    let (gx0, gy0) = (452.0f32, 52.0f32);
+    let (gw, gh) = ((w - gx0 - 12.0).max(200.0), (h - gy0 - 60.0).max(200.0));
+    (gx0, gy0, gw, gh, GlobeView { cx: gx0 + gw * 0.5, cy: gy0 + gh * 0.5, r: gw.min(gh) * 0.46, clip: [gx0, gy0, gw, gh] })
+}
+
+/// Route-selection placeholder while the airport database is parsed on its worker thread (a few frames): the globe keeps
+/// running (so a drag / zoom that opened this screen continues seamlessly), the panel says what is happening.
+/// Returns true when the user asked to go back.
+pub fn draw_loading(g: &mut Gui, globe: &mut Globe, utc: f64, dt: f64) -> bool {
+    let (w, h) = (g.vw, g.vh);
+    g.rect_v(0.0, 0.0, w, h, [0.02, 0.05, 0.10, 1.0], [0.004, 0.012, 0.03, 1.0]);
+    let (gx0, gy0, gw, gh, view) = planner_globe_view(w, h);
+    let empty = crate::airports::AirportDb::empty();
+    globe.run(g, view, utc, &empty, Marks::default(), true, dt);
+    g.frame(gx0, gy0, gw, gh, 1.0, [1.0, 1.0, 1.0, 0.07]);
+    g.panel(24.0, 64.0, 400.0, 96.0);
+    g.text(40.0, 80.0, 11.0, ACCENT, 0, "ROUTE SELECTION");
+    let dots = (g.time * 3.0) as usize % 4;
+    g.textf(40.0, 102.0, 15.0, TEXT, 0, format_args!("Loading airports{}", ".".repeat(dots)));
+    g.text(40.0, 128.0, 10.0, DIM, 0, "Airport positions and runway coordinates");
+    g.btn(24.0, h - 44.0, 110.0, 28.0, "BACK", BtnKind::Secondary)
+}
+
 pub fn draw_planner(g: &mut Gui, p: &mut PlannerState, globe: &mut Globe, db: &AirportDb, utc: f64, dt: f64) -> PlannerAction {
     let (w, h) = (g.vw, g.vh);
     let mut act = PlannerAction::None;
@@ -356,10 +399,8 @@ pub fn draw_planner(g: &mut Gui, p: &mut PlannerState, globe: &mut Globe, db: &A
     }
 
     // ---------------- globe (right area)
-    let (gx0, gy0) = (452.0f32, 52.0f32);
-    let (gw, gh) = ((w - gx0 - 12.0).max(200.0), (h - gy0 - 60.0).max(200.0));
-    let view = GlobeView { cx: gx0 + gw * 0.5, cy: gy0 + gh * 0.5, r: gw.min(gh) * 0.46, clip: [gx0, gy0, gw, gh] };
-    let marks = Marks { dep: p.dep_idx(db), arr: p.arr_idx(db), hover_lock: false };
+    let (gx0, gy0, gw, gh, view) = planner_globe_view(w, h);
+    let marks = p.marks(db);
     let out = globe.run(g, view, utc, db, marks, true, dt);
     if let Some(i) = out.picked {
         p.select(db, i, globe);

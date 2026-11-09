@@ -114,6 +114,22 @@ fn main() {
     frame(&mut ui, &mut ras, &db, &mut pre, &mut inp, 240);
     shot(&ras, "08-planner-routes", ui.verts.len());
 
+    // 2b. airport framing + runway-level zoom (real-metre markings over the procedural surface; tiles need a GPU)
+    if let Some(a) = db.get("KSFO") {
+        pre.planner.dep = "KSFO".into();
+        pre.planner.arr = "KSFO".into();
+        let (la, lo, z) = inflight::ui::globe::frame_airport(a);
+        pre.globe.snap_to(la, lo, z);
+        frame(&mut ui, &mut ras, &db, &mut pre, &mut inp, 3);
+        shot(&ras, "08b-planner-airport-frame", ui.verts.len());
+        pre.globe.snap_to(la, lo, z * 5.0);
+        frame(&mut ui, &mut ras, &db, &mut pre, &mut inp, 3);
+        shot(&ras, "08c-planner-runway-zoom", ui.verts.len());
+        pre.globe.snap_to(la, lo, z * 14.0);
+        frame(&mut ui, &mut ras, &db, &mut pre, &mut inp, 3);
+        shot(&ras, "08d-planner-runway-close", ui.verts.len());
+    }
+
     // 3. briefings
     for (tag, a, b) in [("09-briefing-sfo-lax", "KSFO", "KLAX"), ("10-briefing-egll-kjfk", "EGLL", "KJFK"), ("11-briefing-wiii-wadd", "WIII", "WADD")] {
         pre.planner.dep = a.into();

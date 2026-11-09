@@ -47,6 +47,8 @@ Setelah penggabungan paralel antara modul **UI/UX Pra-Penerbangan** dan modul **
 
 | Tanggal | Fitur / Subsystem | File Terlibat | Ringkasan Pekerjaan | Status |
 |---|---|---|---|---|
+| 2026-11-10 | **Lazy airports, bare menu globe, runway overlay, TS-exact tile providers** | `airports.rs`, `ui/globe.rs`, `ui/mod.rs`, `ui/screens.rs`, `ui/planner.rs`, `app.rs`, `tiles/styles.rs`, `data/airport-aliases.json`, `tests/ui_flow.rs` | Menu globe = bare rotating Earth (no airports); zoom / pan hands over to route selection which loads the airport DB on a worker thread; real-metre runway markings from the TS database coordinates at runway zoom (up to ~0.5 m/px); tile URL / sub-domain handling and provider list aligned with `src/sim/tiles.ts`. See §4 and §7. | ✅ `cargo check --all-targets`, `cargo test --release` green; ⚠️ GPU output not visually verified in the sandbox |
+| 2026-11-09 | **Camera system: cockpit + external, free movement, panel presets** | `camera.rs` (new), `camera_ui.rs` (new), `cockpit.rs`, `app.rs`, `deckhost.rs`, `gfx/ui.rs`, `lib.rs`, `bin/shots.rs`, `bin/soak.rs` | Replaced the ad-hoc head-look rig by a spring-driven camera system with exactly two perspectives: **cockpit** (10 + 1 panel presets ported from `cockpit.ts`, free-look with momentum, lean, zoom, Alt+click focus) and **external** (chase / wing / tower, click-drag orbit, pan, zoom, recentre). See section 7. | ✅ `cargo check` + `cargo test --release` (163 lib tests, +21 camera tests); ⚠️ no GPU in the sandbox, interactive feel not verified visually |
 | 2026-11-09 | **Citra Satelit & Peta Nyata (OSM / Esri / Sentinel-2)** | `tiles/*`, `bin/tilecache.rs`, `gfx/*`, `ui/globe.rs`, `terrain.rs`, `app.rs`, `Cargo.toml` | Streaming asinkron peta satelit nyata 60 FPS (Esri, Sentinel-2, OSM, Topo, Night Lights, Dark) dengan disk cache LRU 2 GiB, page table clipmap datar, dan pemilih layer interaktif di bola dunia menu awal. Lihat §4. | ✅ Selesai & Teruji |
 | 2026-11-09 | **Kokpit 3D HD interaktif + Marketplace add-on** | `addons.rs`, `glb.rs`, `deck.rs`, `deckhost.rs`, `a320sys.rs`, `gfx/deck_gpu.rs`, `gfx/deck.wgsl`, `gfx/fx.rs`, `gfx/mod.rs`, `ui/market.rs`, `ui/mod.rs`, `ui/screens.rs`, `app.rs`, `tests/deck.rs`, `Cargo.toml` | Model GLB A320 yang sama persis dengan proyek TS (pinned SHA `b2afd17`) diunduh in-game lewat Marketplace (F2 / tombol ADD-ONS) ke cache persisten, di-parse di thread latar, lalu dirender dengan 596 kontrol interaktif (picking sinar + klik/drag/scroll) dan 6 layar PFD/ND/E-WD/SD terpetakan ke mesh kaca model. Fallback: kokpit prosedural bila belum diunduh. Lihat §3. | ✅ Selesai & Teruji (CPU/shader); ⚠️ render GPU belum diverifikasi visual di sandbox tanpa GPU |
 | 2026-11-08 | **Integrasi Lengkap UI/UX + 3D Simulation** | `rust/src/*`, `rust/assets/*`, `rust/tests/*` | Penggabungan penuh dua branch paralel: UI/UX pra-penerbangan (`ui/`) dan 3D terrain/fisika/kokpit (`atmosphere.rs`, `clouds.rs`, `cockpit.rs`, `fbw.rs`, `precip.rs`). Seluruh 112 tes lulus (90 unit + 5 environment + 6 flight + 11 ui flow). | ✅ Selesai & Teruji |
@@ -103,10 +105,114 @@ Setelah penggabungan paralel antara modul **UI/UX Pra-Penerbangan** dan modul **
 * Belum di-port: kamera preset fokus (0–9) dan tablet EFB, MCDU interaktif penuh (tombol hanya animasi + tooltip), halaman SD per-ECP (state tersimpan, `displays.rs` masih menampilkan satu halaman), jam/baro canvas, sidestick mengikuti input, indikator FCU hanya overlay teks.
 * `A320Systems` adalah port ringkas; mesin ECAM penuh (`ecam.ts`, alert/CLR/RCL) belum ada.
 
+
 ---
 
+## 4. Terrain / satellite-map system - plan, architecture, change history (2026-11-10)
 
+> Scope: terrain **maps** only (real satellite imagery draped on the ground surface and on the menu globe). No full 3D
+> world. `src/` (TypeScript) was only READ as the golden reference; every change lives in `rust/`.
 
+### 4.1 Work plan (what was audited / done, in order)
+
+1. **Baseline** - cloned the repo, installed the Rust toolchain, `cargo check --all-targets` + `cargo test --release` on the
+   unmodified tree (the tile system of 2026-11-09 was already in place: `tiles/*`, `bin/tilecache.rs`).
+2. **Audit tiles vs. `src/sim/tiles.ts` / `src/ui/mapLayers.ts`** - found: no `{s}` sub-domain support, `topo` pointed at Esri
+   instead of OpenTopoMap, `Voyager` and the `Aviation Chart` (Esri Shaded Relief) styles missing, dark chart used the
+   non-sharded host. -> fixed in `tiles/styles.rs` (§4.4).
+3. **Audit the terrain page table / GPU upload path** (`tiles/ground.rs`, `tiles/gpu.rs`, `hub.rs::take_uploads`): a tile only
+   becomes *resident* inside `take_uploads`, and `TileAtlas::pump` issues the matching `write_texture` in the same call on the
+   render thread, before any planner reads the table, so a page-table entry can never point at a layer whose texels were not
+   queued yet (this resolves the open question of §6.3-B). Layers used in the last 2 frames are never evicted (`layer_used + 2 <= stamp`).
+4. **Airport data fidelity** - `AirportDb` now carries `Runway::src` / `Airport::approx` and the airport aliases of the TS
+   data; a test compares **every airport position and every runway end** with `src/data/airports.json` (§4.5).
+5. **Menu / route-selection flow** (goal 4) - bare rotating globe, zoom / pan -> route selection, airports loaded lazily (§4.3).
+6. **Runway overlay on the globe** - port of `globeRunways.ts` in real metres, plus the TS zoom range (§4.3).
+7. Tests, docs, synchronisation.
+
+### 4.2 Tile-loading architecture (kept, verified) - why it holds 60 FPS
+
+```text
+ render thread (never blocks)                worker threads (10, `tile-worker-N`)                 GPU
+ ----------------------------                ------------------------------------                 ---
+ GlobeTiles / GroundPlan                     pop best-priority key
+   ensure(key, angle)  --O(1)--> view lane    1. disk cache hit?  (LRU, 2 GiB, mtime-touched) ----+
+   begin_view() drops stale wishes            2. HTTP GET (ureq, 12 s timeout, 8 MiB cap)         |
+ TileAtlas::pump (once per frame)             3. decode PNG/JPEG -> 256x256 RGBA + mip chain      |
+   take_uploads(<= 3..8 tiles/frame) <------- bounded `ready` queue (48, back-pressure) <--------+
+   write_texture into a texture-array layer
+ GroundPlan::update -> page table (16x16 tiles x 8 levels, one small write_texture, only when changed)
+```
+
+* **Threads**: network, disk and decode work are never on the render thread. The render thread only touches two short
+  mutexes (queue book-keeping, resident table). Back-pressure (`READY_CAP = 48`) pauses workers when the GPU side is behind.
+* **Upload rationing**: 3 tiles/frame normally, 5 / 8 when the backlog grows (<= 8 x 349 KB per frame -> bounded frame time).
+* **Atlas + LRU**: one `texture_2d_array` (up to `MAX_LAYERS`), free list then LRU eviction; tiles with `z <= 3` of the active
+  style are pinned so there is never a hole anywhere on Earth. Tiles on screen are touched every frame.
+* **No pop-in**: a fresh tile cross-fades (0.35 s) over its nearest resident ancestor; the page table stores
+  `[layer, scale, offset]` so any resident ancestor is sampled until the exact tile arrives (never grey / blank squares;
+  Esri is asked with `blankTile=false` so missing coverage is a 404 and the parent is kept).
+* **Back-off**: 404 -> retry after 10 min, transient errors 15 s doubling up to 120 s (same constants as `tiles.ts`),
+  `INFLIGHT_OFFLINE=1` forces cache-only mode.
+* **Pre-download**: `bin/tilecache.rs` (region pre-fetch into the same disk cache) and `ground::prefetch_keys` warm the tiles
+  around a newly chosen departure airport at idle priority.
+* **Geographic exactness**: the sim world frame is an exact affine image of Web-Mercator (`geo::Projection`), a fragment at world
+  (x, z) maps to a tile coordinate with one multiply-add (camera-relative origins keep f32 precision far from the origin); the
+  clipmap ring `l` uses zoom `18 + log2(cos lat0) - l`, i.e. imagery resolution matches vertex spacing (about 0.6 m/px at z18).
+
+### 4.3 Menu globe -> route selection (goal 4)
+
+* **Menu**: `Globe::markers == false` - a bare, slowly rotating, day/night shaded globe with satellite tiles. No airport markers,
+  no runway layer, no picking, and the **airport database is not even loaded** (`AirportDb::empty()`; the boot rows read
+  "loads with route selection").
+* **Trigger**: `GlobeOut::engaged` is set by a wheel zoom over the globe or by a pointer drag of >= 6 px (`PAN_THRESHOLD_PX`;
+  a click or a 3 px jitter does not count; nothing happens while a modal is open or over the bento grid). `draw_menu` then
+  returns `MenuAction::Planner`: the bento hub disappears, `PreFlight::goto(Planner)` raises `airports_requested`.
+  The globe object is shared, so the zoom / drag the user started carries on seamlessly (the drag keeps its state).
+* **Lazy load**: `App::service_airports` spawns `AirportLoader` (a worker thread parses the embedded 1.4 MB JSON) and polls it
+  once per frame; until it is delivered the route-selection screen shows a "Loading airports..." placeholder with the live
+  globe (`planner::draw_loading`), then the search index is built and all 8 413 airports appear. A flight start (Free Flight
+  tile / `--autostart`) calls `require_airports()` which waits for the loader. Back (Esc) -> `Globe::reset_to_menu()` eases to
+  the whole-globe framing and resumes the idle rotation; markers disappear again.
+* **Airport / runway placement**: markers use `unit(lat, lon)` of the database position through the same orthographic basis as the
+  tiles. At runway zoom (`runway_alpha(m/px)`: 0 above 24 m/px, 1 below 8 m/px - constants of `globeRunways.ts`) the
+  `Runway` end coordinates are projected and drawn **in metres** (pavement wash, edge stripes, 30/20 m centreline dashes, piano
+  keys by width, designators, dep/arr outline + chevron). `frame_airport()` ports `frameAirportView` (45 km max, runway extent
+  / 0.55), the zoom range now matches `MAX_GLOBE_ZOOM` (`MAX_ZOOM = 48 000` ~ 0.5 m/px, was 220 = 80 m/px, which could never show a runway).
+  Orbit-only decorations (atmosphere ring, terminator, sun marker) are skipped above zoom 60 (huge coordinates, no meaning).
+
+### 4.4 Tile providers vs. the TypeScript reference
+
+| id (disk cache dir) | URL template | TS source |
+|---|---|---|
+| `sat` | Esri World_Imagery `.../tile/{z}/{y}/{x}?blankTile=false` (z18) | `ESRI_IMAGERY_URL` |
+| `s2` | EOX `s2cloudless-2020_3857` `{z}/{y}/{x}.jpg` (z17) | `s2cloudless` |
+| `osm` | `tile.openstreetmap.org/{z}/{x}/{y}.png` (z19) | `osm` |
+| `opentopo` (new id: the old `topo` dir held Esri tiles) | `{s}.tile.opentopomap.org/{z}/{x}/{y}.png` (z17) | `topo` |
+| `relief` (new) | Esri World_Shaded_Relief `{z}/{y}/{x}` (z13) | `relief` ("Aviation Chart") |
+| `dark` | `{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png` | `dark` |
+| `voyager` (new) | `{s}.basemaps.cartocdn.com/rastertiles/voyager/...` | `voyager` |
+| `night` | NASA GIBS VIIRS Black Marble (native extra, not in TS) | - |
+
+`TileStyle::tile_url` = `tileUrl()` of `tiles.ts`: X wraps modulo `2^z`, `{s}` = `"abc"[(x + y) % 3]`, out-of-range row -> `""`.
+Not ported on purpose: the TS "fallback to OSM when the provider is unreachable". Mixing OSM streets into a satellite
+surface would be a visible glitch (and would poison the per-provider disk cache); the Rust loader instead keeps the last good
+ancestor tile, retries with back-off, and shows `OFFLINE - CACHED TILES ONLY`.
+
+### 4.5 Verification
+
+* `cargo check --all-targets` (clean, no warnings) and `cargo test --release`: **190 tests pass** (154 unit + 5 deck + 5 environment + 7 flight + 19 ui_flow). `tiles::globe_tiles::tests::cpu_cost_*` is a wall-clock test and can spike on a loaded 2-core machine (mean 0.38 ms; a single 13 ms outlier was seen once under parallel load, it passed on rerun).
+* New tests: `airports::tests::matches_typescript_reference_data` (every airport lat/lon and every runway end + `src` flag
+  equal `src/data/airports.json`), `runways_lie_next_to_their_airport`, aliases / empty DB / threaded loader;
+  `tiles::styles::tests::subdomains_rotate_like_the_typescript_reference`; `ui::globe::tests` (runway screen heading =
+  true bearing within 0.5 deg, scale = 1 px/m x resolution, centred on the camera; fade curve; framing; engagement thresholds);
+  `tests/ui_flow.rs` (bare menu globe, wheel / drag hand-over, click or off-globe wheel / open modal do not hand over,
+  Back restores the rotating globe, lazy database flow with an empty DB, vertex budget up to `MAX_ZOOM`).
+* **Not verifiable here**: there is no GPU / display in the build sandbox, so wgpu output was never looked at. WGSL is validated
+  with `naga`; the UI paths are rasterised on the CPU (`ui::raster`). Please smoke-test `cargo run --release` on a machine with a
+  GPU: menu globe, wheel -> route selection, zoom to an airport (runway markings must sit on the real runway in the imagery).
+
+---
 
 ## 6. Windows glitch + camera-control audit (fix log)
 
@@ -192,3 +298,83 @@ and assert that every vertex has `y` in `8.0..=12.0`.
    the wheel zooms.
 4. Alt-tab while holding W / the mouse button: nothing is stuck after coming back. Maximise / restore: no stretched frame.
 5. `cargo check --all-targets && cargo test --release` (not yet run, see the status note at the top).
+
+---
+
+## 7. Camera system (2026-11-09)
+
+Scope of this task: **only the camera system** of the native build - no physics, systems or renderer changes. `src/` (TypeScript) was
+read as the golden specification (`src/sim/cockpit.ts`: `COCKPIT_PANELS`, `COCKPIT_PRESETS`, `framePanel`, `lookBy`, `panBy`, `smooth`,
+`focusGroup`; `src/sim/game.ts`: `updateCamera`, `setCockpitSubview`, key / pointer handling) and was not touched.
+
+### 7.1 Work plan (what was decided and why)
+
+1. **Two perspectives, one state object.** `camera::CamState` owns every camera state (cockpit, chase, wing, tower, blend, view switch).
+   The app only feeds it input (`drag / release / zoom / focus / reset`) and calls `rig()` once per frame. The old `HeadLook`, `View::Panel`
+   and the Tower look-hack in `app.rs` are gone: panel viewing is now a *focus preset* of the cockpit perspective.
+2. **Everything is a critically-damped spring** (`Spring::step`, port of `cockpit.ts::sd`, Unity SmoothDamp). No fixed lerp factors, so no
+   frame-rate dependence and no overshoot (unit-tested: monotone, frame-rate independent, survives a 5 s hitch). Time constants:
+   base view 0.42 s (weighted / cinematic), free-look 85 ms, lean 140 ms, zoom 150 ms (log space), chase follow 0.5 s, tower aim 0.22 s.
+3. **Input only moves targets.** The mouse never writes the output. Dragging moves `LookRig` targets, the springs ease the picture; on release
+   a moving hand leaves **momentum** (decays with `exp(-3.4 t)`), a stopped hand does not. Drag sensitivity follows the field of view
+   (`fov / viewport_h * 1.15` deg per px) so the scene tracks the cursor at any zoom; chase orbit uses a fixed 0.26 deg/px.
+4. **Presets are authored in the TypeScript coordinates.** HD deck: model metres (`COCKPIT_PANELS` / `COCKPIT_PRESETS` copied verbatim) mapped
+   to the body frame by the same `deck::model_to_body` the GLB uses (a test proves `EYE_M` lands on the design eye). Procedural deck: the same ids
+   expressed in body metres from `SCREENS` (no MCDU / EFB there; they are hidden). Panels are framed **square-on** from the distance that fits
+   both dimensions at the *current aspect ratio* (`frame_panel`, re-evaluated each frame, so a window resize re-frames smoothly).
+5. **External views blend, the hull is never flown through.** Chase -> Wing -> Tower glide between poses stored *relative to the aircraft*
+   (smootherstep, 0.9 s); a tower re-hop is blended the same way. Cockpit <-> external uses a 0.42 s dip-to-black swapped at the darkest point
+   (`request_view / advance_view / fade`), because the interior is a different render path.
+6. **Discoverability.** Clickable hot-bar (`camera_ui.rs`, shared layout for drawing + hit-testing + input blocking), HUD shows the current
+   camera ("cam PFD"), F1 help lists every gesture.
+
+### 7.2 Behaviour
+
+| View | Look / orbit (left drag) | Pan / lean (right / middle / Shift+left drag) | Wheel | Notes |
+|---|---|---|---|---|
+| **Cockpit** (captain's eye) | free look, neck limit +-155 deg / +-77 deg around the *base* view, momentum | lean +-30 cm / +-20 cm | FOV zoom 0.8x-8x (a knob under the cursor takes the wheel first, **Ctrl+wheel** always zooms) | G-load head motion (low-passed), stall / rolling vibration (scaled by zoom); Alt+click a control frames it (`focusGroup`) |
+| **Chase** | free orbit, 360 deg yaw, -19 .. +75 deg elevation; frame follows the smoothed track; terrain-safe (soft ground clamp); horizon leans 25 % with the bank | slide the focus point (bounded to +-35 m / +-18 m) | distance 0.45x-6x | default 46 m behind / 11 deg above |
+| **Wing** | free 360 deg look from the wing-tip mount | - | FOV zoom 0.6x-4x | rigid mount |
+| **Tower** | look offset around the (lag-smoothed) aim | - | FOV zoom 0.5x-8x | spot re-hops when the aircraft has gone by (blended) |
+
+Keys: `C` cockpit <-> last external view, `Y` next external view, `0..9` cockpit panels (SEAT FCU PFD ND ECAM MCDU EFB OVHD PED PANEL; from outside
+it first goes to the cockpit), `, .` previous / next panel, `Home` reset (cockpit: also back to SEAT), `Numpad 4 6 8 2` look, `Numpad 5` reset,
+`Numpad + -` zoom, **double-click** on empty space recentres. The extra PILOT preset (TS `pilot`, looking down at the panel) is only on the hot-bar.
+Deliberate deviation: SEAT looks straight ahead (-4 deg, user FOV setting) while the TS `pilot` preset is exposed separately.
+
+### 7.3 Tile loader architecture (unchanged by this task - recorded because the camera feeds it)
+
+The camera position is the only input the streaming code needs. `gfx::Renderer::render` receives the final `Camera` and hands
+`cam.pos` to `tiles::ground::GroundPlan::update` and the clipmap planner; nothing in `tiles/` depends on how the camera is produced.
+`tiles::hub::TileHub` keeps the render thread free of I/O: priority queue + worker pool (network via `ureq`, `jpeg-decoder` / `png`
+decode and mip chain on workers), persistent 2 GiB LRU disk cache (`tiles/disk.rs`, URL providers in `tiles/styles.rs`, the Rust twin of
+`src/sim/tiles.ts`), bounded per-frame GPU uploads into one texture-array atlas (`tiles/gpu.rs`). Camera moves are now continuous (no teleporting between chase / tower / cockpit poses), so the position the tile planner sees changes smoothly between frames. The dip-to-black hides the one remaining discontinuity (interior <-> exterior).
+
+### 7.4 Files
+
+* `src/camera.rs` (new): `Spring`, `LookRig`, `Pose` + blending, `Focus` / presets, `CockpitCam`, `ChaseCam`, `LookCam`, `TowerCam`, `CamState`
+  (input API, view switching, `rig`). 18 unit tests.
+* `src/camera_ui.rs` (new): hot-bar layout / hit-test / draw. 3 unit tests.
+* `src/cockpit.rs`: old rig removed; keeps deck geometry, `SCREENS`, `eye_body`, `head_motion`, `look_dirs`.
+* `src/app.rs`: new input pipeline (`update_camera_input`, `update_look`, `camera_action`), middle button, Ctrl+wheel, Alt+click, hot-bar click,
+  fade overlay, view keys. `src/deckhost.rs`: `focus_at`. `src/gfx/ui.rs`: `View` (Panel removed), `HudInfo::cam_label`, F1 text.
+* `src/bin/shots.rs`: snapped cameras + one screenshot per panel preset; `src/bin/soak.rs`: new API.
+
+### 7.5 Verification
+
+```
+cd rust
+cargo check --all-targets   # clean, no warnings
+cargo test --release        # lib 163 passed (camera 18, camera_ui 3), tests/* all passed
+```
+Camera tests cover: spring monotonicity / frame-rate independence / hitch safety, shortest-way angle interpolation, look clamping + wrapping +
+momentum, every preset (HD + procedural, 3 aspect ratios) inside the deck volume with the panel centred on the axis and fully inside the frustum,
+smooth fly-in (max turn per frame), reset, lean bounds, chase orbit / pan / zoom / ground clearance / top-down validity, wing + tower look,
+no jump on view blends, dip-to-black timing, digit mapping + fallbacks, control focus normals, finite output in every view, snap.
+
+### 7.6 Known limits / next steps
+
+* No GPU in the build sandbox: the renderer was not run, so the *feel* (sensitivities, spring times) is derived from the TS values and unit tests,
+  not from a hands-on session. Every constant is a named `const` at the top of `camera.rs` / `app.rs` for tuning.
+* The HD deck presets use TS model-space numbers; if the add-on model changes, re-measure `spec()` in `camera.rs`.
+* Possible follow-ups: gamepad right-stick look, per-view saved orbits across flights, TrackIR-style head tracking input into `LookRig`.

@@ -19,6 +19,9 @@ pub struct Runway {
     pub lit: bool,
     pub disp_le: f64,
     pub disp_he: f64,
+    /// geometry provenance (TS `Runway.src`): `S` = surveyed OSM centreline, `O` = OurAirports thresholds,
+    /// `H` = placed from declared length / heading (approximate), `' '` = unknown
+    pub src: char,
 }
 
 /// One usable direction of a runway.
@@ -80,6 +83,8 @@ pub struct Airport {
     pub size: u8,
     pub iata: String,
     pub runways: Vec<Runway>,
+    /// at least one runway was placed from declared length / heading only (TS `Airport.approx`)
+    pub approx: bool,
 }
 
 impl Airport {
@@ -110,6 +115,9 @@ pub struct AirportDb {
     pub airports: Vec<Airport>,
     index: HashMap<String, usize>,
 }
+
+/// Retired airfield codes that must keep resolving (`src/data/airport-aliases.json` of the TS project).
+static ALIASES_JSON: &str = include_str!("../data/airport-aliases.json");
 
 fn pad(s: &str) -> String {
     let b = s.as_bytes();
@@ -154,6 +162,7 @@ impl AirportDb {
                             lit: w.get(9).and_then(Value::as_f64).map(|v| v == 1.0).unwrap_or(true),
                             disp_le: num(w, 10),
                             disp_he: num(w, 11),
+                            src: text(w, 12).chars().next().unwrap_or(' '),
                         })
                         .collect()
                 })
@@ -169,10 +178,29 @@ impl AirportDb {
                 size: num(r, 7) as u8,
                 iata: text(r, 8),
                 runways,
+                approx: r.get(10).and_then(Value::as_f64) == Some(1.0),
             });
         }
-        let index = airports.iter().enumerate().map(|(i, a)| (a.icao.clone(), i)).collect();
+        let mut index: HashMap<String, usize> = airports.iter().enumerate().map(|(i, a)| (a.icao.clone(), i)).collect();
+        // older saves / links used previous codes for some airfields: keep them resolvable (never shadowing a real ICAO)
+        if let Some(map) = serde_json::from_str::<Value>(ALIASES_JSON).ok().as_ref().and_then(Value::as_object) {
+            for (old, new) in map {
+                if let (Some(&i), false) = (new.as_str().and_then(|n| index.get(n)), index.contains_key(old)) {
+                    index.insert(old.clone(), i);
+                }
+            }
+        }
         Self { airports, index }
+    }
+
+    /// A database without any airport (the pre-flight menu runs on this until the route-selection screen asks for the
+    /// real data, see [`AirportLoader`]).
+    pub fn empty() -> Self {
+        Self { airports: Vec::new(), index: HashMap::new() }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.airports.is_empty()
     }
 
     pub fn get(&self, icao: &str) -> Option<&Airport> {
@@ -183,6 +211,37 @@ impl AirportDb {
     pub fn find(&self, code: &str) -> Option<&Airport> {
         let c = code.trim().to_ascii_uppercase();
         self.get(&c).or_else(|| if c.len() == 3 { self.airports.iter().find(|a| a.iata == c) } else { None })
+    }
+}
+
+/// Parses the embedded database on a background thread so the render loop never stalls on the 1.4 MB JSON.
+pub struct AirportLoader {
+    rx: std::sync::mpsc::Receiver<AirportDb>,
+}
+
+impl AirportLoader {
+    pub fn spawn() -> Self {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let spawned = std::thread::Builder::new().name("airport-loader".into()).spawn({
+            let tx = tx.clone();
+            move || {
+                let _ = tx.send(AirportDb::embedded());
+            }
+        });
+        if spawned.is_err() {
+            let _ = tx.send(AirportDb::embedded()); // could not start a thread: parse inline
+        }
+        Self { rx }
+    }
+
+    /// The database once it is parsed (non-blocking).
+    pub fn poll(&self) -> Option<AirportDb> {
+        self.rx.try_recv().ok()
+    }
+
+    /// Blocks until the database is available (flight start only).
+    pub fn wait(self) -> AirportDb {
+        self.rx.recv().unwrap_or_else(|_| AirportDb::embedded())
     }
 }
 
@@ -231,5 +290,72 @@ mod tests {
     fn every_airport_has_finite_coordinates() {
         let db = AirportDb::embedded();
         assert!(db.airports.iter().all(|a| a.lat.is_finite() && a.lon.is_finite() && a.lat.abs() <= 90.0));
+    }
+
+    /// The Rust database must be a faithful image of the TypeScript reference (`src/data/airports.json`): same airports,
+    /// same positions, same runway endpoints. Skipped when the TS tree is not next to `rust/`.
+    #[test]
+    fn matches_typescript_reference_data() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../src/data/airports.json");
+        let Ok(json) = std::fs::read_to_string(path) else { return };
+        let reference: Value = serde_json::from_str(&json).unwrap();
+        let db = AirportDb::embedded();
+        let rows = reference.as_array().unwrap();
+        assert_eq!(db.airports.len(), rows.len());
+        for (a, r) in db.airports.iter().zip(rows) {
+            assert_eq!(a.icao, r[0].as_str().unwrap());
+            assert_eq!((a.lat, a.lon), (r[4].as_f64().unwrap(), r[5].as_f64().unwrap()), "{}", a.icao);
+            let ws = r[9].as_array().unwrap();
+            assert_eq!(a.runways.len(), ws.len(), "{}", a.icao);
+            for (rw, w) in a.runways.iter().zip(ws) {
+                assert_eq!((rw.le_lat, rw.le_lon, rw.he_lat, rw.he_lon), (w[2].as_f64().unwrap(), w[3].as_f64().unwrap(), w[4].as_f64().unwrap(), w[5].as_f64().unwrap()), "{} {}", a.icao, rw.le);
+                assert_eq!(rw.src.to_string(), w[12].as_str().unwrap_or(" "), "{}", a.icao);
+            }
+        }
+    }
+
+    #[test]
+    fn runways_lie_next_to_their_airport() {
+        // every runway of every airport must be placed within a few km of the airport reference point (OSM / OurAirports
+        // data sanity: a swapped lat/lon or a wrong hemisphere would put a runway on another continent)
+        let db = AirportDb::embedded();
+        let mut far = Vec::new();
+        for a in &db.airports {
+            for rw in &a.runways {
+                let mid = ((rw.le_lat + rw.he_lat) * 0.5, (rw.le_lon + rw.he_lon) * 0.5);
+                if haversine(a.lat, a.lon, mid.0, mid.1) > 9_000.0 {
+                    far.push(format!("{} {}/{}", a.icao, rw.le, rw.he));
+                }
+            }
+        }
+        assert!(far.len() <= 5, "{} runways far from their airport: {:?}", far.len(), &far[..far.len().min(12)]);
+    }
+
+    #[test]
+    fn empty_database_and_aliases() {
+        let e = AirportDb::empty();
+        assert!(e.is_empty() && e.get("KSFO").is_none() && e.find("SFO").is_none());
+        let db = AirportDb::embedded();
+        assert!(!db.is_empty());
+        // `WARJ` is a retired code of `WAHH` (airport-aliases.json)
+        assert_eq!(db.get("warj").map(|a| a.icao.as_str()), Some("WAHH"));
+        // a real ICAO is never shadowed by an alias
+        assert_eq!(db.get("WIII").unwrap().icao, "WIII");
+        assert!(db.airports.iter().any(|a| a.approx) && db.airports.iter().any(|a| a.runways.iter().any(|r| r.src == 'S')));
+    }
+
+    #[test]
+    fn loader_delivers_the_database_off_thread() {
+        let l = AirportLoader::spawn();
+        let t0 = std::time::Instant::now();
+        let db = loop {
+            if let Some(db) = l.poll() {
+                break db;
+            }
+            assert!(t0.elapsed().as_secs() < 30, "loader never finished");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        };
+        assert!(db.airports.len() > 8000);
+        assert_eq!(AirportLoader::spawn().wait().airports.len(), db.airports.len());
     }
 }

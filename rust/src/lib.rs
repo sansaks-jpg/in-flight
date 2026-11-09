@@ -9,6 +9,8 @@ pub mod airports;
 pub mod atmosphere;
 pub mod app;
 pub mod autopilot;
+pub mod camera;
+pub mod camera_ui;
 pub mod clock;
 pub mod clouds;
 pub mod cockpit;
