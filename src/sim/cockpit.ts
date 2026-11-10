@@ -60,6 +60,8 @@ interface Part { node: THREE.Mesh; m0: THREE.Matrix4; }
 interface Group { id: string; kind: Kind; parts: Part[]; axis?: Axis; pos: number; angle: number; press: number; label: string; steps: number; box: THREE.Box3; lamps: { node: THREE.Mesh; letter: string; row: number }[]; nrm?: THREE.Vector3;
   /** current model-space pose matrix · fallback axis derived from the bounding box · static (state-driven) control · last pose key */
   xf: THREE.Matrix4; fb?: Axis; still: boolean; lastKey: number;
+  /** +1 / -1: sign of a positive rotation about the hinge axis that turns the knob CLOCKWISE as seen by the pilot (derived once from axis . panel normal) */
+  cw?: number;
   /** overhead push-button: `ovh` = lives on the overhead panel, `mom` = momentary (springs back) – every other overhead push-button latches (IN = engaged / AUTO, OUT = OFF) */
   ovh?: boolean; mom?: boolean; sgn?: number; }
 /** Parts that ride on another control: the A/THR disconnect pushbuttons and the reverse flaps move with their thrust lever. */
@@ -133,7 +135,14 @@ const SRC_KNOBS: Record<string, { key: 'attHdg' | 'airData' | 'eisDmc' | 'ndXfr'
   ecam_att_hdg: { key: 'attHdg', legend: ['CAPT 3', 'NORM', 'F/O 3'] }, ecam_air_data: { key: 'airData', legend: ['CAPT 3', 'NORM', 'F/O 3'] },
   ecam_eis_dmc: { key: 'eisDmc', legend: ['CAPT 3', 'NORM', 'F/O 3'] }, ecam_nd_xfr: { key: 'ndXfr', legend: ['CAPT', 'NORM', 'F/O'] },
 };
-const BRT_KNOBS: Record<string, 'uecam' | 'lecam'> = { ecam_brt_upper: 'uecam', ecam_brt_lower: 'lecam' };
+/** Brightness / dimmer knobs wired to a display or lighting level (0..1). 12 detents, fully counter-clockwise = 0 (OFF for the ECAM display units). The posed
+ *  detent always follows the system value, so the knob turns whatever changed it. */
+const BRIGHT_KNOBS: Record<string, { get(s: A320Systems): number; set(s: A320Systems, v: number): void }> = {
+  ecam_brt_upper: { get: (s) => s.bright.uecam, set: (s, v) => { s.bright.uecam = v; } }, ecam_brt_lower: { get: (s) => s.bright.lecam, set: (s, v) => { s.bright.lecam = v; } },
+  fcu_integ_knb1: { get: (s) => (s.bright.fcu - 0.2) / 0.8, set: (s, v) => { s.bright.fcu = 0.2 + 0.8 * v; } }, fcu_integ_knb2: { get: (s) => (s.bright.fcu - 0.2) / 0.8, set: (s, v) => { s.bright.fcu = 0.2 + 0.8 * v; } },
+  integ_lt: { get: (s) => s.bright.integ, set: (s, v) => { s.bright.integ = v; } },
+  flood_lt_main: { get: (s) => s.bright.flood, set: (s, v) => { s.bright.flood = v; } }, flood_lt_ped: { get: (s) => s.bright.flood, set: (s, v) => { s.bright.flood = v; } },
+};
 const FCU_TOGGLES = new Set(['ap1', 'ap2', 'a-thr', 'appr', 'loc', 'exped', 'fd1', 'fd2', 'arpt', 'arpt.001', 'cstr', 'cstr.001', 'wpt', 'wpt.001', 'vord', 'vord.001', 'ndb', 'ndb.001', 'ils', 'ils2', 'hdg-vs', 'spd-mach', 'metric_alt', 'alt-sel-mode', 'vor-adf1', 'vor-adf2', 'vor-adf-1-right', 'vor-adf-2-right', 'master_warning', 'master_caution', 'chrono_btn', 'chrono_reset', 'abs_low', 'abs_med', 'abs_max', 'ecam_all', 'ecam_clr_l', 'ecam_clr_r', 'ecam_rcl', 'ecam_emer_canc', 'ecam_to_config', 'gear_lever', 'ParkBrk', 'rev_l', 'rev_r', 'gravity_gear', 'tiller', 'tillerFo', 'RudderTrim', 'RudderTrimReset', 'thr_l_button', 'thr_r_button', 'pfd_nd_xfr_sw', 'pfd_nd_xfr_sw2', 'terr_on_nd_l', 'terr_on_nd_r', 'iesi_btn_bugs', 'iesi_btn_ls', 'iesi_btn_minus', 'iesi_btn_plus', 'iesi_btn_rst', 'clock_set', 'et_knob', 'HeadsetHangerCpt', 'extinguisher', 'brk_fan', 'FuelXFeedBtn']);
 const SCREENS: Record<string, 'pfd' | 'pfd2' | 'nd' | 'nd2' | 'uecam' | 'lecam' | 'mcdu1' | 'mcdu2' | 'isis' | 'clock'> = { 'pfd1.screen': 'pfd', 'pfd2.screen': 'pfd2', 'ND.screen': 'nd', 'ND_R.screen': 'nd2', 'uecam.screen': 'uecam', 'uecam.screen2': 'uecam', 'lecam.screen': 'lecam', 'mcdu1.screen': 'mcdu1', 'mcdu2.screen': 'mcdu2', iesi_screen: 'isis', clock_display: 'clock' };
 /** EFIS control panels: control id -> side (0 CAPT, 1 F/O) and function. Every id below exists in the upstream GLB. */
@@ -243,7 +252,12 @@ export class Cockpit {
     const isLed = (n: string) => /(_led|_on|_lit|_illuminated)(\.\w+)?$/.test(n) && !/^radio_on/.test(n) && !/_on$/.test(n.replace(/^abs_|^dec_/, 'x')) || /^(abs_(low|med|max)_on|dec_(low|med|max)_on|master_(warning|caution)_on|autoland_light_on|ecam_emer_canc_lit|EltLed|IrsOnBatLight|brk_(hot|fan)_on|terr_on_nd_on_[lr]|gpws_gs_sw_(gpws|gs)_on)/.test(n);
     const groups = this.groups; const used = new Set<THREE.Mesh>();
     const mkGroup = (id: string, kind: Kind): Group => { let g = groups.get(id); if (!g) { g = { id, kind, parts: [], axis: manifest.axes[id + '.axis'], pos: 0, angle: 0, press: 0, label: prettify(id), steps: KNOB_STEPS[id] ?? 12, box: new THREE.Box3(), lamps: [], xf: new THREE.Matrix4(), still: !DYNAMIC.has(id) && (kind === 'push' || kind === 'switch' || kind === 'guard' || kind === 'key'), lastKey: NaN }; groups.set(id, g); } return g; };
-    const addPart = (g: Group, m: THREE.Mesh) => { m.updateMatrix(); m.matrixAutoUpdate = false; g.parts.push({ node: m, m0: m.matrix.clone() }); used.add(m); const b = new THREE.Box3().setFromObject(m); g.box.union(b); };
+    // Control boxes MUST be in model space (relative to this.root): ovh / panelNormal / fallback pivots / lever signs all compare them with model-space constants.
+    // Box3.setFromObject() works in WORLD space, which includes this.group's model->body transform whenever the scene was rendered before the GLB finished
+    // loading (then every box sat at z = -13 m, FCU / EFIS buttons were classed as overhead latches and animated along the wrong normal).
+    // Undoing root.matrixWorld makes the result identical in both cases.
+    const rootInv = this.root.matrixWorld.clone().invert();
+    const addPart = (g: Group, m: THREE.Mesh) => { m.updateMatrix(); m.matrixAutoUpdate = false; g.parts.push({ node: m, m0: m.matrix.clone() }); used.add(m); const b = new THREE.Box3().setFromObject(m).applyMatrix4(rootInv); g.box.union(b); };
     for (const m of all) {
       const n = m.name; if (HIDE.test(n)) { m.visible = false; used.add(m); continue; }
       if (/^batt_voltage\.canvas\.[LR]$/.test(n)) { this.battMesh.push({ mesh: m, side: n.endsWith('R') ? 1 : 0, key: '' }); used.add(m); continue; }
@@ -576,7 +590,7 @@ export class Cockpit {
     const info = describeControl(p.g.id);
     return { id: p.g.id, label: p.g.kind === 'key' ? p.g.label : info.name, value: this.stateText(p.g), hint: this.hint(p.g), desc: info.text };
   }
-  private hint(g: Group) { const ef = EFIS_MAP[g.id]; if (ef) { const t = this.efisHint(ef.fn); if (t) return t; } return g.kind === 'knob' || g.id === 'spd-sel' || g.id === 'hdg_sel' || g.id === 'alt-sel' ? 'Wheel / drag to turn · click = push · right-click = pull' : g.kind === 'lever' ? 'Drag to move · detents snap' : g.kind === 'stick' ? 'Drag to fly' : g.kind === 'key' ? 'Click to press' : 'Click to operate'; }
+  private hint(g: Group) { const ef = EFIS_MAP[g.id]; if (ef) { const t = this.efisHint(ef.fn); if (t) return t; } return PUSHPULL.has(g.id) ? 'Wheel / drag to turn · click = PUSH · right-click or Shift+click = PULL' : g.kind === 'knob' ? 'Wheel / drag to turn · click = next · right-click = previous' : g.kind === 'lever' ? 'Drag to move · detents snap' : g.kind === 'stick' ? 'Drag to fly' : g.kind === 'key' ? 'Click to press' : 'Click to operate'; }
   stateText(g: Group): string {
     const s = this.sys, h = this.host, id = g.id;
     switch (id) {
@@ -585,8 +599,10 @@ export class Cockpit {
       case 'Lcutoff': return h?.fm.eng[0].state === 2 ? 'ON · RUNNING' : s.master[0] ? 'ON' : 'OFF'; case 'Rcutoff': return h?.fm.eng[1].state === 2 ? 'ON · RUNNING' : s.master[1] ? 'ON' : 'OFF';
       case 'RudderTrim': { const u = Math.round((h?.fm.ctl.rudTrim ?? 0) * 20); return u === 0 ? 'NEUTRAL' : `${Math.abs(u)} ${u < 0 ? 'L' : 'R'}`; }
       case 'eng_mode': return ['CRANK', 'NORM', 'IGN/START'][s.engMode]; case 'FlapsLever': return `CONF ${['0', '1', '2', '3', 'FULL'][h?.fm.ctl.flapsIdx ?? 0]}`; case 'rev_l': case 'rev_r': return h?.fm.ctl.reverse ? 'REV DEPLOYED' : 'STOWED';
-      case 'gear_lever': return h?.fm.ctl.gearDown ? 'DOWN' : 'UP'; case 'ParkBrk': return h?.fm.ctl.parking ? 'ON' : 'OFF'; case 'spd-sel': return `${Math.round(h?.ap.spd ?? 0)} kt`;
-      case 'hdg_sel': return `${Math.round(h?.ap.hdg ?? 0)}°`; case 'alt-sel': return `${Math.round(h?.ap.altFt ?? 0)} ft`; case 'vs-sel': return s.vsMode ? `${s.vsTarget} fpm` : 'LEVEL CH';
+      case 'gear_lever': return h?.fm.ctl.gearDown ? 'DOWN' : 'UP'; case 'ParkBrk': return h?.fm.ctl.parking ? 'ON' : 'OFF'; case 'spd-sel': return s.spdManaged ? (s.spdPre > 0 ? `PRESELECT ${s.spdMach ? 'M' : ''}${Math.round(s.spdPreVal)} · managed` : 'MANAGED (FMGS speed) · pull = selected') : s.spdMach ? `SELECTED M.${String(Math.round((h?.ap.spd ?? 0) / this.machFactor() * 100)).padStart(2, '0')}` : `SELECTED ${Math.round(h?.ap.spd ?? 0)} kt`;
+      case 'hdg_sel': { const m = (((Math.round((h?.ap.hdg ?? 0) + (h?.magVar(h.ap.hdg) ?? 0)) % 360) + 360) % 360); return s.hdgManaged ? (s.hdgPre > 0 ? `PRESELECT ${String(s.hdgPreVal).padStart(3, '0')}° · managed` : 'MANAGED (NAV) · pull = selected') : `SELECTED ${String(m).padStart(3, '0')}°`; }
+      case 'alt-sel': return `${Math.round(h?.ap.altFt ?? 0)} ft · ${s.altManaged ? 'managed (push)' : 'open (pull)'}`; case 'alt-sel-mode': return s.altStep1000 ? '1000 ft per click' : '100 ft per click';
+      case 'vs-sel': return s.vsMode ? (s.trkFpa ? `FPA ${s.fpaTarget.toFixed(1)}°` : `V/S ${s.vsTarget} fpm`) : s.vsPre > 0 ? `PRESELECT ${s.trkFpa ? s.fpaTarget.toFixed(1) + '°' : s.vsTarget + ' fpm'}` : 'LEVEL CH (dashes) · pull = V/S';
       case 'ap1': return h?.ap.on ? 'ENGAGED' : 'OFF'; case 'appr': return h?.ap.appr ? 'ARMED' : 'OFF';
       case 'thr_l_body': return thrDetentName(h?.fm.ctl.throttle ?? 0, !!h?.fm.ctl.reverse); case 'thr_r_body': return thrDetentName(Math.min(1, Math.max(0, (h?.fm.ctl.throttle ?? 0) + (h?.fm.ctl.thrOffset ?? 0))), !!h?.fm.ctl.reverse);
       case 'SpdBrk': return s.spoilerArm ? 'ARMED' : `${Math.round((h?.fm.ctl.speedbrake ?? 0) * 100)}%`;
@@ -594,6 +610,7 @@ export class Cockpit {
       case 'iesi_baro_knb': return s.isis.std ? 'STD' : `${Math.round(s.isis.hpa)} hPa`;
       case 'BeaconLtSwtch': return h?.lights.beacon ? 'ON' : 'OFF'; case 'SeatBeltSwtch': return h?.seatbelt ? 'ON' : 'OFF';
     }
+    const bk = BRIGHT_KNOBS[id]; if (bk) { const v = bk.get(s); return v < 0.03 ? 'OFF' : `${Math.round(v * 100)} %`; }
     const ef = EFIS_MAP[id]; if (ef) { const t = this.efisText(ef.side, ef.fn); if (t) return t; }
     if (g.kind === 'key') return '';
     if (SWITCH_LABELS[id]) return SWITCH_LABELS[id][g.pos] ?? '';
@@ -618,7 +635,7 @@ export class Cockpit {
     if (g.id === 'rev_l' || g.id === 'rev_r') { h.action('rev'); return { id: g.id, handled: true }; }
     if (g.id === 'Lcutoff' || g.id === 'Rcutoff') { this.toggle(g, 1); return { id: g.id, handled: true }; }
     if (g.kind === 'lever') { this.active = { g, sy: 0, acc: 0, v0: this.leverValue(g), kind: 'lever' }; return { id: g.id, handled: true }; }
-    if (g.kind === 'key') { this.mcduKey(g.id); g.press = 1; return { id: g.id, handled: true }; }
+    if (g.kind === 'key') { this.mcduKey(g.id); g.press = 1; this.active = { g, sy: 0, acc: 0, v0: 0, kind: 'hold' }; return { id: g.id, handled: true }; }   // stays down while the pointer is held
     if (ECP_KEYS.has(g.id)) { this.sys.ecam.down(g.id); g.press = 1; this.active = { g, sy: 0, acc: 0, v0: 0, kind: 'hold' }; return { id: g.id, handled: true }; }
     const fcuKnob = PUSHPULL.has(g.id);
     if (RING.has(g.id)) { this.stepKnob(g, g.pos ? -1 : 1, false); g.press = 1; return { id: g.id, handled: true }; }
@@ -647,9 +664,9 @@ export class Cockpit {
   }
   release() {
     this.efbHeld = null;
-    const a = this.active; this.active = null; if (a && ECP_KEYS.has(a.g.id)) this.sys.ecam.up(a.g.id); if (!a || !this.host) return;
+    const a = this.active; this.active = null; if (a && ECP_KEYS.has(a.g.id)) this.sys.ecam.up(a.g.id); if (a && a.g.kind === 'key') for (const m of this.mcdu) m.release(); if (!a || !this.host) return;
     const c = this.host.fm.ctl; if (Math.abs(c.thrOffset) < 0.03) c.thrOffset = 0;
-    for (const g of this.groups.values()) g.press = 0;
+    // pressed keys / buttons spring back over ~170 ms (see update()): no instant pop-up
   }
   wheel(ray: THREE.Raycaster, deltaY: number, shift: boolean): boolean {
     if (this.fallback) return false;
@@ -670,13 +687,13 @@ export class Cockpit {
 
   private stepKnob(g: Group, dir: number, shift: boolean) {
     const h = this.host; if (!h) return; const s = this.sys; const id = g.id;
+    const bk = BRIGHT_KNOBS[id]; if (bk) { const p = this.clampN(Math.round(bk.get(s) * 11) + dir, 0, 11); bk.set(s, p / 11); g.pos = p; s.sw[id] = p; return; }
     switch (id) {
       case 'spd-sel': case 'hdg_sel': case 'alt-sel': case 'vs-sel': this.fcuTurn(g, dir, shift); return;
       case 'qnh_cpt_knb': case 'qnh_fo_knb': s.efisBaroTurn(id === 'qnh_fo_knb' ? 1 : 0, dir); g.angle += dir * 0.2; return;
       case 'qnh_cpt_sw': case 'qnh_fo_sw': s.efisBaroUnit(id === 'qnh_fo_sw' ? 1 : 0, dir < 0); return;
       case 'iesi_baro_knb': s.isis.std = false; s.isis.hpa = Math.max(950, Math.min(1050, s.isis.hpa + dir)); g.angle += dir * 0.2; return;
       case 'alt-sel-mode': g.pos = dir > 0 ? 1 : 0; s.altStep1000 = g.pos === 1; return;
-      case 'fcu_integ_knb1': case 'fcu_integ_knb2': s.bright.fcu = this.clampN(s.bright.fcu + dir * 0.1, 0.2, 1); g.angle += dir * 0.3; return;
       case 'nd_range': case 'nd_range_fo': { const e = s.efis[id === 'nd_range_fo' ? 1 : 0]; e.ndRange = Math.max(0, Math.min(5, e.ndRange + dir)); return; }
       case 'nd_mode': case 'nd_mode_fo': { const e = s.efis[id === 'nd_mode_fo' ? 1 : 0]; e.ndMode = Math.max(0, Math.min(4, e.ndMode + dir)); return; }
       case 'eng_mode': s.engMode = Math.max(0, Math.min(2, s.engMode + dir)) as 0 | 1 | 2; g.pos = s.engMode; return;
@@ -685,7 +702,6 @@ export class Cockpit {
       case 'pfd_brt_cpt': case 'pfd_brt_fo': { const i = id === 'pfd_brt_fo' ? 1 : 0; s.bright.pfd[i] = clamp01(s.bright.pfd[i] + dir * 0.05); return; }
       case 'brightness_nd_2_cpt': case 'brightness_nd_2_fo': { const i = id === 'brightness_nd_2_fo' ? 1 : 0; s.bright.nd[i] = clamp01(s.bright.nd[i] + dir * 0.05); return; }
       case 'brightness_nd_1_cpt': case 'brightness_nd_1_fo': { const i = id === 'brightness_nd_1_fo' ? 1 : 0; s.bright.ndOuter[i] = clamp01(s.bright.ndOuter[i] + dir * 0.05); return; }
-      case 'ecam_brt_upper': case 'ecam_brt_lower': { const k = BRT_KNOBS[id]; s.bright[k] = Math.max(0, Math.min(1, Math.round((s.bright[k] + dir * 0.1) * 10) / 10)); return; }
       case 'ecam_att_hdg': case 'ecam_air_data': case 'ecam_eis_dmc': case 'ecam_nd_xfr': { g.pos = Math.max(0, Math.min(2, g.pos + dir)); s.switching[SRC_KNOBS[id].key] = g.pos; s.sw[id] = g.pos; this.routeDisplays(); return; }
     }
     const n = g.steps; const cont = n >= 40;
@@ -832,7 +848,7 @@ export class Cockpit {
     ax ??= this.axisOf(g);
     const th = lever ? NAV_SWITCH_SIGN * e.nav[m.fn === 'nav1' ? 1 : 0] * 0.5 : (ax.direction[0] > 0 ? -1 : 1) * (phi - (KNOB_REST_DEG[g.id] ?? 0)) * rad;
     this.rotMat(g.xf, ax.pivot[0], ax.pivot[1], ax.pivot[2], ax.direction[0], ax.direction[1], ax.direction[2], th);
-    const dz = push - g.press * 0.0015;
+    const dz = push - (m.fn === 'baro' ? (this.slideDir.get(g.id) ?? 1) * 2 : 1) * g.press * 0.0015;   // BARO: PUSH dips, PULL lifts the cap
     if (dz) { const n = g.nrm ??= this.panelNormal(g.box.getCenter(new THREE.Vector3())); this.tB.makeTranslation(n.x * dz, n.y * dz, n.z * dz); g.xf.premultiply(this.tB); }
     this.pose(g); return true;
   }
@@ -863,7 +879,12 @@ export class Cockpit {
   }
   /** Thrust-lever angle (rad) about its pivot, positive = forward. Reverse: pulled aft of IDLE by up to 20 deg. */
   private thrAngle(t: number, reverse = false) { return reverse ? -(0.17 + 0.18 * Math.min(1, Math.max(0, t))) : Math.min(1, Math.max(0, t)) * (Math.PI / 4); }
-  private animate(g: Group, inp: CockpitInputs, d: PanelData) {
+  /** +1 / -1 so that rotating by `sign * angle` about the hinge axis is a CLOCKWISE turn of `angle` as seen by the pilot (a positive turn about an axis that points at the pilot is counter-clockwise). */
+  private cwSign(g: Group): number {
+    if (g.cw !== undefined) return g.cw; const ax = this.axisOf(g), n = this.panelNormal(g.box.getCenter(new THREE.Vector3()));
+    return (g.cw = ax.direction[0] * n.x + ax.direction[1] * n.y + ax.direction[2] * n.z > 0 ? -1 : 1);
+  }
+  private animate(g: Group, inp: CockpitInputs, _d: PanelData) {
     const s = this.sys, ctl = this.host?.fm.ctl;
     if (EFIS_MAP[g.id] && this.animateEfis(g)) return;
     switch (g.id) {
@@ -887,7 +908,12 @@ export class Cockpit {
     }
     if (/Rudder(Pedal)/.test(g.id)) return;
     const t = g.kind === 'knob' || g.id === 'spd-sel' || g.id === 'hdg_sel' || g.id === 'alt-sel' || g.id === 'vs-sel';
-    if (t) { const n = g.steps; const a = n >= 40 ? g.angle + g.pos * 0.26 : n >= 12 ? (g.pos - (n - 1) / 2) * (4.71 / (n - 1)) : ((g.pos - (n - 1) / 2) * (n <= 3 ? 0.7 : 0.5)); /* 270° sweep for 12-detent dimmers / temperature knobs */ return this.setRot(g, a + (g.id === 'hdg_sel' ? (d.apHdg * Math.PI / 180) : g.id === 'alt-sel' ? d.apAlt / 100 * 0.26 : g.id === 'spd-sel' ? d.apSpd * 0.26 : 0)); }
+    if (t) {
+      const n = g.steps, th = this.cwSign(g) * (n >= 40 ? g.angle /* 32-click encoders: the pose follows the clicks, never the value */ : n >= 12 ? (g.pos - (n - 1) / 2) * (4.71 / (n - 1)) /* 270 deg sweep, 12-detent dimmers / temperature knobs */ : (g.pos - (n - 1) / 2) * (n <= 3 ? 0.7 : 0.5));
+      const ax = this.axisOf(g); this.rotMat(g.xf, ax.pivot[0], ax.pivot[1], ax.pivot[2], ax.direction[0], ax.direction[1], ax.direction[2], th);
+      if (PUSHPULL.has(g.id) && g.press > 0) { const nr = g.nrm ??= this.panelNormal(g.box.getCenter(new THREE.Vector3())), dz = -(this.slideDir.get(g.id) ?? 1) * g.press * 0.0035; this.tB.makeTranslation(nr.x * dz, nr.y * dz, nr.z * dz); g.xf.premultiply(this.tB); }   // PUSH = into the panel, PULL = out
+      this.pose(g); return;
+    }
     if (g.kind === 'switch') { const n = SWITCH3.has(g.id) || /^audio_int_rad/.test(g.id) ? 3 : 2; return this.setRot(g, this.leverSign(g) * (g.pos - (n - 1) / 2) * (n === 2 ? 0.8 : 0.42)); }
     if (g.kind === 'guard') return this.setRot(g, g.pos ? 1.7 : 0);
     // overhead pb-sw: engaged (ON / AUTO) = flush IN, released (OFF) = 3.5 mm OUT; pressing adds 2 mm travel. Momentary keys only move while held.
@@ -963,7 +989,7 @@ export class Cockpit {
     this.lastInp = inp; const h = this.host, s = this.sys; this.frameNo++; this.dtA = dt;
     s.update(dt, h, data); this.syncFcu(dt, h, data);
     this.ctx.d = data; this.ctx.host = h; this.ctx.t = time; this.ctx.utc = new Date(simNowMs());
-    for (const m of this.mcdu) m.attach(h);
+    for (const m of this.mcdu) { m.attach(h); m.ctx = this.ctx; m.tick(dt); }
     // lighting (day/night)
     const dl = this.daylight; this.hemi.intensity = 0.55 + 1.5 * dl + (1 - dl) * (0.9 * s.bright.flood + [0, 0.25, 0.7][this.groups.get('DomeLtSwtch')?.pos ?? 0]);   // DOME lt DIM / BRT (panel / flood lights at night)
     this.sun.intensity = 1.6 * dl;
@@ -978,6 +1004,7 @@ export class Cockpit {
     this.updateFcuInd(s, data);
     // animation – every control is posed about its own pivot axis; static switches / buttons are only re-posed when their state changes
     this.syncEfisGroups();
+    for (const id in BRIGHT_KNOBS) { const bg = this.groups.get(id); if (bg) bg.pos = Math.round(this.clampN(BRIGHT_KNOBS[id].get(s), 0, 1) * 11); }
     for (const g of this.animOrder) {
       if (g.ovh && !g.mom) g.pos = this.stateOn(g.id) ? 1 : 0;   // pose always follows the real system state
       if (g.still) { const k = g.pos * 7 + g.press * 13 + g.angle * 3; if (k === g.lastKey) { if (g.press > 0 && !this.active) g.press = Math.max(0, g.press - dt * 6); continue; } g.lastKey = k; }

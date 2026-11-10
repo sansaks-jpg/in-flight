@@ -17,6 +17,8 @@ export interface CockpitHost {
   /** Fix the active leg starts from (null on the first leg): lets the ND draw the LEG the autopilot flies, not just a line to the TO fix. */
   legFrom?(): { lat: number; lon: number } | null;
   position(): { lat: number; lon: number };
+  /** MCDU DIR TO: make route waypoint `routeIndex` (0 = the current TO fix, as listed by route()) the active leg. Returns false when it does not exist. */
+  directTo?(routeIndex: number): boolean;
   magVar(hdg: number): number;
   /** Live flight data for the captain's EFB tablet. */
   efbInfo?(): import('./efb').EfbInfo | null;

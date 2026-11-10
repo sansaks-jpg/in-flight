@@ -860,6 +860,7 @@ export class Game {
       route: () => g.flightPlan.slice(Math.max(0, g.activeWpIdx)).map((w) => ({ name: w.name, lat: w.lat, lon: w.lon })),
       legFrom: () => { const w = g.flightPlan[g.activeWpIdx - 1]; return w && g.activeWpIdx > 0 ? { lat: w.lat, lon: w.lon } : null; },
       position: () => ({ lat: g.lat(), lon: g.lon() }), magVar: (h: number) => g.magHdg(h) - h,
+      directTo: (k: number) => { const i = g.activeWpIdx + k; if (k < 0 || i >= g.flightPlan.length) return false; g.activeWpIdx = i; return true; },
       efbInfo: () => g.efbInfo(),
       terrainFt: (lat: number, lon: number) => (g.world ? g.world.terrain.heightAt(g.world.proj.x(lon), g.world.proj.z(lat)) / 0.3048 : 0),
     };

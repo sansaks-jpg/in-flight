@@ -3,7 +3,7 @@
 // Every renderer works in a 1000 x 1000 (or W x H) virtual space so textures can be any resolution.
 import type { PanelData } from '../instruments';
 import type { A320Systems, CockpitHost, EcamPage } from './systems';
-import { speeds } from './efisDisplays';
+import type { Mcdu } from './mcdu';
 import { atmosphere } from '../physics';
 
 type G = CanvasRenderingContext2D;
@@ -96,90 +96,8 @@ export function drawSD(g: G, W: number, H: number, c: Ctx) {
 }
 const spec0 = (c: Ctx) => c.host.fm.spec;
 
-// =============================================================== MCDU
-export class Mcdu {
-  page = 'MENU'; scratch = ''; msg = ''; sub = 0;
-  /** Screen brightness 0.15..1, stepped by the BRT / DIM keys. */
-  brt = 1;
-  store = { flt: 'IFL320', crz: 350, ci: 35, v1: 0, vr: 0, v2: 0, flex: 55, zfw: 62.5, block: 0, fuelRes: 2.4, trans: 5000, toConf: 1, qnh: 1013 };
-  private host?: CockpitHost;
-  attach(h: CockpitHost) { this.host = h; }
-  private setMsg(m: string) { this.msg = m; setTimeout(() => { if (this.msg === m) this.msg = ''; }, 3500); }
-  /** Key names follow the 3D model: a.cpt … z.cpt, 0-9, L1-6, R1-6, init, f-pln, radnav, fuel-pred, prog, perf, data, dir, airport, clr, sp, ... */
-  key(raw: string) {
-    const k = raw.replace(/\.(cpt|fo)$/, '');
-    if (/^[a-z]$/.test(k)) { this.add(k.toUpperCase()); return; }
-    if (/^[0-9]$/.test(k)) { this.add(k); return; }
-    switch (k) {
-      case '.': this.add('.'); return; case '/': this.add('/'); return;
-      // +/- : appends '-', then toggles the sign character at the end of the scratchpad ('-' <-> '+')
-      case '+/-': { const l = this.scratch.slice(-1); if (l === '-') this.scratch = this.scratch.slice(0, -1) + '+'; else if (l === '+') this.scratch = this.scratch.slice(0, -1) + '-'; else this.add('-'); return; }
-      case 'sp': this.add(' '); return;
-      case 'clr': if (this.msg) this.msg = ''; else this.scratch = this.scratch.slice(0, -1); return;
-      case 'BRT': this.brt = Math.min(1, +(this.brt + 0.15).toFixed(2)); return; case 'DIM': this.brt = Math.max(0.15, +(this.brt - 0.15).toFixed(2)); return;
-      case 'init': this.page = 'INIT'; this.sub = 0; return; case 'f-pln': this.page = 'F-PLN'; this.sub = 0; return; case 'f-pln2': this.page = 'SEC'; this.sub = 0; return;
-      case 'radnav': this.page = 'RADNAV'; this.sub = 0; return; case 'fuel-pred': this.page = 'FUEL'; this.sub = 0; return;
-      case 'prog': this.page = 'PROG'; this.sub = 0; return; case 'perf': this.page = 'PERF'; this.sub = 0; return; case 'data': this.page = 'DATA'; this.sub = 0; return;
-      case 'dir': this.page = 'DIR'; this.sub = 0; return; case 'airport': this.page = 'AIRPORT'; this.sub = 0; return; case 'menu': this.page = 'MENU'; this.sub = 0; return;
-      // F-PLN scrolls with the arrow keys; the other pages have a single screen, so the keys are accepted and do nothing
-      case 'up': case 'left': if (this.page === 'F-PLN') this.sub = Math.max(0, this.sub - 1); return;
-      case 'down': case 'right': if (this.page === 'F-PLN') this.sub = Math.min(Math.max(0, this.host ? this.host.route().length - 1 : 0), this.sub + 1); return;
-      case 'overfly': case 'opt1': case 'opt2': return; // no overfly / PERF-option behaviour is modelled
-    }
-    const m = /^([LR])([1-6])$/.exec(k); if (m) this.lsk(m[1] as 'L' | 'R', +m[2]);
-  }
-  private add(ch: string) { if (this.scratch.length < 22) this.scratch += ch; }
-  private take(): string { const s = this.scratch; this.scratch = ''; return s; }
-  private num(s: string) { const n = parseFloat(s); return Number.isFinite(n) ? n : NaN; }
-  private lsk(side: 'L' | 'R', n: number) {
-    const st = this.store, h = this.host; if (!h) return;
-    const input = this.scratch;
-    if (this.page === 'MENU') { const t = ['', 'INIT', 'F-PLN', 'PERF', 'PROG', 'DATA', 'RADNAV'][n]; if (side === 'L' && t) this.page = t; return; }
-    if (this.page === 'INIT') {
-      if (side === 'L' && n === 2 && input) { st.flt = this.take().slice(0, 8); return; }
-      if (side === 'R' && n === 1 && input) { const v = this.num(input.replace(/^FL/i, '')); if (v >= 100 && v <= 390) { st.crz = v; this.take(); h.setApTarget('alt', v * 100); } else this.setMsg('ENTRY OUT OF RANGE'); return; }
-      if (side === 'L' && n === 5 && input) { const v = this.num(input); if (v >= 0 && v <= 200) { st.ci = v; this.take(); } else this.setMsg('ENTRY OUT OF RANGE'); return; }
-      if (side === 'R' && n === 3 && input) { const v = this.num(input); if (v > 0) { st.zfw = v; this.take(); } return; }
-      if (side === 'R' && n === 5) { this.page = 'PERF'; return; }
-    }
-    if (this.page === 'PERF') {
-      const set = (key: 'v1' | 'vr' | 'v2') => { if (!input) return; const v = this.num(input); if (v >= 90 && v <= 200) { st[key] = v; this.take(); } else this.setMsg('ENTRY OUT OF RANGE'); };
-      if (side === 'L' && n === 1) set('v1'); if (side === 'L' && n === 2) set('vr'); if (side === 'L' && n === 3) set('v2');
-      if (side === 'R' && n === 3 && input) { const v = this.num(input); if (v >= 0 && v <= 70) { st.flex = v; this.take(); } }
-      return;
-    }
-    if (this.page === 'F-PLN' && side === 'L' && n >= 1) { const rt = h.route(); const w = rt[this.sub + n - 2]; if (w && !input) { this.setMsg(`${w.name} SELECTED`); } return; }
-    if (input && this.page !== 'MENU') this.setMsg('NOT ALLOWED');
-  }
-  draw(g: G, W: number, H: number, c: Ctx) {
-    g.setTransform(W / 1000, 0, 0, H / 1000, 0, 0); g.fillStyle = '#04070b'; g.fillRect(0, 0, 1000, 1000);
-    if (!c.sys.ac && !c.sys.acEss) return;
-    const d = c.d, st = this.store, L = (i: number) => 76 + i * 64;
-    const row = (i: number, l: string, r = '', cl = C.green, cr = C.green) => { T(g, l, 30, L(i), 40, cl, 'left', M); T(g, r, 970, L(i), 40, cr, 'right', M); };
-    const small = (i: number, l: string, r = '') => { T(g, l, 30, L(i) - 32, 26, C.white, 'left', M); T(g, r, 970, L(i) - 32, 26, C.white, 'right', M); };
-    const title = (s: string, sub = '') => { T(g, s, 500, 36, 44, C.white, 'center', M); if (sub) T(g, sub, 970, 36, 30, C.white, 'right', M); };
-    const fp = c.host.route(); const brk = '[ ]';
-    switch (this.page) {
-      case 'MENU': title('MCDU MENU'); row(1, '<INIT', ''); row(2, '<F-PLN', ''); row(3, '<PERF', ''); row(4, '<PROG', ''); row(5, '<DATA', ''); row(6, '<RAD NAV'); T(g, 'FMGC', 970, 76, 30, C.white, 'right', M); break;
-      case 'INIT': title('INIT', 'A'); small(1, 'CO RTE', 'FROM/TO'); row(1, '------------', c.host.route().length ? `${d.dest?.id ?? '----'}` : '----/----'); small(2, 'FLT NBR', 'ALTN/CO RTE'); row(2, st.flt, '----/---------', C.cyan); small(3, '', 'INIT REQUEST'); small(4, 'LAT', 'CRZ FL/TEMP'); row(1 + 0, '', ''); row(4, '----.-/-----.-', ''); T(g, `FL${st.crz}/${Math.round(-56.5 + 0)}°`, 970, L(1) + 0, 1, C.cyan); T(g, `FL${st.crz}`, 970, L(1) + 32, 40, C.cyan, 'right', M); small(5, 'COST INDEX', 'TROPO'); row(5, String(st.ci), '36090', C.cyan); small(3, 'ZFW/ZFWCG', ''); row(3, '', `${st.zfw.toFixed(1)}/ 25.0`, C.green, C.cyan); row(6, '', 'ALIGN IRS>', C.cyan, C.cyan); break;
-      case 'F-PLN': { title('F-PLN', ''); T(g, `FROM`, 30, 76, 26, C.white, 'left', M); const pos = c.host.position(); void pos; row(1, d.dest ? 'PPOS' : '----', d.altFt > 0 ? `${pad(d.hdg, 3)}°` : '', C.white, C.green);
-        const items = fp.slice(this.sub, this.sub + 5); items.forEach((w, i) => row(2 + i, w.name, i === 0 ? 'TO' : '', i === 0 ? C.mag : C.green, C.white)); if (!items.length) { row(2, '-----END OF F-PLN-----', '', C.white); row(3, '', ''); } else row(2 + items.length, '-----END OF F-PLN-----', '', C.white); break; }
-      case 'PERF': title('TAKE OFF', ''); small(1, 'V1', 'FLAP/THS'); row(1, st.v1 ? String(st.v1) : brk, `${['0', '1', '2', '3', 'FULL'][c.host.fm.ctl.flapsIdx]}/UP0.0`, st.v1 ? C.cyan : C.cyan, C.cyan); small(2, 'VR', 'FLEX TO TEMP'); row(2, st.vr ? String(st.vr) : brk, `${st.flex}°`, C.cyan, C.cyan); small(3, 'V2', 'ENG OUT ACC'); row(3, st.v2 ? String(st.v2) : brk, '1500/1500', C.cyan, C.cyan); small(4, 'TRANS ALT', 'THR RED/ACC'); row(4, String(st.trans), '1500/1500', C.cyan, C.cyan); small(5, 'GW', 'VAPP');
-        row(5, `${(c.host.fm.totalMass / 1000).toFixed(1)}`, `${d.vSpeeds ? Math.round(d.vSpeeds.vapp) : Math.round(speeds(c.host).vls + 5)}`, C.green, C.green); row(6, '<PHASE', 'NEXT PHASE>', C.white, C.white); break;
-      case 'PROG': title('PROG', 'FL' + Math.round(d.altFt / 100)); small(1, 'CRZ', 'OPT   REC MAX'); row(1, `FL${st.crz}`, '', C.cyan); small(2, 'TO', 'DIST    EFOB'); row(2, d.dest?.id ?? '----', `${d.dest ? d.dest.distNm.toFixed(0) : '---'}   ${(c.host.fm.fuel / 1000).toFixed(1)}`, C.green, C.green); small(3, 'BRG/DIST', ''); row(3, d.activeWp ? `${d.activeWp.name}` : '----', d.activeWp ? `${d.activeWp.distNm.toFixed(0)}NM` : ''); small(4, 'XTK ERROR', 'ETA'); row(4, '0.0', d.dest ? `${pad((c.utc.getUTCHours() + Math.floor((d.dest.eteMin + c.utc.getUTCMinutes()) / 60)) % 24, 2)}${pad((c.utc.getUTCMinutes() + d.dest.eteMin) % 60, 2)}` : '----'); break;
-      case 'RADNAV': title('RADIO NAV'); small(1, 'VOR1/FREQ', 'FREQ/VOR2'); row(1, '---/--.--', '--.--/---', C.cyan, C.cyan); small(2, 'CRS', 'CRS'); row(2, '---', '---', C.cyan, C.cyan); small(3, 'LS /FREQ', ''); row(3, d.ils?.valid ? `${d.ils.ident}/ ---` : '[ ]/[  ]', '', C.mag); small(4, 'CRS', ''); row(4, d.ils?.valid ? pad(d.apHdg, 3) : '---', '', C.cyan); break;
-      case 'FUEL': title('FUEL PRED'); small(1, 'AT', 'EFOB'); row(1, d.dest?.id ?? '----', `${(c.host.fm.fuel / 1000 - 1.2).toFixed(1)}`); small(2, 'FOB', 'FLOW'); row(2, `${(c.host.fm.fuel / 1000).toFixed(1)}`, `${Math.round(c.host.fm.fuelFlow * 3600)} KG/H`); small(3, 'RTE RSV', 'FINAL'); row(3, '0.6', '2.4', C.cyan, C.cyan); break;
-      case 'DATA': title('DATA INDEX'); row(1, '<POSITION MONITOR'); row(2, '<IRS MONITOR'); row(3, '<GPS MONITOR'); row(4, '<A/C STATUS'); T(g, 'A320-214 CFM56-5B4/P', 500, L(5), 30, C.white, 'center', M); T(g, 'IRS ' + (c.sys.sw['IR1ModeKnb'] === 0 ? 'OFF' : 'NAV'), 500, L(6), 30, C.green, 'center', M); break;
-      case 'DIR': title('DIR TO'); row(1, '[    ]', '', C.cyan); fp.slice(0, 4).forEach((w, i) => row(2 + i, w.name, '', C.green)); break;
-      case 'SEC': title('SEC F-PLN'); row(1, '<COPY ACTIVE'); row(2, '<INIT', ''); T(g, 'SECONDARY F-PLN NOT CREATED', 500, L(4), 30, C.white, 'center', M); break;
-      case 'AIRPORT': title('AIRPORT'); row(1, d.dest?.id ?? '----', d.dest?.name?.slice(0, 18) ?? '', C.green, C.white); break;
-    }
-    // scratchpad
-    T(g, this.msg || this.scratch + (Math.floor(c.t * 2) % 2 ? '_' : ' '), 30, 930, 42, this.msg ? C.amber : C.white, 'left', M);
-    line(g, 20, 895, 980, 895, '#223', 2);
-    if (this.brt < 1) { g.fillStyle = `rgba(0,0,0,${(1 - this.brt) * 0.85})`; g.fillRect(0, 0, 1000, 1000); }
-  }
-}
+// =============================================================== MCDU (see mcdu.ts)
+export { Mcdu } from './mcdu';
 
 // =============================================================== ISIS / FCU / clock
 // ISIS horizon: bank > 0 = right wing down → the horizon turns counter-clockwise, i.e. rotate(-bank), exactly like the PFD.
